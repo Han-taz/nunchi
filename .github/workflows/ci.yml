@@ -320,6 +320,162 @@ jobs:
         with:
           category: /language:actions
 
+  app-lint:
+    name: app-lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.22"
+          enable-cache: false
+      - name: Install the locked environment
+        run: uv sync --locked
+      - name: ruff lint
+        run: uv run ruff check
+      - name: ruff format
+        run: uv run ruff format --check
+      - name: mypy --strict
+        run: uv run mypy --strict src tests
+      - name: deptry
+        run: uv run deptry .
+
+  app-tests:
+    name: app-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.22"
+          enable-cache: false
+      - name: Install the locked environment
+        run: uv sync --locked
+      - name: pytest (warnings are errors, 100% coverage of the skeleton)
+        env:
+          NUNCHI_TEST_ADMIN_URL: ${{ env.PG_URL }}
+        run: uv run pytest
+      - name: diff-cover (80% of changed lines)
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: uv run diff-cover coverage.xml --compare-branch="$PR_BASE" --fail-under=80
+
+  app-mutation:
+    name: app-mutation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.22"
+          enable-cache: false
+      - name: Install the locked environment
+        run: uv sync --locked
+      - name: mutmut on changed modules (pull request) or every module (otherwise)
+        env:
+          NUNCHI_TEST_ADMIN_URL: ${{ env.PG_URL }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: scripts/ci/mutation-gate.sh "$PR_BASE" 80
+
+  app-audit:
+    name: app-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.22"
+          enable-cache: false
+      - name: Install the locked environment
+        run: uv sync --locked
+      - name: pip-audit (any known vulnerability fails)
+        run: uv export --locked --all-groups --no-emit-project | uv run pip-audit -r /dev/stdin --require-hashes --disable-pip
+
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.22"
+          enable-cache: false
+      - name: Install the locked environment
+        run: uv sync --locked
+      - name: Semgrep rules test
+        run: cd .semgrep && uv run semgrep --test --metrics=off .
+      - name: Semgrep scan
+        run: >-
+          uv run semgrep scan --metrics=off --error
+          --config p/python --config p/secrets --config .semgrep/sql-injection.yml src tests
+
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image (scanning and SBOM arrive with the release pipeline)
+        run: docker build --tag nunchi:ci .
+
   ci-gate:
     name: ci-gate
     if: always()
@@ -335,6 +491,12 @@ jobs:
       - commits
       - pr-size
       - codeql
+      - app-lint
+      - app-tests
+      - app-mutation
+      - app-audit
+      - semgrep
+      - docker-build
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}

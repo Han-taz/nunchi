@@ -1,0 +1,16 @@
+rules:
+  - id: nunchi-formatted-sql-in-execute
+    languages: [python]
+    severity: ERROR
+    message: >-
+      SQL built with an f-string, %-formatting, str.format or concatenation is passed to
+      execute(). Pass parameters as the second argument, or compose with psycopg.sql.
+    pattern-either:
+      - pattern: $CONN.execute(f"...", ...)
+      - pattern: $CONN.execute("..." % $ARGS, ...)
+      - pattern: $CONN.execute("...".format(...), ...)
+      - pattern: $CONN.execute("..." + $X, ...)
+      - pattern: $CONN.executemany(f"...", ...)
+      - pattern: $CONN.executemany("..." % $ARGS, ...)
+      - pattern: $CONN.executemany("...".format(...), ...)
+      - pattern: $CONN.executemany("..." + $X, ...)

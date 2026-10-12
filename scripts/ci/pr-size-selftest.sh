@@ -62,6 +62,11 @@ lock_with_manifest() {
   seq 1 5000 > .github/tools/package-lock.json
   echo '{}' > .github/tools/package.json
 }
+uv_lock_without_manifest() { seq 1 5000 > uv.lock; }
+uv_lock_with_manifest() {
+  seq 1 5000 > uv.lock
+  echo '[project]' > pyproject.toml
+}
 
 case_ "800 lines" 0 lines_800
 case_ "801 lines" 1 lines_801 "Split the PR"
@@ -73,4 +78,6 @@ case_ "5000-line .md under docs/research" 0 research_md
 case_ "binary png" 0 png
 case_ "5000-line lock file without its manifest" 1 lock_without_manifest "Split the PR"
 case_ "5000-line lock file with its manifest" 0 lock_with_manifest
+case_ "5000-line uv.lock without pyproject.toml" 1 uv_lock_without_manifest "Split the PR"
+case_ "5000-line uv.lock with pyproject.toml" 0 uv_lock_with_manifest
 echo "pr-size self-test ok"

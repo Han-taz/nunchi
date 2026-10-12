@@ -9,6 +9,7 @@
 #   docs/research/** and docs/reviews/**   *.md only is exempt (reference prose)
 #   lock files                             exempt only when the manifest it is
 #                                          generated from changed in the same PR
+#                                          (uv.lock needs pyproject.toml)
 #   png jpg gif svg pdf ico                count as BINARY_LINES each
 #   any other binary file                  fails the job
 #
@@ -45,6 +46,7 @@ result=$(git -c core.attributesFile=/dev/null --attr-source="$empty_tree" \
           name = substr(path, length(".github/tools/") + 1)
           if (name in lock && (".github/tools/" lock[name]) in changed) continue
         }
+        if (path == "uv.lock" && "pyproject.toml" in changed) continue
         if (add[i] == "-") {
           if (path ~ /\.(png|jpg|gif|svg|pdf|ico)$/) { sum += binary_lines; continue }
           print "BINARY " path

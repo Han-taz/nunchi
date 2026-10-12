@@ -26,6 +26,12 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 | `commits` | PR 범위의 모든 커밋이 conventional commit 형식인지, 병합 커밋이 없는지, AI 공동 저자 표기(`Co-Authored-By:` Claude/Anthropic 등, "Generated with Claude")가 없는지 검사한다. 스크립트: `scripts/ci/check-commits.sh`. | 히스토리를 선형으로 읽히게 하고, 이 저장소의 커밋 정책을 강제한다. |
 | `pr-size` | 변경이 800줄(추가+삭제)을 넘으면 실패한다. 저장소 속성(`.gitattributes`)은 무시하고 센다. 면제는 셋뿐이다. (1) `docs/research/**`와 `docs/reviews/**`의 `*.md`(다른 확장자는 센다), (2) 잠금 파일(`.github/tools/package-lock.json`, `.github/tools/requirements.txt`)은 같은 PR에서 원본 매니페스트(`package.json`, `requirements.in`)가 함께 바뀐 경우에만, (3) 바이너리 허용 목록(png, jpg, gif, svg, pdf, ico)은 파일당 50줄로 센다. 허용 목록에 없는 바이너리는 실패한다. 스크립트: `scripts/ci/pr-size.sh`. | 리뷰 가능한 크기를 유지한다. 경로나 속성으로 파일을 숨길 수 없게 한다. |
 | `codeql` | CodeQL, 언어 `actions`. | 워크플로의 알려진 취약 패턴을 GitHub의 쿼리로 한 번 더 본다. |
+| `app-lint` | `ruff check`(규칙: E F W I S B UP SIM PL RUF ANN), `ruff format --check`, `mypy --strict src tests`, `deptry`. | 타입과 스타일, 선언되지 않았거나 쓰지 않는 의존성을 기계로 고정한다. |
+| `app-tests` | `postgres:16` 서비스에 대해 `pytest`를 `-W error`(경고는 오류)로 돌린다. 스켈레톤 전체 커버리지 100%(분기 포함)가 아니면 실패하고, PR에서는 `diff-cover`로 변경된 줄의 80%를 추가로 요구한다. | 앱 코드가 늘어도 변경분이 테스트 없이 들어오지 못하게 한다. |
+| `app-mutation` | `mutmut`. PR에서는 변경된 `src/nunchi` 모듈만, 그 밖의 실행(push, 스케줄)에서는 전부 돌려 죽인 뮤턴트 비율이 80% 미만이면 실패한다(timeout은 죽인 것으로 센다). 스크립트: `scripts/ci/mutation-gate.sh`. | 커버리지만으로는 단언 없는 테스트를 못 잡는다. |
+| `app-audit` | `uv export`로 잠금 파일의 전체 의존성(개발 그룹 포함)을 뽑아 `pip-audit`로 검사한다. 알려진 취약점이 하나라도 있으면 실패한다. | 공급망 취약점은 예외 없이 막는다. |
+| `semgrep` | `p/python`, `p/secrets`와 자체 규칙 `.semgrep/sql-injection.yml`(f-string, `%`, `.format`, `+`로 만든 SQL을 `execute`/`executemany`에 넘기면 실패). 자체 규칙은 `.semgrep/sql-injection.py`의 `ruleid`/`ok` 주석으로 먼저 테스트한다. | 파라미터 바인딩을 우회하는 SQL 조립을 기계로 금지한다. |
+| `docker-build` | `Dockerfile`(멀티 스테이지, slim, 비루트 uid 10001, 기본 이미지와 uv는 다이제스트 고정)이 빌드되는지만 본다. | Trivy와 SBOM은 릴리스 파이프라인(U14)에서 켠다. |
 | `ci-gate` | 위 job 전부를 `needs`로 걸고 `if: always()`로 돈다. 하나라도 `success`가 아니면(실패, 취소, **건너뜀** 포함) 실패한다. | 브랜치 보호에는 이 체크 하나만 등록하면 된다. job을 추가해도 보호 설정을 바꿀 필요가 없다. |
 | `external-links` | 스케줄 실행에서만 `lychee`로 외부 링크를 검사한다. 429는 허용한다. | 외부 사이트는 일시적으로 죽는다. PR을 막지 않고 매일 한 번만 확인한다. `ci-gate`에는 포함되지 않는다. |
 
@@ -75,6 +81,8 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 | markdownlint | `MD025` 설정 `front_matter_title: ""` | YAML front matter의 `title`과 본문 H1이 함께 있는 것이 의도다. |
 | typos | 단어 `anc`, `EHR`, `NAMS`, `RTO`, `LAF`, `IIT`, `FPR` | 논문 약어와 기호다(ancestor 함수, 전자건강기록, Neo4j Agent Memory Service 등). |
 | gitleaks | 정규식 `family/partner`, 파일 `gatemem-2606.18829.md` | 벤치마크 설명의 산문이 `generic-api-key` 규칙에 걸린다. |
+| ruff | `tests/**`에서 `S101`(assert), `PLR2004`(매직 값) | assert는 테스트의 문법이고, 기대값 리터럴이 곧 단언이다. |
+| ruff | 파일 제외: `.semgrep/` | Semgrep 규칙 테스트 픽스처는 일부러 나쁜 SQL을 담고 있고 타입 주석이 필요 없다. |
 | shellcheck | 없음 (`-S style`) | |
 | zizmor | 없음 (기본 persona, 온라인) | |
 
@@ -84,19 +92,19 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 
 도구 의존성에는 `npm audit`가 보고하는 알려진 취약점(개발용 린터의 파서 DoS)이 있다. 신뢰하는 입력에만 돌리고 산출물에 들어가지 않으므로 게이트로 삼지 않았다.
 
-## 애플리케이션 코드가 들어오면 켤 게이트
+## 앱 게이트 (활성)
 
-지금 저장소에는 애플리케이션 코드가 없어서 아래 게이트는 적용 대상이 없다. 코드가 들어오는 PR에서 같은 방식으로(실제로 도는 것만, `ci-gate`의 `needs`에 추가) 켠다.
+위 표의 `app-*`, `semgrep`, `docker-build`가 애플리케이션 코드 게이트다. 도구는 `uv.lock`(`uv sync --locked`)로만 설치한다. 로컬에서는 `uv sync --locked`로 CI와 같은 환경을 만든다.
+
+- `pr-size`: `uv.lock`은 같은 PR에서 `pyproject.toml`이 바뀐 경우에만 면제다. 다른 잠금 파일과 같은 이유(생성 파일, 리뷰어는 매니페스트를 본다)다.
+- `app-tests`의 100% 커버리지는 스켈레톤이 작을 때의 기준이다. 코드가 늘면 `fail_under`를 낮추지 말고 diff-cover 80%를 주 게이트로 삼을지 별도 PR에서 정한다. `if __name__ == "__main__"` 줄만 커버리지에서 제외한다.
+
+## 아직 적용 대상이 없는 게이트
 
 | 게이트 | 도구 | 기준 |
 |---|---|---|
-| diff coverage | diff-cover 등 | 변경된 줄의 커버리지 80% 이상 |
-| 뮤테이션 테스트 | mutmut(Python), Stryker(TypeScript) | 살아남은 뮤턴트가 임계 이하 |
-| 속성 기반 RLS 테스트 | Hypothesis | 임의의 user/agent/grant 조합에서 "실효 권한 = 교집합" 불변식 |
-| 의존성 취약점 | pip-audit, osv-scanner | 알려진 취약점이 있으면 실패 |
-| 미사용/누락 의존성 | deptry | 선언과 import가 어긋나면 실패 |
-| SAST | Semgrep | 규칙 위반 시 실패 |
 | 컨테이너/이미지 스캔 | Trivy | 높음 이상 취약점 시 실패 |
 | SBOM과 서명 | Syft로 SBOM 생성, cosign으로 서명 | 릴리스 산출물에 첨부 |
 | 성능 회귀 | 벤치마크 비교 | RLS 정책 비용(`count(*)` 등)이 기준 대비 악화되면 실패 |
 | API 호환성 | OpenAPI breaking-change 검사 | 하위 호환을 깨는 변경 시 실패 |
+| 뮤테이션 테스트(TypeScript) | Stryker | TypeScript 코드가 생기면 켠다 |
