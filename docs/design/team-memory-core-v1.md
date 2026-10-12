@@ -93,15 +93,17 @@ DB 수준에서 거는 제약
 1. API가 요청마다 토큰을 검증한 뒤, 트랜잭션 시작 시 `app_sec.begin_request(user, agent)`를 호출한다. 함수가 principal의 종류(user/agent)·활성·테넌트를 DB에서 다시 검증하고, 값을 트랜잭션 로컬로 설정하면서 현재 xid에 묶는다. 세션 레벨 `SET`이나 풀러 연결에 남은 값은 xid가 맞지 않아 읽히지 않는다(컨텍스트 없음 = 권한 없음). **store나 사용자를 모델이 파라미터로 고르지 않는다.** 모델은 store slug를 고를 수 있지만, 권한은 DB가 다시 판정한다.
 2. RLS 정책
    - 읽기: 실효 권한이 reader 이상이고 `tenant_id`가 요청의 테넌트와 같을 때. proposed는 대리된 사용자 본인(`coalesce(on_behalf_of, created_by)`)과 curator만 본다. 같은 에이전트를 쓰는 다른 사용자는 남의 proposed를 보지 못한다. rejected와 deleted는 curator만 본다.
-   - INSERT: contributor 이상이고 status가 proposed일 때만. 작성자는 DB가 바인딩한다: `created_by` = 에이전트(없으면 사용자), `on_behalf_of` = 에이전트일 때만 사용자, `tenant_id` = 요청의 테넌트.
-   - UPDATE: curator만.
+   - INSERT: contributor 이상. 작성자는 BEFORE INSERT 트리거가 요청에 묶는다: `created_by` = 에이전트(없으면 사용자), `on_behalf_of` = 에이전트일 때만 사용자, `tenant_id` = 요청의 테넌트. NULL은 채우고 다른 값은 `42501`로 거부한다. status는 `proposed`, version은 1로, `content_hash`는 서버 비밀키 HMAC으로 덮어쓴다(클라이언트가 `active`나 해시를 보내도 무시). 삭제된 내용의 재제안은 `23505`, `supersedes_id`는 같은 store의 읽을 수 있는 active 행만 허용하고 `memory://` 근거는 읽을 수 있는 행만 허용한다(없는 행과 못 읽는 행은 모두 `23503`이라 존재 여부가 새지 않는다). 근거 중 하나라도 external이면 파생 메모리도 external이다.
+   - UPDATE: curator만. BEFORE UPDATE 트리거가 불변 컬럼(`store_id`, `kind`, `created_by`, `on_behalf_of` 등), origin 단방향(external→internal 금지), `memory_transition` 표에 있는 상태 전이만, 본문 편집은 proposed/active에서만 허용한다. 모든 UPDATE는 version을 1 올리고, 삭제는 본문을 NULL, 제목을 `[deleted]`로 바꾼다. 위반은 `P0001`.
    - 실효 권한은 `app_sec.my_store_roles()`가 계산한다. 정책은 `store_id IN (SELECT ...)`로 쓰므로 행마다가 아니라 요청당 한 번 평가된다(10만 행 `count(*)`가 로컬에서 약 35ms. v1.0 정책은 같은 조건에서 약 3.8초).
    - 테넌트 경계는 복합 FK가 지킨다: `store(tenant_id, id)`, `principal(tenant_id, id)`를 `store_grant`와 `memory`가 (tenant_id, …)로 참조하므로 교차 테넌트 grant나 memory 행은 소유자 권한으로도 만들 수 없다.
-   - memory_version, review: 부모 memory가 보일 때만 보인다(memory의 RLS 승계). 기록은 contributor 이상(review의 approve/reject는 curator), actor는 호출 주체 본인. redact는 curator만.
+   - memory_version, review: 부모 memory가 보일 때만 보인다(memory의 RLS 승계). 앱(`app_rw`)은 쓰지 못한다. 버전은 memory 트리거만 기록하고, 삭제 때 과거 snapshot을 전부 redact한다. review 기록은 이후 승인 함수가 맡는다.
+   - deleted_hash: 해당 store의 curator만 읽는다. 쓰기는 삭제 트리거만. contributor의 재제안 검사는 `app_sec.is_deleted_content()`(SECURITY DEFINER)가 대신하고, 해시는 평문 sha256이 아니라 서버 비밀키 HMAC이라 추측 오라클이 되지 않는다.
 3. API는 RLS를 우회하지 않는 전용 DB 역할(`app_rw`: `LOGIN NOBYPASSRLS NOINHERIT`, 최소 권한)로 **직접** 접속한다. 테이블과 SECURITY DEFINER 함수의 소유자는 접속에 쓰지 않는 별도 역할(운영에서는 `NOLOGIN` 인 `app_owner`)이고, RLS 테이블에는 `FORCE ROW LEVEL SECURITY`가 걸려 있다. 관리 작업(SCIM 동기화, worker)만 별도 역할을 쓴다. 스모크 테스트의 `SET ROLE app_rw`는 테스트 전용이다. superuser로 접속해 `SET ROLE`하는 구조는 SQL 인젝션 한 번이 `RESET ROLE`로 이어지므로 쓰지 않는다.
-   - `app_rw` 권한: tenant/principal/group_member/store/store_grant는 SELECT만(스스로 권한 부여 불가). memory는 SELECT/INSERT/UPDATE. memory_version은 SELECT/INSERT와 `UPDATE(snapshot)`만(redact용). review, deleted_hash는 SELECT/INSERT. 역할 생성과 GRANT는 `schema.sql`에 있다.
+   - `app_rw` 권한: tenant/principal/group_member/store/store_grant/memory_transition/memory_version/review/deleted_hash는 SELECT만(스스로 권한 부여 불가, 감사 위조 불가). memory만 SELECT/INSERT/UPDATE. 역할 생성과 GRANT는 `schema.sql`에 있다.
    - fail-closed: `begin_request`를 부르지 않았거나 xid가 맞지 않으면 컨텍스트가 NULL이고 권한은 없다(오류도 권한도 아님). 비활성·group·agent id를 user 자리에 넣거나 user id를 agent 자리에 넣으면 `begin_request`가 `28000`으로 거부한다. 에이전트가 있으면 사용자·에이전트 중 한쪽이라도 grant가 없을 때 NULL이다(`least()`는 NULL을 무시하므로 명시 처리). 비활성 principal과 비활성 그룹은 권한을 주지 않는다.
    - append-only 트리거: memory_version은 snapshot→NULL(redact)만 허용하고, snapshot을 뺀 모든 컬럼(reason 포함)이 같아야 한다. review는 UPDATE/DELETE 모두 금지.
+   - 해시 체인: 각 버전 행은 `snapshot_hash`, 직전 행의 `prev_hash`, 둘을 묶은 `row_hash`를 가진다. snapshot이 redact돼도 해시는 남아 `app_sec.verify_chain(memory_id)`가 계속 검증할 수 있고, 행의 actor나 순서를 바꾸면 `false`가 된다(앵커링은 worker가 맡는다).
 4. 원천 링크에 `inherit_acl: true`가 붙은 메모리는 조회할 때 원천 시스템에서 사용자의 접근 가능 여부를 확인한다. 결과는 짧게 캐시한다. 원천에서 권한이 사라지면 메모리도 안 보인다. v1에서는 Google Drive, SharePoint, Notion 어댑터만 만든다.
 
 ### 스모크 테스트 결과 (Postgres 16, `db/tests/smoke_test.sql`)
@@ -110,7 +112,7 @@ DB 수준에서 거는 제약
 |---|---|---|
 | T1 | 영업 Alice + 영업봇이 인사 store 조회 | 0건 ✔ |
 | T2 | 영업봇이 Alice 대리로 제안 | 성공 ✔ |
-| T3 | 영업봇이 active로 바로 쓰기 | RLS 거부 ✔ |
+| T3 | 영업봇이 `status='active'`로 INSERT | 성공하되 저장된 status는 `proposed` ✔ |
 | T4 | contributor Alice가 승인 | 0건 반영 ✔ |
 | T5 | curator Carol이 승인 | 1건 반영 ✔ |
 | T6 | Carol이 영업봇과 함께 승인 시도 (봇은 contributor) | 0건, 교집합 동작 ✔ |
@@ -120,13 +122,18 @@ DB 수준에서 거는 제약
 | F3 | 비활성 Eve / group id / agent id를 user로, user id를 agent로 `begin_request` | 모두 `28000` ✔ |
 | F4 | 세션 레벨 `SET app.*` + `app.ctx_xid='1'` 후 조회 | 0건 ✔ |
 | F6 | Dave(reader)+같은 봇 / Alice 단독이 Alice의 proposed 조회 | 0건 / 1건 ✔ |
+| F5 | `status='active'`, `content_hash='client-hash'`로 INSERT | 저장값 `proposed`, 해시는 서버 HMAC ✔ |
+| F7 | 못 읽는 HR 메모리 / 없는 uuid / 다른 store 메모리를 supersede, `memory://` 근거로 인용 | 모두 `23503`; external을 인용하면 파생도 external ✔ |
+| F8 | deleted_hash·memory_version·review 직접 쓰기, 남의 deleted_hash 조회 | 쓰기 `42501`, 조회 0건 ✔ |
+| F9 | 승인 → origin 세탁 → created_by 변경 → 삭제 → 소생 → 체인 | 버전 2 / `P0001` / `P0001` / 본문 NULL·snapshot 전부 NULL·deleted_hash 1 / `P0001` / `verify_chain` true; 변조하면 false ✔ |
+| F10 | 삭제된 본문의 공백만 바꾼 재제안 | `23505` ✔ |
 | N8 | 교차 테넌트 principal·store로 grant, store와 tenant가 다른 memory (소유자 권한) | 모두 `23503` ✔ |
 | F11 | 10만 행 `count(*)` (app_rw) | 로컬 한도 200ms, CI 한도 1000ms ✔ |
 | A10 | `app_rw` 속성, `FORCE ROW LEVEL SECURITY` 대상 | `LOGIN`/`NOBYPASSRLS`/`NOINHERIT`, memory·memory_version·review ✔ |
 | X2 | created_by / on_behalf_of / tenant_id 위조 제안 | RLS 거부, 정상 제안만 성공 ✔ |
-| X3 | app_rw가 store_grant 등 권한 테이블 쓰기 | 거부(42501) ✔ |
-| X4 | 타 store의 버전·리뷰 조회 / 기록 | 0건, 기록 거부 ✔ |
-| X5 | redact 시 reason 등 변조, review 수정·삭제 | 트리거 차단, curator의 redact만 허용 ✔ |
+| X3 | app_rw가 store_grant 등 권한 테이블 쓰기·삭제 | 거부(42501) ✔ |
+| X4 | 타 store의 버전·리뷰 조회 / app_rw의 버전·리뷰 기록 | 0건, 기록 거부(42501) ✔ |
+| X5 | redact 시 reason 등 변조, review 수정·삭제, app_rw의 redact | 트리거 차단, app_rw의 redact 거부(42501) ✔ |
 | X6 | 비활성 사용자·그룹·에이전트 | 권한 NULL, 재활성화 시 복구 ✔ |
 
 ## 6. API (MCP 툴 = REST 엔드포인트)

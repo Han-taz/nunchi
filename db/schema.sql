@@ -12,6 +12,11 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- 이 파일을 적재하는 역할이 앞으로 만드는 모든 함수는 PUBLIC 실행 권한 없이 태어난다.
+-- 스키마별 default 로는 전역 기본값(PUBLIC 실행)을 지울 수 없어서 스키마를 지정하지 않는다.
+-- 앱이 부를 수 있는 함수는 파일 끝의 명시적 GRANT EXECUTE 목록이 전부다 (P3 이 목록을 테스트로 고정한다).
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM public;
+
 -- ── 앱 접속 역할: LOGIN NOBYPASSRLS NOINHERIT (클러스터 전역 역할이라 이미 있으면 속성을 맞춘다) ──
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_rw') THEN
@@ -106,7 +111,7 @@ CREATE TABLE memory (
   on_behalf_of uuid REFERENCES principal (id),           -- 에이전트가 대리한 사용자
   session_ref text,                                    -- 에이전트 세션/런 ID
   gate_result jsonb NOT NULL DEFAULT '{}',             -- 쓰기 게이트 결과
-  content_hash text,                                    -- sha256(normalized body)
+  content_hash text,                                    -- HMAC(정규화 본문). 서버(트리거)가 계산, 클라이언트 값 무시
   version integer NOT NULL DEFAULT 1,              -- 낙관적 잠금
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -143,6 +148,9 @@ CREATE TABLE memory_version (
   snapshot jsonb,          -- 당시 title/body/meta. redact·delete 시 NULL
   reason text,
   at timestamptz NOT NULL DEFAULT now(),
+  snapshot_hash text,      -- sha256(snapshot). snapshot 이 redact 돼도 남아 체인 검증이 유지된다
+  prev_hash text,          -- 같은 memory 의 직전 row_hash
+  row_hash text,           -- sha256(prev_hash | memory | version | op | actor | snapshot_hash | at | reason)
   UNIQUE (memory_id, version, op)
 );
 
@@ -155,6 +163,17 @@ CREATE TABLE review (
   note text,
   at timestamptz NOT NULL DEFAULT now()
 );
+
+-- 상태 기계: 허용되는 (from, to) 전이만 이 표에 있고 memory_bu 트리거는 이 표만 본다
+CREATE TABLE memory_transition (
+  from_status memory_status NOT NULL,
+  to_status memory_status NOT NULL,
+  PRIMARY KEY (from_status, to_status)
+);
+INSERT INTO memory_transition (from_status, to_status) VALUES
+('proposed', 'active'), ('proposed', 'rejected'),
+('active', 'superseded'), ('active', 'expired'), ('active', 'deleted'),
+('superseded', 'deleted'), ('expired', 'deleted'), ('rejected', 'deleted');
 
 -- 버전/리뷰 테이블은 수정·삭제 금지. 예외: memory_version.snapshot 을 NULL 로 만드는 redact 만 허용
 -- (snapshot 을 뺀 모든 컬럼이 동일해야 함. 컬럼이 추가돼도 자동으로 비교 대상에 포함)
@@ -301,25 +320,7 @@ CREATE POLICY memory_version_read ON memory_version FOR SELECT USING (
     WHERE m.id = memory_version.memory_id
   )
 );
--- 기록: 부모 memory 에 contributor 이상, actor 는 호출 주체 본인
-CREATE POLICY memory_version_write ON memory_version FOR INSERT WITH CHECK (
-  actor_id = coalesce(app_sec.ctx_agent(), app_sec.ctx_user())
-  AND EXISTS (
-    SELECT 1 FROM memory AS m
-    WHERE
-      m.id = memory_version.memory_id
-      AND m.store_id IN (SELECT app_sec.my_stores('contributor'))
-  )
-);
--- redact(snapshot -> NULL): curator 만 (컬럼 권한 + 트리거가 snapshot 외 변경을 막음)
-CREATE POLICY memory_version_redact ON memory_version FOR UPDATE USING (
-  EXISTS (
-    SELECT 1 FROM memory AS m
-    WHERE
-      m.id = memory_version.memory_id
-      AND m.store_id IN (SELECT app_sec.my_stores('curator'))
-  )
-);
+-- 쓰기 정책은 없다: 버전은 memory 트리거(SECURITY DEFINER)만, review 는 승인 함수만 기록한다 (app_rw 에는 INSERT/UPDATE 권한도 없다)
 
 CREATE POLICY review_read ON review FOR SELECT USING (
   EXISTS (
@@ -327,30 +328,238 @@ CREATE POLICY review_read ON review FOR SELECT USING (
     WHERE m.id = review.memory_id
   )
 );
--- comment: contributor 이상 / approve·reject: curator
-CREATE POLICY review_write ON review FOR INSERT WITH CHECK (
-  reviewer_id = coalesce(app_sec.ctx_agent(), app_sec.ctx_user())
-  AND EXISTS (
-    SELECT 1
-    FROM memory AS m
-    WHERE
-      m.id = review.memory_id
-      AND m.store_id IN (
-        SELECT app_sec.my_stores(
-          CASE WHEN review.verdict = 'comment' THEN 'contributor'::store_role ELSE 'curator'::store_role END
-        )
-      )
-  )
+
+-- 삭제된 내용의 해시: curator 만 읽는다 (재제안 차단 검사는 is_deleted_content 가 대신한다)
+ALTER TABLE deleted_hash ENABLE ROW LEVEL SECURITY;
+ALTER TABLE deleted_hash FORCE ROW LEVEL SECURITY;
+CREATE POLICY deleted_hash_read ON deleted_hash FOR SELECT USING (
+  store_id IN (SELECT app_sec.my_stores('curator'))
 );
+
+-- ── 쓰기 경로: 바인딩·해시·계보 검사·상태 기계·버전·감사는 전부 트리거가 한다 ──
+-- 앱이 직접 쓰는 테이블은 memory 하나이고, 나머지(memory_version, deleted_hash)는 아래 SECURITY DEFINER 함수만 쓴다.
+
+-- 내용 해시용 서버 비밀키. app_rw 는 이 표를 읽을 수 없다 (스키마 USAGE 만 있고 표 권한이 없다)
+CREATE TABLE app_sec.secret (
+  name text PRIMARY KEY,
+  value bytea NOT NULL
+);
+INSERT INTO app_sec.secret (name, value) VALUES ('hash_key', gen_random_bytes(32));
+
+-- 내용 해시 = HMAC(정규화 본문). 정규화 = NFKC(NBSP 와 전각/특수 공백을 U+0020 으로) + 폭 없는 문자 제거 + 공백 접기 + 소문자.
+-- 평문 sha256 으로 삭제된 내용을 추측하는 오라클을 막는다
+CREATE FUNCTION app_sec.content_hmac(t text) RETURNS text
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT encode(
+    hmac(
+      convert_to(
+        lower(btrim(regexp_replace(
+          regexp_replace(normalize(t, NFKC), '[\u200b-\u200d\u2060\ufeff]', '', 'g'),
+          '\s+', ' ', 'g'
+        ))),
+        'UTF8'
+      ),
+      (SELECT value FROM app_sec.secret WHERE name = 'hash_key'),
+      'sha256'
+    ),
+    'hex'
+  )
+$$;
+
+-- 삭제 해시는 curator 만 읽으므로 contributor 의 재제안 검사는 이 함수가 대신한다
+CREATE FUNCTION app_sec.is_deleted_content(s uuid, h text) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT EXISTS (SELECT 1 FROM deleted_hash WHERE store_id = s AND content_hash = h)
+$$;
+
+-- INSERT: 요청 컨텍스트가 있으면 저자·대리·tenant 를 세션에 묶고(NULL 은 채우고, 다르면 42501),
+-- status/version 을 제안 상태로 고정한다. 컨텍스트가 없는 소유자 적재는 값을 그대로 둔다.
+-- 이 트리거는 호출자(app_rw) 권한으로 돈다: 정책과 RLS 가 그대로 적용된다. 내부 함수(content_hmac 등)는
+-- app_rw 가 부를 수 없으므로 해시 계산은 SECURITY DEFINER 트리거 memory_bi2_hash / memory_bu2_hash 가 한다.
+CREATE FUNCTION app_sec.memory_before_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  by_whom uuid := coalesce(app_sec.ctx_agent(), app_sec.ctx_user());
+  on_behalf uuid := CASE WHEN app_sec.ctx_agent() IS NULL THEN NULL ELSE app_sec.ctx_user() END;
+  ref text;
+  src uuid;
+BEGIN
+  IF app_sec.ctx_user() IS NOT NULL THEN
+    NEW.created_by := coalesce(NEW.created_by, by_whom);
+    NEW.tenant_id := coalesce(NEW.tenant_id, app_sec.ctx_tenant());
+    IF NEW.created_by <> by_whom OR NEW.tenant_id <> app_sec.ctx_tenant()
+       OR NEW.on_behalf_of IS DISTINCT FROM on_behalf THEN
+      RAISE EXCEPTION 'author, delegate and tenant are bound to the request' USING ERRCODE = '42501';
+    END IF;
+    NEW.status := 'proposed';
+    NEW.version := 1;
+  END IF;
+
+  -- 존재하지 않음과 읽을 수 없음은 같은 오류다 (존재 오라클 차단). 호출자의 RLS 가 그대로 적용된다
+  IF NEW.supersedes_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM memory AS m
+    WHERE m.id = NEW.supersedes_id AND m.store_id = NEW.store_id AND m.status = 'active'
+  ) THEN
+    RAISE EXCEPTION 'supersedes target not found' USING ERRCODE = '23503';
+  END IF;
+
+  FOR ref IN SELECT x ->> 'uri' FROM jsonb_array_elements(NEW.source_refs) AS x WHERE x ->> 'uri' LIKE 'memory://%' LOOP
+    IF ref !~ '^memory://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+      RAISE EXCEPTION 'source memory not found: %', ref USING ERRCODE = '23503';
+    END IF;
+    src := substr(ref, 10)::uuid;
+    IF NOT EXISTS (SELECT 1 FROM memory AS m WHERE m.id = src) THEN
+      RAISE EXCEPTION 'source memory not found: %', ref USING ERRCODE = '23503';
+    END IF;
+    -- 외부 오염은 보수적으로 전파한다: 근거 중 하나라도 external 이면 파생도 external
+    IF EXISTS (SELECT 1 FROM memory AS m WHERE m.id = src AND m.origin = 'external') THEN
+      NEW.origin := 'external';
+    END IF;
+  END LOOP;
+  RETURN NEW;
+END $$;
+
+-- UPDATE: 불변 컬럼, origin 단방향, memory_transition 표, 본문 편집 범위, 버전 증가, 삭제 시 본문 제거
+CREATE FUNCTION app_sec.memory_before_update() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF (NEW.id, NEW.tenant_id, NEW.store_id, NEW.kind, NEW.created_by, NEW.on_behalf_of, NEW.created_at, NEW.session_ref)
+     IS DISTINCT FROM
+     (OLD.id, OLD.tenant_id, OLD.store_id, OLD.kind, OLD.created_by, OLD.on_behalf_of, OLD.created_at, OLD.session_ref) THEN
+    RAISE EXCEPTION 'immutable column changed';
+  END IF;
+  IF OLD.origin = 'external' AND NEW.origin = 'internal' THEN
+    RAISE EXCEPTION 'origin cannot be laundered to internal';
+  END IF;
+  IF NEW.status <> OLD.status AND NOT EXISTS (
+    SELECT 1 FROM memory_transition AS t WHERE t.from_status = OLD.status AND t.to_status = NEW.status
+  ) THEN
+    RAISE EXCEPTION 'illegal transition % -> %', OLD.status, NEW.status;
+  END IF;
+  IF (NEW.title, NEW.body, NEW.source_refs) IS DISTINCT FROM (OLD.title, OLD.body, OLD.source_refs)
+     AND NOT (NEW.status = OLD.status AND OLD.status IN ('proposed', 'active')) AND NEW.status <> 'deleted' THEN
+    RAISE EXCEPTION 'content edit not allowed in this transition';
+  END IF;
+  IF NEW.status = 'deleted' THEN
+    NEW.body := NULL;
+    NEW.title := '[deleted]';
+  END IF;
+  NEW.version := OLD.version + 1;
+  NEW.updated_at := now();
+  RETURN NEW;
+END $$;
+
+-- 내용 해시와 삭제 내용 재제안 검사. 소유자 권한으로 돌아 app_rw 가 content_hmac / is_deleted_content 를 직접 부르지 않아도 된다.
+-- 트리거 이름 순서(memory_bi < memory_bi2_hash)로 memory_bi 가 본문을 확정한 뒤에 실행된다.
+CREATE FUNCTION app_sec.memory_set_hash() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    NEW.content_hash := CASE WHEN NEW.body IS NULL THEN NULL ELSE app_sec.content_hmac(NEW.body) END;
+    IF NEW.content_hash IS NOT NULL AND app_sec.is_deleted_content(NEW.store_id, NEW.content_hash) THEN
+      RAISE EXCEPTION 'content was previously deleted in this store' USING ERRCODE = '23505';
+    END IF;
+  ELSE
+    NEW.content_hash := CASE WHEN NEW.body IS NULL THEN OLD.content_hash ELSE app_sec.content_hmac(NEW.body) END;
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- 감사 체인: 행마다 직전 row_hash 에 이어 붙인다. 같은 memory 의 동시 기록은 advisory lock 으로 줄 세운다.
+-- 시각은 epoch 로 해시한다 (세션 TimeZone 에 따라 text 표기가 달라지는 것을 피함)
+CREATE FUNCTION app_sec.write_version(p_mem memory, p_op memory_op, p_actor uuid, p_reason text) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE
+  snap jsonb;
+  prev text;
+  shash text;
+  ts timestamptz := clock_timestamp();
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_mem.id::text, 0));
+  snap := CASE WHEN p_op IN ('delete', 'redact') THEN NULL
+    ELSE jsonb_build_object(
+      'title', p_mem.title, 'body', p_mem.body, 'status', p_mem.status,
+      'source_refs', p_mem.source_refs, 'origin', p_mem.origin, 'store_id', p_mem.store_id
+    ) END;
+  shash := encode(sha256(convert_to(coalesce(snap::text, ''), 'UTF8')), 'hex');
+  SELECT row_hash INTO prev FROM memory_version WHERE memory_id = p_mem.id ORDER BY id DESC LIMIT 1;
+  INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot, reason, at, snapshot_hash, prev_hash, row_hash)
+  VALUES (
+    p_mem.id, p_mem.version, p_op, p_actor, snap, p_reason, ts, shash, prev,
+    encode(
+      sha256(
+        convert_to(concat_ws('|', prev, p_mem.id, p_mem.version, p_op, p_actor, shash, extract(EPOCH FROM ts), coalesce(p_reason, '')), 'UTF8')
+      ),
+      'hex'
+    )
+  );
+END $$;
+
+-- 쓰기 후: 버전 기록. 삭제면 삭제 해시를 등록하고 과거 snapshot 을 전부 redact 한다
+CREATE FUNCTION app_sec.memory_after_write() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE
+  op memory_op;
+  actor uuid := coalesce(app_sec.ctx_user(), app_sec.ctx_agent(), NEW.created_by);
+  why text := current_setting('app.reason', true);
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    op := 'propose';
+  ELSIF NEW.status <> OLD.status THEN
+    op := CASE NEW.status
+      WHEN 'active' THEN 'approve' WHEN 'rejected' THEN 'reject' WHEN 'superseded' THEN 'supersede'
+      WHEN 'expired' THEN 'expire' WHEN 'deleted' THEN 'delete'
+    END;
+  ELSE
+    op := 'edit';
+  END IF;
+  PERFORM app_sec.write_version(NEW, op, actor, why);
+  IF op = 'delete' THEN
+    IF OLD.content_hash IS NOT NULL THEN
+      INSERT INTO deleted_hash (store_id, content_hash, reason) VALUES (NEW.store_id, OLD.content_hash, coalesce(why, 'delete'))
+      ON CONFLICT DO NOTHING;
+    END IF;
+    UPDATE memory_version SET snapshot = NULL WHERE memory_id = NEW.id AND snapshot IS NOT NULL;
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER memory_bi BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_before_insert();
+CREATE TRIGGER memory_bu BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_before_update();
+CREATE TRIGGER memory_bi2_hash BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
+CREATE TRIGGER memory_bu2_hash BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
+CREATE TRIGGER memory_aw AFTER INSERT OR UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_after_write();
+
+-- 체인 검증. 호출자의 RLS 가 적용되므로 보이는 버전만 검증한다 (없거나 못 보면 NULL)
+CREATE FUNCTION app_sec.verify_chain(p_mem uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT bool_and(
+    row_hash = encode(
+      sha256(convert_to(concat_ws('|', prev_hash, memory_id, version, op, actor_id, snapshot_hash, extract(EPOCH FROM at), coalesce(reason, '')), 'UTF8')),
+      'hex'
+    )
+    AND prev_hash IS NOT DISTINCT FROM expected_prev
+  )
+  FROM (
+    SELECT v.*, lag(row_hash) OVER (ORDER BY id) AS expected_prev
+    FROM memory_version AS v WHERE memory_id = p_mem
+  ) AS x
+$$;
 
 -- ── 앱 접속 역할 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──
 GRANT USAGE ON SCHEMA public TO app_rw;
--- 주체/권한 테이블은 읽기 전용 (SCIM 동기화·관리 작업은 별도 역할)
-GRANT SELECT ON tenant, principal, group_member, store, store_grant TO app_rw;
+-- 주체/권한/감사 테이블은 읽기 전용이다. 버전은 memory 트리거, 삭제 해시는 삭제 트리거, 권한과 주체는 별도 관리 역할이 쓴다
+GRANT SELECT ON tenant, principal, group_member, store, store_grant, memory_transition TO app_rw;
+GRANT SELECT ON memory_version, review, deleted_hash TO app_rw;
 GRANT SELECT, INSERT, UPDATE ON memory TO app_rw;
-GRANT SELECT, INSERT ON memory_version TO app_rw;
-GRANT UPDATE (snapshot) ON memory_version TO app_rw;   -- redact 전용
-GRANT SELECT, INSERT ON review, deleted_hash TO app_rw;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app_rw;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA app_sec FROM public;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app_sec TO app_rw;
+
+-- 함수 실행 권한은 허용 목록뿐이다. 내부 함수(write_version, content_hmac, is_deleted_content, 트리거 함수)는
+-- SECURITY DEFINER 트리거와 소유자만 부른다. 정책이 호출자 권한으로 평가하는 ctx_*, my_stores 와 그 하위
+-- my_store_roles, principal_closure 는 app_rw 에 줘야 한다.
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA app_sec FROM public, app_rw;
+REVOKE ALL ON FUNCTION principal_closure(uuid), forbid_mutation() FROM public, app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.begin_request(uuid, uuid) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.ctx_user() TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.ctx_agent() TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.ctx_tenant() TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.my_store_roles() TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.my_stores(store_role) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.verify_chain(uuid) TO app_rw;
+GRANT EXECUTE ON FUNCTION principal_closure(uuid) TO app_rw;
