@@ -543,6 +543,36 @@ CREATE FUNCTION app_sec.verify_chain(p_mem uuid) RETURNS boolean LANGUAGE sql ST
   ) AS x
 $$;
 
+-- ── 검색: RLS 아래에서는 @@ 가 non-LEAKPROOF 라 GIN 인덱스를 못 쓴다 (N10) ──
+-- 인덱스를 쓰는 SECURITY DEFINER 함수로 제공하고, memory_read 정책과 같은 가시성 규칙을 my_store_roles() 로 직접 적용한다.
+-- 기본 status 는 active 만이다. 가시성 규칙이 정책과 어긋나지 않는지는 smoke_test 의 N10 이 사용자별로 비교한다.
+-- 결과는 점수 순 50건까지. 본문은 돌려주지 않고 id 로 RLS 아래에서 다시 읽는다.
+CREATE FUNCTION app_sec.search(
+  p_query text,
+  p_stores uuid[] DEFAULT null,
+  p_statuses memory_status[] DEFAULT ARRAY['active']::memory_status[]
+) RETURNS TABLE (id uuid, store_id uuid, kind memory_kind, title text, status memory_status, score real)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  WITH q AS (SELECT websearch_to_tsquery('simple', p_query) AS tsq)
+  SELECT m.id, m.store_id, m.kind, m.title, m.status, ts_rank(m.search_tsv, q.tsq) AS score
+  FROM q, memory AS m
+  WHERE
+    m.tenant_id = app_sec.ctx_tenant()
+    AND m.search_tsv @@ q.tsq
+    AND (p_stores IS NULL OR m.store_id = ANY (p_stores))
+    AND m.status = ANY (coalesce(p_statuses, ARRAY['active']::memory_status[]))
+    AND (
+      (m.status IN ('active', 'superseded', 'expired') AND m.store_id IN (SELECT app_sec.my_stores('reader')))
+      OR m.store_id IN (SELECT app_sec.my_stores('curator'))
+      OR (
+        m.status = 'proposed' AND coalesce(m.on_behalf_of, m.created_by) = app_sec.ctx_user()
+        AND m.store_id IN (SELECT app_sec.my_stores('reader'))
+      )
+    )
+  ORDER BY score DESC, m.id
+  LIMIT 50
+$$;
+
 -- ── 앱 접속 역할 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──
 GRANT USAGE ON SCHEMA public TO app_rw;
 -- 주체/권한/감사 테이블은 읽기 전용이다. 버전은 memory 트리거, 삭제 해시는 삭제 트리거, 권한과 주체는 별도 관리 역할이 쓴다
@@ -561,5 +591,6 @@ GRANT EXECUTE ON FUNCTION app_sec.ctx_agent() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_tenant() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_store_roles() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_stores(store_role) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.search(text, uuid[], memory_status[]) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.verify_chain(uuid) TO app_rw;
 GRANT EXECUTE ON FUNCTION principal_closure(uuid) TO app_rw;
