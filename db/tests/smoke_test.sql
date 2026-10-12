@@ -2,6 +2,8 @@
 \set ON_ERROR_STOP on
 -- app_rw 역할과 최소 권한 GRANT 는 schema.sql 에 있다
 
+-- 테스트 헬퍼는 app_rw 로 호출되므로 PUBLIC 실행을 허용한다 (schema.sql 이 끈 기본값을 이 세션에서만 되돌림). P3 는 헬퍼 이름을 제외한다.
+ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
 -- 헬퍼: t_eq = 쿼리 결과(text) 비교, t_err = 실행 시 SQLSTATE 비교('ok' = 성공). 호출자 권한으로 실행됨.
 -- t_ctx = 요청 컨텍스트 시작. 새 스키마에서는 app_sec.begin_request, v1.0 취약 스키마에서는 옛 방식(트랜잭션 로컬
 --         app.user_id/app.agent_id)으로 같은 사용자를 흉내 내서 mutation gate 가 같은 테스트를 양쪽에 돌릴 수 있게 한다.
@@ -361,7 +363,7 @@ BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-
 SELECT t_eq('F5 client status=active and content_hash are replaced', $q$WITH i AS (
   INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, on_behalf_of, content_hash)
   VALUES ('00000000-0000-0000-0000-0000000cc001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','F5','본문 F5','[{"uri":"https://crm/1"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','client-hash')
-  RETURNING status, content_hash, body) SELECT status || '/' || (content_hash = app_sec.content_hmac(body)) FROM i$q$, 'proposed/true');
+  RETURNING status, content_hash, body) SELECT status || '/' || (content_hash ~ '^[0-9a-f]{64}$') FROM i$q$, 'proposed/true');
 COMMIT;
 
 -- 존재 오라클 차단: 못 읽는 행과 없는 행은 같은 오류 (N3)
@@ -424,6 +426,32 @@ SELECT t_err('F10 re-propose of deleted content with different whitespace', $q$I
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again','본문  F5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
 ROLLBACK;
 
+-- A4) 공백 변형 우회: NBSP, 전각 공백, 폭 없는 문자도 삭제된 내용과 같은 해시가 된다 (P4)
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t_err('P4a re-propose of deleted content with NBSP', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문\u00a0F5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t_err('P4b re-propose with an ideographic space', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문\u3000F5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t_err('P4c re-propose with a zero-width space', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\u200b5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+ROLLBACK;
+
+-- N6, N4) app_rw 는 내부 함수를 직접 부를 수 없다 (P1, P2)
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t_err('P1 contributor calls write_version to forge an approve row', $q$SELECT app_sec.write_version(m, 'approve', '00000000-0000-0000-0000-0000000000c1', 'forged') FROM memory AS m WHERE m.id = '00000000-0000-0000-0000-0000000bb001'$q$, '42501');
+SELECT t_err('P2a contributor calls is_deleted_content (existence oracle)', $q$SELECT app_sec.is_deleted_content('00000000-0000-0000-0000-00000000f002', 'seed')$q$, '42501');
+SELECT t_err('P2b contributor calls content_hmac', $q$SELECT app_sec.content_hmac('x')$q$, '42501');
+SELECT t_err('P2c contributor calls the hash trigger function', $q$SELECT app_sec.memory_set_hash()$q$, '42501');
+ROLLBACK;
+
+-- 허용 목록: app_rw 가 실행할 수 있는 함수(확장 소속 제외)는 정확히 이 목록이다. 새 함수는 의식적으로 여기에 추가한다 (P3)
+SELECT t_eq('P3 functions app_rw can execute equal the allowlist', $q$SELECT string_agg(n.nspname || '.' || p.proname, ',' ORDER BY n.nspname, p.proname)
+  FROM pg_proc AS p JOIN pg_namespace AS n ON n.oid = p.pronamespace
+  WHERE n.nspname IN ('public', 'app_sec') AND has_function_privilege('app_rw', p.oid, 'EXECUTE')
+    AND p.proname NOT IN ('t_eq', 't_err', 't_ctx', 't_ctx_soft', 't_role')
+    AND NOT EXISTS (SELECT 1 FROM pg_depend AS d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')$q$,
+  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.my_store_roles,app_sec.my_stores,app_sec.verify_chain,public.principal_closure');
+
 -- A9) 체인은 변조를 드러낸다: 소유자가 트리거를 끄고 actor 를 바꾸면 verify_chain 이 false
 RESET ROLE;
 BEGIN;
@@ -431,4 +459,11 @@ ALTER TABLE memory_version DISABLE TRIGGER memory_version_append_only;
 UPDATE memory_version SET actor_id = '00000000-0000-0000-0000-0000000000b1' WHERE memory_id = '00000000-0000-0000-0000-0000000cc001' AND op = 'approve';
 SELECT t_eq('F9h tampered actor breaks the chain', $q$SELECT app_sec.verify_chain('00000000-0000-0000-0000-0000000cc001')::text$q$, 'false');
 ROLLBACK;
+-- A9) reason 도 행 해시에 들어간다 (P5)
+BEGIN;
+ALTER TABLE memory_version DISABLE TRIGGER memory_version_append_only;
+UPDATE memory_version SET reason = 'rewritten' WHERE memory_id = '00000000-0000-0000-0000-0000000cc001' AND op = 'approve';
+SELECT t_eq('P5 tampered reason breaks the chain', $q$SELECT app_sec.verify_chain('00000000-0000-0000-0000-0000000cc001')::text$q$, 'false');
+ROLLBACK;
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP FUNCTION t_eq(text, text, text); DROP FUNCTION t_err(text, text, text); DROP FUNCTION t_ctx_soft(uuid, uuid); DROP FUNCTION t_ctx(uuid, uuid); DROP FUNCTION t_role(uuid);

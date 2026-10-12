@@ -12,6 +12,11 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- 이 파일을 적재하는 역할이 앞으로 만드는 모든 함수는 PUBLIC 실행 권한 없이 태어난다.
+-- 스키마별 default 로는 전역 기본값(PUBLIC 실행)을 지울 수 없어서 스키마를 지정하지 않는다.
+-- 앱이 부를 수 있는 함수는 파일 끝의 명시적 GRANT EXECUTE 목록이 전부다 (P3 이 목록을 테스트로 고정한다).
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
 -- ── 앱 접속 역할: LOGIN NOBYPASSRLS NOINHERIT (클러스터 전역 역할이라 이미 있으면 속성을 맞춘다) ──
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_rw') THEN
@@ -145,7 +150,7 @@ CREATE TABLE memory_version (
   at timestamptz NOT NULL DEFAULT now(),
   snapshot_hash text,      -- sha256(snapshot). snapshot 이 redact 돼도 남아 체인 검증이 유지된다
   prev_hash text,          -- 같은 memory 의 직전 row_hash
-  row_hash text,           -- sha256(prev_hash | memory | version | op | actor | snapshot_hash | at)
+  row_hash text,           -- sha256(prev_hash | memory | version | op | actor | snapshot_hash | at | reason)
   UNIQUE (memory_id, version, op)
 );
 
@@ -341,12 +346,18 @@ CREATE TABLE app_sec.secret (
 );
 INSERT INTO app_sec.secret (name, value) VALUES ('hash_key', gen_random_bytes(32));
 
--- 내용 해시 = HMAC(정규화 본문). 평문 sha256 으로 삭제된 내용을 추측하는 오라클을 막는다
+-- 내용 해시 = HMAC(정규화 본문). 정규화 = NFKC(NBSP 와 전각/특수 공백을 U+0020 으로) + 폭 없는 문자 제거 + 공백 접기 + 소문자. 평문 sha256 으로 삭제된 내용을 추측하는 오라클을 막는다
 CREATE FUNCTION app_sec.content_hmac(t text) RETURNS text
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
   SELECT encode(
     hmac(
-      convert_to(lower(btrim(regexp_replace(t, '\s+', ' ', 'g'))), 'UTF8'),
+      convert_to(
+        lower(btrim(regexp_replace(
+          regexp_replace(normalize(t, NFKC), '[\u200b-\u200d\u2060\ufeff]', '', 'g'),
+          '\s+', ' ', 'g'
+        ))),
+        'UTF8'
+      ),
       (SELECT value FROM app_sec.secret WHERE name = 'hash_key'),
       'sha256'
     ),
@@ -362,6 +373,8 @@ $$;
 
 -- INSERT: 요청 컨텍스트가 있으면 저자·대리·tenant 를 세션에 묶고(NULL 은 채우고, 다르면 42501),
 -- status/version 을 제안 상태로 고정한다. 컨텍스트가 없는 소유자 적재는 값을 그대로 둔다.
+-- 이 트리거는 호출자(app_rw) 권한으로 돈다: 정책과 RLS 가 그대로 적용된다. 내부 함수(content_hmac 등)는
+-- app_rw 가 부를 수 없으므로 해시 계산은 SECURITY DEFINER 트리거 memory_bi2_hash / memory_bu2_hash 가 한다.
 CREATE FUNCTION app_sec.memory_before_insert() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   by_whom uuid := coalesce(app_sec.ctx_agent(), app_sec.ctx_user());
@@ -378,11 +391,6 @@ BEGIN
     END IF;
     NEW.status := 'proposed';
     NEW.version := 1;
-  END IF;
-
-  NEW.content_hash := CASE WHEN NEW.body IS NULL THEN NULL ELSE app_sec.content_hmac(NEW.body) END;
-  IF NEW.content_hash IS NOT NULL AND app_sec.is_deleted_content(NEW.store_id, NEW.content_hash) THEN
-    RAISE EXCEPTION 'content was previously deleted in this store' USING ERRCODE = '23505';
   END IF;
 
   -- 존재하지 않음과 읽을 수 없음은 같은 오류다 (존재 오라클 차단). 호출자의 RLS 가 그대로 적용된다
@@ -435,7 +443,22 @@ BEGIN
   END IF;
   NEW.version := OLD.version + 1;
   NEW.updated_at := now();
-  NEW.content_hash := CASE WHEN NEW.body IS NULL THEN OLD.content_hash ELSE app_sec.content_hmac(NEW.body) END;
+  RETURN NEW;
+END $$;
+
+-- 내용 해시와 삭제 내용 재제안 검사. 소유자 권한으로 돌아 app_rw 가 content_hmac / is_deleted_content 를 직접 부르지 않아도 된다.
+-- 트리거 이름 순서(memory_bi < memory_bi2_hash)로 memory_bi 가 본문을 확정한 뒤에 실행된다.
+CREATE FUNCTION app_sec.memory_set_hash() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    NEW.content_hash := CASE WHEN NEW.body IS NULL THEN NULL ELSE app_sec.content_hmac(NEW.body) END;
+    IF NEW.content_hash IS NOT NULL AND app_sec.is_deleted_content(NEW.store_id, NEW.content_hash) THEN
+      RAISE EXCEPTION 'content was previously deleted in this store' USING ERRCODE = '23505';
+    END IF;
+  ELSE
+    NEW.content_hash := CASE WHEN NEW.body IS NULL THEN OLD.content_hash ELSE app_sec.content_hmac(NEW.body) END;
+  END IF;
   RETURN NEW;
 END $$;
 
@@ -462,7 +485,7 @@ BEGIN
     p_mem.id, p_mem.version, p_op, p_actor, snap, p_reason, ts, shash, prev,
     encode(
       sha256(
-        convert_to(concat_ws('|', prev, p_mem.id, p_mem.version, p_op, p_actor, shash, extract(EPOCH FROM ts)), 'UTF8')
+        convert_to(concat_ws('|', prev, p_mem.id, p_mem.version, p_op, p_actor, shash, extract(EPOCH FROM ts), coalesce(p_reason, '')), 'UTF8')
       ),
       'hex'
     )
@@ -500,13 +523,15 @@ END $$;
 
 CREATE TRIGGER memory_bi BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_before_insert();
 CREATE TRIGGER memory_bu BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_before_update();
+CREATE TRIGGER memory_bi2_hash BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
+CREATE TRIGGER memory_bu2_hash BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
 CREATE TRIGGER memory_aw AFTER INSERT OR UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_after_write();
 
 -- 체인 검증. 호출자의 RLS 가 적용되므로 보이는 버전만 검증한다 (없거나 못 보면 NULL)
 CREATE FUNCTION app_sec.verify_chain(p_mem uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
   SELECT bool_and(
     row_hash = encode(
-      sha256(convert_to(concat_ws('|', prev_hash, memory_id, version, op, actor_id, snapshot_hash, extract(EPOCH FROM at)), 'UTF8')),
+      sha256(convert_to(concat_ws('|', prev_hash, memory_id, version, op, actor_id, snapshot_hash, extract(EPOCH FROM at), coalesce(reason, '')), 'UTF8')),
       'hex'
     )
     AND prev_hash IS NOT DISTINCT FROM expected_prev
@@ -523,5 +548,16 @@ GRANT USAGE ON SCHEMA public TO app_rw;
 GRANT SELECT ON tenant, principal, group_member, store, store_grant, memory_transition TO app_rw;
 GRANT SELECT ON memory_version, review, deleted_hash TO app_rw;
 GRANT SELECT, INSERT, UPDATE ON memory TO app_rw;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA app_sec FROM public;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app_sec TO app_rw;
+
+-- 함수 실행 권한은 허용 목록뿐이다. 내부 함수(write_version, content_hmac, is_deleted_content, 트리거 함수)는
+-- SECURITY DEFINER 트리거와 소유자만 부른다. 정책이 호출자 권한으로 평가하는 ctx_*, my_stores 와 그 하위
+-- my_store_roles, principal_closure 는 app_rw 에 줘야 한다.
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA app_sec FROM PUBLIC, app_rw;
+REVOKE ALL ON FUNCTION principal_closure(uuid), forbid_mutation() FROM PUBLIC, app_rw;
+GRANT EXECUTE ON FUNCTION
+  app_sec.begin_request(uuid, uuid),
+  app_sec.ctx_user(), app_sec.ctx_agent(), app_sec.ctx_tenant(),
+  app_sec.my_store_roles(), app_sec.my_stores(store_role),
+  app_sec.verify_chain(uuid),
+  principal_closure(uuid)
+TO app_rw;

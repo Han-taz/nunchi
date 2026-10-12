@@ -7,7 +7,7 @@
 # and CREATE ROLE (the superuser of a throwaway server). Every run creates and
 # drops its own database, so two runs never share state.
 #
-# Each test prints one line that starts with its id (T1, X3a, F11, N8a, A10a, ...). The file
+# Each test prints one line that starts with its id (T1, X3a, F11, N8a, A10a, P1, ...). The file
 # db/tests/expectations.tsv is the registry: a registered id that prints
 # nothing, an unregistered id that prints something, or an id whose outcome
 # differs from the registry makes the script exit nonzero.
@@ -80,7 +80,7 @@ fi
 
 # Normalise to "<id> <rest>" lines.
 sed -E -e 's/^psql:[^ ]+ NOTICE:  //' -e 's/^[[:space:]]+//' "$work/out.txt" "$work/err.txt" \
-  | grep -E '^(T[0-9]+[a-z]?|[XFNA][0-9]+[a-z]?) ' >"$work/lines.txt" || true
+  | grep -E '^(T[0-9]+[a-z]?|[XFNAP][0-9]+[a-z]?) ' >"$work/lines.txt" || true
 
 awk -F '\t' -v profile="$profile" -v results="$results_out" '
   FNR == NR {
