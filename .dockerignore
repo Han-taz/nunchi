@@ -1,0 +1,7 @@
+.git
+.venv
+mutants
+tests
+docs
+.github
+__pycache__
