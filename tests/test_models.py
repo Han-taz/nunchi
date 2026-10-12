@@ -13,6 +13,7 @@ from nunchi.domain.models import (
     MemoryStatus,
     ProposeRequest,
     Role,
+    SourceRef,
     StoreKind,
 )
 
@@ -77,3 +78,18 @@ def test_every_non_note_kind_rejects_missing_sources(kind: str) -> None:
 
 def test_note_with_sources_is_accepted() -> None:
     assert len(_propose(source_refs=[{"uri": "u"}, {"uri": "v"}]).source_refs) == 2
+
+
+def test_models_are_immutable() -> None:
+    req = _propose()
+    with pytest.raises(ValidationError, match="frozen"):
+        req.title = "changed"  # type: ignore[misc]
+    ref = SourceRef(uri="https://example.com/a")
+    with pytest.raises(ValidationError, match="frozen"):
+        ref.uri = "x"  # type: ignore[misc]
+
+
+def test_source_ref_uri_is_not_empty() -> None:
+    with pytest.raises(ValidationError, match="at least 1 character"):
+        SourceRef(uri="")
+    assert SourceRef(uri="x").uri == "x"

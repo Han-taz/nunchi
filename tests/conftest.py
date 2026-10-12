@@ -25,6 +25,8 @@ APP_ROLE = "nunchi_test_app"
 def admin_url() -> str:
     url = os.environ.get("NUNCHI_TEST_ADMIN_URL")
     if url is None:
+        if os.environ.get("CI"):
+            pytest.fail("NUNCHI_TEST_ADMIN_URL is not set: database tests must run in CI, not skip")
         pytest.skip("NUNCHI_TEST_ADMIN_URL is not set")
     return url
 
