@@ -15,7 +15,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- 이 파일을 적재하는 역할이 앞으로 만드는 모든 함수는 PUBLIC 실행 권한 없이 태어난다.
 -- 스키마별 default 로는 전역 기본값(PUBLIC 실행)을 지울 수 없어서 스키마를 지정하지 않는다.
 -- 앱이 부를 수 있는 함수는 파일 끝의 명시적 GRANT EXECUTE 목록이 전부다 (P3 이 목록을 테스트로 고정한다).
-ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM public;
 
 -- ── 앱 접속 역할: LOGIN NOBYPASSRLS NOINHERIT (클러스터 전역 역할이라 이미 있으면 속성을 맞춘다) ──
 DO $$ BEGIN
@@ -346,7 +346,8 @@ CREATE TABLE app_sec.secret (
 );
 INSERT INTO app_sec.secret (name, value) VALUES ('hash_key', gen_random_bytes(32));
 
--- 내용 해시 = HMAC(정규화 본문). 정규화 = NFKC(NBSP 와 전각/특수 공백을 U+0020 으로) + 폭 없는 문자 제거 + 공백 접기 + 소문자. 평문 sha256 으로 삭제된 내용을 추측하는 오라클을 막는다
+-- 내용 해시 = HMAC(정규화 본문). 정규화 = NFKC(NBSP 와 전각/특수 공백을 U+0020 으로) + 폭 없는 문자 제거 + 공백 접기 + 소문자.
+-- 평문 sha256 으로 삭제된 내용을 추측하는 오라클을 막는다
 CREATE FUNCTION app_sec.content_hmac(t text) RETURNS text
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
   SELECT encode(
@@ -552,12 +553,13 @@ GRANT SELECT, INSERT, UPDATE ON memory TO app_rw;
 -- 함수 실행 권한은 허용 목록뿐이다. 내부 함수(write_version, content_hmac, is_deleted_content, 트리거 함수)는
 -- SECURITY DEFINER 트리거와 소유자만 부른다. 정책이 호출자 권한으로 평가하는 ctx_*, my_stores 와 그 하위
 -- my_store_roles, principal_closure 는 app_rw 에 줘야 한다.
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA app_sec FROM PUBLIC, app_rw;
-REVOKE ALL ON FUNCTION principal_closure(uuid), forbid_mutation() FROM PUBLIC, app_rw;
-GRANT EXECUTE ON FUNCTION
-  app_sec.begin_request(uuid, uuid),
-  app_sec.ctx_user(), app_sec.ctx_agent(), app_sec.ctx_tenant(),
-  app_sec.my_store_roles(), app_sec.my_stores(store_role),
-  app_sec.verify_chain(uuid),
-  principal_closure(uuid)
-TO app_rw;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA app_sec FROM public, app_rw;
+REVOKE ALL ON FUNCTION principal_closure(uuid), forbid_mutation() FROM public, app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.begin_request(uuid, uuid) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.ctx_user() TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.ctx_agent() TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.ctx_tenant() TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.my_store_roles() TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.my_stores(store_role) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.verify_chain(uuid) TO app_rw;
+GRANT EXECUTE ON FUNCTION principal_closure(uuid) TO app_rw;
