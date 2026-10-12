@@ -13,9 +13,9 @@ def open_pool(settings: Settings) -> ConnectionPool[psycopg.Connection[tuple[obj
         settings.database_url.get_secret_value(),
         min_size=settings.pool_min_size,
         max_size=settings.pool_max_size,
-        open=False,
+        open=True,
     )
-    pool.open(wait=True)
+    pool.wait()
     return pool
 
 

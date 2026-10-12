@@ -40,8 +40,9 @@ def seeded(fresh_db: str, admin_url: str) -> Iterator[str]:
             (STORE, TENANT),
         )
         conn.execute(
-            "INSERT INTO store_grant VALUES (%s, %s, 'contributor'), (%s, %s, 'reader')",
-            (STORE, USER, STORE, AGENT),
+            "INSERT INTO store_grant (store_id, principal_id, role, tenant_id)"
+            " VALUES (%s, %s, 'contributor', %s), (%s, %s, 'reader', %s)",
+            (STORE, USER, TENANT, STORE, AGENT, TENANT),
         )
         conn.execute(
             "INSERT INTO memory (tenant_id, store_id, kind, status, title, created_by)"
@@ -130,3 +131,13 @@ def test_exception_rolls_back_the_transaction(
         )
         raise RuntimeError
     assert count_visible(pool, USER, None) == 1
+
+
+@pytest.mark.db
+def test_open_pool_honours_the_configured_bounds(seeded: str) -> None:
+    pool = open_pool(Settings(database_url=seeded, pool_min_size=2, pool_max_size=3))
+    try:
+        assert (pool.min_size, pool.max_size) == (2, 3)
+        assert pool.get_stats()["pool_size"] == 2
+    finally:
+        pool.close()
