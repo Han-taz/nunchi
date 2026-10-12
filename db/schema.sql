@@ -1,7 +1,25 @@
 -- Team Memory Core — schema v1 (PostgreSQL 16+)
--- 원칙: store = 권한 경계, 변경은 append-only 버전, 범위는 인증 컨텍스트가 주입(app.* 세션 변수)
+-- 원칙: store = 권한 경계, 변경은 append-only 버전, 범위는 인증 컨텍스트가 주입
+--       (app_sec.begin_request 가 principal 을 검증하고 트랜잭션 xid 에 바인딩)
+--
+-- 역할 분리
+--   테이블·함수 소유자: 이 파일을 적재하는 역할 (운영에서는 NOLOGIN 인 app_owner. SECURITY DEFINER 함수가
+--                       RLS 를 우회해야 하므로 superuser 이거나 BYPASSRLS 여야 한다).
+--   앱 접속 역할 app_rw: LOGIN NOBYPASSRLS NOINHERIT. 아무것도 소유하지 않고, 아래 GRANT 만 가진다.
+--                       비밀번호는 배포 때 ALTER ROLE 로 설정한다 (이 파일에는 두지 않는다).
+--   smoke_test.sql 의 SET ROLE app_rw 는 테스트 전용 패턴이다. 앱은 app_rw 로 직접 접속해야 한다.
+--                       superuser 로 접속해 SET ROLE 하면 SQL 인젝션 한 번이 RESET ROLE 로 이어진다.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ── 앱 접속 역할: LOGIN NOBYPASSRLS NOINHERIT (클러스터 전역 역할이라 이미 있으면 속성을 맞춘다) ──
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_rw') THEN
+    CREATE ROLE app_rw LOGIN NOBYPASSRLS NOINHERIT;
+  ELSE
+    ALTER ROLE app_rw LOGIN NOBYPASSRLS NOINHERIT;
+  END IF;
+END $$;
 
 -- ── 주체(사람/그룹/에이전트) ─────────────────────────────
 CREATE TABLE tenant (
@@ -19,7 +37,8 @@ CREATE TABLE principal (
   external_id text NOT NULL,              -- IdP subject / SCIM id / agent client id
   display_name text NOT NULL,
   active boolean NOT NULL DEFAULT true,
-  UNIQUE (tenant_id, kind, external_id)
+  UNIQUE (tenant_id, kind, external_id),
+  UNIQUE (tenant_id, id)                  -- 복합 FK 대상 (테넌트 경계)
 );
 
 -- SCIM 그룹 동기화 결과 (user ∈ group)
@@ -42,18 +61,27 @@ CREATE TABLE store (
   archived_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, slug),
+  UNIQUE (tenant_id, id),                 -- 복합 FK 대상 (테넌트 경계)
   CHECK (auto_approve = false OR kind = 'user')
 );
 
 CREATE TYPE store_role AS ENUM ('reader', 'contributor', 'curator');
 -- reader: 읽기 / contributor: 읽기+제안 / curator: 승인·대체·삭제
 
+-- tenant_id 는 store 와 principal 이 같은 테넌트임을 복합 FK 두 개로 강제한다
 CREATE TABLE store_grant (
-  store_id uuid NOT NULL REFERENCES store (id) ON DELETE CASCADE,
-  principal_id uuid NOT NULL REFERENCES principal (id) ON DELETE CASCADE,  -- user/group/agent
+  store_id uuid NOT NULL,
+  principal_id uuid NOT NULL,  -- user/group/agent
   role store_role NOT NULL,
-  PRIMARY KEY (store_id, principal_id)
+  tenant_id uuid NOT NULL,
+  PRIMARY KEY (store_id, principal_id),
+  CONSTRAINT grant_store_same_tenant
+  FOREIGN KEY (tenant_id, store_id) REFERENCES store (tenant_id, id) ON DELETE CASCADE,
+  CONSTRAINT grant_principal_same_tenant
+  FOREIGN KEY (tenant_id, principal_id) REFERENCES principal (tenant_id, id) ON DELETE CASCADE
 );
+CREATE INDEX store_grant_principal_idx ON store_grant (principal_id);
+CREATE INDEX group_member_member_idx ON group_member (member_id);
 
 -- ── 메모리 ───────────────────────────────────────────────
 CREATE TYPE memory_kind AS ENUM ('fact', 'decision', 'procedure', 'note');
@@ -63,7 +91,7 @@ CREATE TYPE memory_origin AS ENUM ('internal', 'external');
 CREATE TABLE memory (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id uuid NOT NULL REFERENCES tenant (id),
-  store_id uuid NOT NULL REFERENCES store (id),
+  store_id uuid NOT NULL,
   kind memory_kind NOT NULL,
   status memory_status NOT NULL DEFAULT 'proposed',
   title text NOT NULL,                 -- 목록/검색 노출용 한 줄
@@ -84,6 +112,7 @@ CREATE TABLE memory (
   updated_at timestamptz NOT NULL DEFAULT now(),
   search_tsv tsvector GENERATED ALWAYS AS
   (to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(body, ''))) STORED,
+  CONSTRAINT memory_store_same_tenant FOREIGN KEY (tenant_id, store_id) REFERENCES store (tenant_id, id),
   CHECK (status <> 'deleted' OR body IS null),
   CHECK (kind = 'note' OR jsonb_array_length(source_refs) > 0)  -- note 외에는 출처 필수
 );
@@ -147,13 +176,40 @@ CREATE TRIGGER review_append_only BEFORE UPDATE OR DELETE ON review
 FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
 
 -- ── 권한: 실효 권한 = 사용자 권한 ∩ 에이전트 권한 ──────────
--- 앱이 트랜잭션마다 SET LOCAL app.user_id / app.agent_id 를 인증 토큰에서 설정. 모델은 관여 불가.
--- fail-closed: 미설정·빈 문자열은 NULL (오류도, 권한도 아님)
-CREATE FUNCTION app_user() RETURNS uuid LANGUAGE sql STABLE AS $$
-  SELECT nullif(current_setting('app.user_id', true), '')::uuid
+-- 앱은 트랜잭션마다 app_sec.begin_request(user, agent) 를 부른다. 함수가 principal 의 종류·활성·테넌트를 검증하고
+-- 값을 set_config(..., true) 로 설정한 뒤 현재 xid 에 묶는다. 세션 레벨 SET 이나 풀러 연결에 남은 값은 xid 가
+-- 맞지 않아 읽히지 않는다 (fail-closed: 컨텍스트 없음 = NULL = 권한 없음).
+CREATE SCHEMA app_sec;
+GRANT USAGE ON SCHEMA app_sec TO app_rw;
+
+CREATE FUNCTION app_sec.begin_request(p_user uuid, p_agent uuid DEFAULT null) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE t uuid;
+BEGIN
+  SELECT tenant_id INTO t FROM principal WHERE id = p_user AND kind = 'user' AND active;
+  IF t IS NULL THEN RAISE EXCEPTION 'unknown or inactive user %', p_user USING ERRCODE = '28000'; END IF;
+  IF p_agent IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM principal WHERE id = p_agent AND kind = 'agent' AND active AND tenant_id = t
+  ) THEN
+    RAISE EXCEPTION 'unknown or inactive agent %', p_agent USING ERRCODE = '28000';
+  END IF;
+  PERFORM set_config('app.user_id', p_user::text, true);
+  PERFORM set_config('app.agent_id', coalesce(p_agent::text, ''), true);
+  PERFORM set_config('app.tenant_id', t::text, true);
+  PERFORM set_config('app.ctx_xid', pg_current_xact_id()::text, true);  -- primary 전용
+END $$;
+
+CREATE FUNCTION app_sec.ctx_user() RETURNS uuid LANGUAGE sql STABLE AS $$
+  SELECT CASE WHEN current_setting('app.ctx_xid', true) = pg_current_xact_id()::text
+              THEN nullif(current_setting('app.user_id', true), '')::uuid END
 $$;
-CREATE FUNCTION app_agent() RETURNS uuid LANGUAGE sql STABLE AS $$
-  SELECT nullif(current_setting('app.agent_id', true), '')::uuid
+CREATE FUNCTION app_sec.ctx_agent() RETURNS uuid LANGUAGE sql STABLE AS $$
+  SELECT CASE WHEN current_setting('app.ctx_xid', true) = pg_current_xact_id()::text
+              THEN nullif(current_setting('app.agent_id', true), '')::uuid END
+$$;
+CREATE FUNCTION app_sec.ctx_tenant() RETURNS uuid LANGUAGE sql STABLE AS $$
+  SELECT CASE WHEN current_setting('app.ctx_xid', true) = pg_current_xact_id()::text
+              THEN nullif(current_setting('app.tenant_id', true), '')::uuid END
 $$;
 
 -- 비활성 principal(사용자/에이전트)과 비활성 그룹은 아무 권한도 주지 않는다
@@ -166,53 +222,78 @@ CREATE FUNCTION principal_closure(p uuid) RETURNS SETOF uuid LANGUAGE sql STABLE
      AND EXISTS (SELECT 1 FROM principal u WHERE u.id = p AND u.active)
 $$;
 
-CREATE FUNCTION store_role_of(p uuid, s uuid) RETURNS store_role LANGUAGE sql STABLE AS $$
-  SELECT max(role) FROM store_grant WHERE store_id = s AND principal_id IN (SELECT principal_closure(p))
+-- 실효 권한 = (사용자 role) ∩ (에이전트 role). 에이전트가 있으면 양쪽 grant 가 모두 있어야 하고 낮은 쪽을 쓴다.
+-- 정책에서 store_id IN (SELECT ... FROM my_store_roles()) 로 쓰면 행마다가 아니라 요청당 한 번 평가된다.
+CREATE FUNCTION app_sec.my_store_roles() RETURNS TABLE (store_id uuid, role store_role)
+LANGUAGE sql STABLE AS $$
+  WITH ctx AS (SELECT app_sec.ctx_user() AS u, app_sec.ctx_agent() AS a, app_sec.ctx_tenant() AS t),
+  ur AS (
+    SELECT g.store_id, max(g.role) AS role FROM ctx, store_grant AS g
+    WHERE ctx.u IS NOT NULL AND g.tenant_id = ctx.t AND g.principal_id IN (SELECT principal_closure(ctx.u))
+    GROUP BY g.store_id
+  ),
+  ar AS (
+    SELECT g.store_id, max(g.role) AS role FROM ctx, store_grant AS g
+    WHERE ctx.a IS NOT NULL AND g.tenant_id = ctx.t AND g.principal_id IN (SELECT principal_closure(ctx.a))
+    GROUP BY g.store_id
+  )
+  SELECT ur.store_id, CASE WHEN ctx.a IS NULL THEN ur.role ELSE least(ur.role, ar.role) END
+  FROM ctx, ur
+  LEFT JOIN ar ON ar.store_id = ur.store_id
+  WHERE ctx.a IS NULL OR ar.role IS NOT NULL
 $$;
 
--- least() 는 NULL 을 무시하므로 한쪽이 무권한이면 반대쪽이 이겨버린다 → 명시적으로 NULL 처리
-CREATE FUNCTION effective_role(s uuid) RETURNS store_role LANGUAGE sql STABLE AS $$
-  SELECT CASE
-    WHEN app_agent() IS NULL THEN store_role_of(app_user(), s)
-    WHEN store_role_of(app_user(), s) IS NULL OR store_role_of(app_agent(), s) IS NULL THEN NULL
-    ELSE least(store_role_of(app_user(), s), store_role_of(app_agent(), s))
-  END
+-- 정책용: 최소 role 이상을 가진 store 집합
+CREATE FUNCTION app_sec.my_stores(min_role store_role) RETURNS SETOF uuid LANGUAGE sql STABLE AS $$
+  SELECT store_id FROM app_sec.my_store_roles() WHERE role >= min_role
 $$;
 
 ALTER TABLE memory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memory FORCE ROW LEVEL SECURITY;
 
--- 읽기: reader 이상. proposed 는 작성자·curator만, deleted/rejected 는 curator만
+-- 읽기: reader 이상. proposed 는 대리된 사용자 본인(에이전트 유무 무관) 또는 사람 작성자와 curator만,
+-- deleted/rejected 는 curator만. 봇을 공유하는 다른 사용자는 남의 proposed 를 보지 못한다.
 CREATE POLICY memory_read ON memory FOR SELECT USING (
-  effective_role(store_id) IS NOT null AND (
-    status IN ('active', 'superseded', 'expired')
-    OR (status = 'proposed' AND (
-      created_by::text = current_setting('app.agent_id', true)
-      OR created_by::text = current_setting('app.user_id', true)
-      OR effective_role(store_id) = 'curator'
-    ))
-    OR effective_role(store_id) = 'curator'
+  tenant_id = app_sec.ctx_tenant() AND (
+    (
+      status IN ('active', 'superseded', 'expired')
+      AND store_id IN (SELECT app_sec.my_stores('reader'))
+    )
+    OR store_id IN (SELECT app_sec.my_stores('curator'))
+    OR (
+      status = 'proposed' AND coalesce(on_behalf_of, created_by) = app_sec.ctx_user()
+      AND store_id IN (SELECT app_sec.my_stores('reader'))
+    )
   )
 );
 
 -- 제안: contributor 이상, 반드시 proposed 로만 생성 (user store auto_approve 는 서비스 계층에서 승격)
 -- 작성자 바인딩: 에이전트면 created_by=에이전트, on_behalf_of=사용자 / 아니면 created_by=사용자, on_behalf_of=NULL
 CREATE POLICY memory_propose ON memory FOR INSERT WITH CHECK (
-  effective_role(store_id) >= 'contributor' AND status = 'proposed'
-  AND created_by = coalesce(app_agent(), app_user())
-  AND on_behalf_of IS NOT DISTINCT FROM (CASE WHEN app_agent() IS NOT null THEN app_user() END)
-  AND tenant_id = (
-    SELECT tenant_id FROM store
-    WHERE id = store_id
-  )
+  status = 'proposed' AND version = 1
+  AND tenant_id = app_sec.ctx_tenant()
+  AND store_id IN (SELECT app_sec.my_stores('contributor'))
+  AND created_by = coalesce(app_sec.ctx_agent(), app_sec.ctx_user())
+  AND on_behalf_of IS NOT DISTINCT FROM (CASE WHEN app_sec.ctx_agent() IS NOT null THEN app_sec.ctx_user() END)
 );
 
 -- 상태 변경(승인/대체/삭제): curator 만
-CREATE POLICY memory_curate ON memory FOR UPDATE USING (effective_role(store_id) = 'curator');
+CREATE POLICY memory_curate ON memory FOR UPDATE
+USING (
+  tenant_id = app_sec.ctx_tenant()
+  AND store_id IN (SELECT app_sec.my_stores('curator'))
+)
+WITH CHECK (
+  tenant_id = app_sec.ctx_tenant()
+  AND store_id IN (SELECT app_sec.my_stores('curator'))
+);
 
 
 -- ── 버전/리뷰: 부모 memory 가 보일 때만 보인다 (EXISTS 안에서 memory 의 RLS 가 그대로 적용됨) ──
 ALTER TABLE memory_version ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memory_version FORCE ROW LEVEL SECURITY;
 ALTER TABLE review ENABLE ROW LEVEL SECURITY;
+ALTER TABLE review FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY memory_version_read ON memory_version FOR SELECT USING (
   EXISTS (
@@ -222,17 +303,21 @@ CREATE POLICY memory_version_read ON memory_version FOR SELECT USING (
 );
 -- 기록: 부모 memory 에 contributor 이상, actor 는 호출 주체 본인
 CREATE POLICY memory_version_write ON memory_version FOR INSERT WITH CHECK (
-  actor_id = coalesce(app_agent(), app_user())
+  actor_id = coalesce(app_sec.ctx_agent(), app_sec.ctx_user())
   AND EXISTS (
     SELECT 1 FROM memory AS m
-    WHERE m.id = memory_version.memory_id AND effective_role(m.store_id) >= 'contributor'
+    WHERE
+      m.id = memory_version.memory_id
+      AND m.store_id IN (SELECT app_sec.my_stores('contributor'))
   )
 );
 -- redact(snapshot -> NULL): curator 만 (컬럼 권한 + 트리거가 snapshot 외 변경을 막음)
 CREATE POLICY memory_version_redact ON memory_version FOR UPDATE USING (
   EXISTS (
     SELECT 1 FROM memory AS m
-    WHERE m.id = memory_version.memory_id AND effective_role(m.store_id) = 'curator'
+    WHERE
+      m.id = memory_version.memory_id
+      AND m.store_id IN (SELECT app_sec.my_stores('curator'))
   )
 );
 
@@ -244,23 +329,21 @@ CREATE POLICY review_read ON review FOR SELECT USING (
 );
 -- comment: contributor 이상 / approve·reject: curator
 CREATE POLICY review_write ON review FOR INSERT WITH CHECK (
-  reviewer_id = coalesce(app_agent(), app_user())
+  reviewer_id = coalesce(app_sec.ctx_agent(), app_sec.ctx_user())
   AND EXISTS (
     SELECT 1
     FROM memory AS m
     WHERE
       m.id = review.memory_id
-      AND effective_role(m.store_id) >= CASE
-        WHEN review.verdict = 'comment' THEN 'contributor'::store_role
-        ELSE 'curator'::store_role
-      END
+      AND m.store_id IN (
+        SELECT app_sec.my_stores(
+          CASE WHEN review.verdict = 'comment' THEN 'contributor'::store_role ELSE 'curator'::store_role END
+        )
+      )
   )
 );
 
--- ── 앱 접속 역할: 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──────
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_rw') THEN CREATE ROLE app_rw NOLOGIN; END IF;
-END $$;
+-- ── 앱 접속 역할 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──
 GRANT USAGE ON SCHEMA public TO app_rw;
 -- 주체/권한 테이블은 읽기 전용 (SCIM 동기화·관리 작업은 별도 역할)
 GRANT SELECT ON tenant, principal, group_member, store, store_grant TO app_rw;
@@ -269,3 +352,5 @@ GRANT SELECT, INSERT ON memory_version TO app_rw;
 GRANT UPDATE (snapshot) ON memory_version TO app_rw;   -- redact 전용
 GRANT SELECT, INSERT ON review, deleted_hash TO app_rw;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app_rw;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA app_sec FROM public;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app_sec TO app_rw;
