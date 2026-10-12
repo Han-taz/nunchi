@@ -24,7 +24,7 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. PR(`develop`, `main` 대�
 | `shell` | `scripts/` 아래 모든 `*.sh`에 `shellcheck -S style`. | CI와 테스트 러너가 셸이다. |
 | `hygiene` | `editorconfig-checker`(후행 공백, 마지막 개행, 줄바꿈, 들여쓰기 규칙), `typos`. | 노이즈 diff를 막는다. |
 | `commits` | PR 범위의 모든 커밋이 conventional commit 형식인지, 병합 커밋이 없는지, AI 공동 저자 표기(`Co-Authored-By:` Claude/Anthropic 등, "Generated with Claude")가 없는지 검사한다. 스크립트: `scripts/ci/check-commits.sh`. | 히스토리를 선형으로 읽히게 하고, 이 저장소의 커밋 정책을 강제한다. |
-| `pr-size` | `docs/research/**`, `docs/reviews/**`, 그리고 생성되는 도구 잠금 파일(`.github/tools/package-lock.json`, `.github/tools/requirements.txt`)을 뺀 변경이 800줄(추가+삭제)을 넘으면 실패한다. 스크립트: `scripts/ci/pr-size.sh`. | 리뷰 가능한 크기를 유지한다. 두 디렉터리는 참고용 산문이다. |
+| `pr-size` | 변경이 800줄(추가+삭제)을 넘으면 실패한다. 저장소 속성(`.gitattributes`)은 무시하고 센다. 면제는 셋뿐이다. (1) `docs/research/**`와 `docs/reviews/**`의 `*.md`(다른 확장자는 센다), (2) 잠금 파일(`.github/tools/package-lock.json`, `.github/tools/requirements.txt`)은 같은 PR에서 원본 매니페스트(`package.json`, `requirements.in`)가 함께 바뀐 경우에만, (3) 바이너리 허용 목록(png, jpg, gif, svg, pdf, ico)은 파일당 50줄로 센다. 허용 목록에 없는 바이너리는 실패한다. 스크립트: `scripts/ci/pr-size.sh`. | 리뷰 가능한 크기를 유지한다. 경로나 속성으로 파일을 숨길 수 없게 한다. |
 | `codeql` | CodeQL, 언어 `actions`. | 워크플로의 알려진 취약 패턴을 GitHub의 쿼리로 한 번 더 본다. |
 | `ci-gate` | 위 job 전부를 `needs`로 걸고 `if: always()`로 돈다. 하나라도 `success`가 아니면(실패, 취소, **건너뜀** 포함) 실패한다. | 브랜치 보호에는 이 체크 하나만 등록하면 된다. job을 추가해도 보호 설정을 바꿀 필요가 없다. |
 | `external-links` | 스케줄 실행에서만 `lychee`로 외부 링크를 검사한다. 429는 허용한다. | 외부 사이트는 일시적으로 죽는다. PR을 막지 않고 매일 한 번만 확인한다. `ci-gate`에는 포함되지 않는다. |
@@ -82,7 +82,9 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 | shellcheck | 없음 (`-S style`) | |
 | zizmor | 없음 (기본 persona, 온라인) | |
 
-`pr-size`에는 우회 장치가 없다. 라벨을 포함해 어떤 입력도 한도를 바꾸지 못한다. 한도(800줄)를 넘으면 규칙은 하나다. PR을 쪼갠다. 게이트 자체는 `scripts/ci/pr-size-selftest.sh`가 합성 diff로 검증한다(800줄은 통과, 801줄은 실패). 이 self-test는 `pr-size` job에서 매번 돈다.
+`pr-size`에는 우회 장치가 없다. 라벨을 포함해 어떤 입력도 한도를 바꾸지 못한다. 한도(800줄)를 넘으면 규칙은 하나다. PR을 쪼갠다. 게이트 자체는 `scripts/ci/pr-size-selftest.sh`가 합성 diff로 검증한다(800줄 통과, 801줄 실패, `* -diff`와 `*.sql binary` 속성 아래 5000줄 .sql 실패, NUL 바이트가 있는 .sql 실패, `docs/research`의 5000줄 .sql 실패와 5000줄 .md 통과, png 통과, 매니페스트 없는 잠금 파일 5000줄 실패와 매니페스트가 함께 바뀐 경우 통과). 이 self-test는 `pr-size` job에서 매번 돈다.
+
+속성 무시는 `git --attr-source=<빈 트리>`와 `core.attributesFile=/dev/null`, `GIT_ATTR_NOSYSTEM=1`로 한다(git 2.40 이상). 잠금 파일은 CI에서 다시 잠가 비교하는 방식 대신 매니페스트 동반 변경을 요구하는 방식을 골랐다. 다시 잠그려면 네트워크와 pip-tools/npm 해석 결과가 시점마다 달라져 게이트가 불안정해지기 때문이다. 남는 틈은 매니페스트를 건드리면서 잠금 파일을 부풀리는 경우이며, 잠금 파일은 리뷰어가 diff로 본다.
 
 도구 의존성에는 `npm audit`가 보고하는 알려진 취약점(개발용 린터의 파서 DoS)이 있다. 신뢰하는 입력에만 돌리고 산출물에 들어가지 않으므로 게이트로 삼지 않았다.
 
