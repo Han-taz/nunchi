@@ -5,9 +5,8 @@
 #
 # Lines are added + deleted, counted against the merge base. docs/research/**
 # and docs/reviews/** are excluded because they are reference prose and
-# experiment output, and the tool lock files because they are generated. Set SIZE_OVERRIDE=true
-# (the workflow does this when the PR carries the size-override label) to
-# report the size without failing.
+# experiment output, and the tool lock files because they are generated.
+# There is no bypass. A PR over the limit must be split.
 set -euo pipefail
 
 base="${1:?base ref required}"
@@ -20,10 +19,6 @@ total=$(git diff --numstat "$base...$head" -- . ':(exclude)docs/research/**' ':(
 
 echo "changed lines outside docs/research and docs/reviews: $total (limit $limit)"
 if [ "$total" -gt "$limit" ]; then
-  if [ "${SIZE_OVERRIDE:-false}" = "true" ]; then
-    echo "::warning::over the limit, allowed by the size-override label"
-    exit 0
-  fi
-  echo "::error::PR changes $total lines (limit $limit). Split it, or ask the owner for the size-override label."
+  echo "::error::PR changes $total lines (limit $limit). Split the PR."
   exit 1
 fi
