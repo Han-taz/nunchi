@@ -27,7 +27,8 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 | `pr-size` | 변경이 800줄(추가+삭제)을 넘으면 실패한다. 저장소 속성(`.gitattributes`)은 무시하고 센다. 면제는 셋뿐이다. (1) `docs/research/**`와 `docs/reviews/**`의 `*.md`(다른 확장자는 센다), (2) 잠금 파일(`.github/tools/package-lock.json`, `.github/tools/requirements.txt`)은 같은 PR에서 원본 매니페스트(`package.json`, `requirements.in`)가 함께 바뀐 경우에만, (3) 바이너리 허용 목록(png, jpg, gif, svg, pdf, ico)은 파일당 50줄로 센다. 허용 목록에 없는 바이너리는 실패한다. 스크립트: `scripts/ci/pr-size.sh`. | 리뷰 가능한 크기를 유지한다. 경로나 속성으로 파일을 숨길 수 없게 한다. |
 | `codeql` | CodeQL, 언어 `actions`. | 워크플로의 알려진 취약 패턴을 GitHub의 쿼리로 한 번 더 본다. |
 | `app-lint` | `ruff check`(규칙: E F W I S B UP SIM PL RUF ANN), `ruff format --check`, `mypy --strict src tests`, `deptry`. | 타입과 스타일, 선언되지 않았거나 쓰지 않는 의존성을 기계로 고정한다. |
-| `app-tests` | `postgres:16` 서비스에 대해 `pytest`를 `-W error`(경고는 오류)로 돌린다. 스켈레톤 전체 커버리지 100%(분기 포함)가 아니면 실패하고, PR에서는 `diff-cover`로 변경된 줄의 80%를 추가로 요구한다. | 앱 코드가 늘어도 변경분이 테스트 없이 들어오지 못하게 한다. |
+| `app-tests` | `postgres:16` 서비스에 대해 `pytest`를 `-W error`(경고는 오류)로 돌린다. 마이그레이션 러너(적용, 재적용은 무동작, 변조 감지)와 Hypothesis 속성 테스트가 여기서 돈다. 스켈레톤 전체 커버리지 100%(분기 포함)가 아니면 실패하고, PR에서는 `diff-cover`로 변경된 줄의 80%를 추가로 요구한다. | 앱 코드가 늘어도 변경분이 테스트 없이 들어오지 못하게 한다. |
+| `schema-drift` | 새 DB 둘을 만든다. 하나는 `db/schema.sql`, 다른 하나는 `python -m nunchi.migrate`로 만들고 `pg_dump --schema-only`(`schema_migrations` 제외, 매번 바뀌는 `\restrict` 줄 제거) 결과를 비교한다. 스크립트: `scripts/ci/schema-drift.sh`. | `schema.sql`을 고치고 마이그레이션을 빼먹는 일을 막는다. |
 | `app-mutation` | `mutmut`. PR에서는 변경된 `src/nunchi` 모듈만, 그 밖의 실행(push, 스케줄)에서는 전부 돌려 죽인 뮤턴트 비율이 80% 미만이면 실패한다(timeout은 죽인 것으로 센다). 스크립트: `scripts/ci/mutation-gate.sh`. | 커버리지만으로는 단언 없는 테스트를 못 잡는다. |
 | `app-audit` | `uv export`로 잠금 파일의 전체 의존성(개발 그룹 포함)을 뽑아 `pip-audit`로 검사한다. 알려진 취약점이 하나라도 있으면 실패한다. | 공급망 취약점은 예외 없이 막는다. |
 | `semgrep` | `p/python`, `p/secrets`와 자체 규칙 `.semgrep/sql-injection.yml`(f-string, `%`, `.format`, `+`로 만든 SQL을 `execute`/`executemany`에 넘기면 실패). 자체 규칙은 `.semgrep/sql-injection.py`의 `ruleid`/`ok` 주석으로 먼저 테스트한다. | 파라미터 바인딩을 우회하는 SQL 조립을 기계로 금지한다. |
@@ -82,6 +83,7 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 | typos | 단어 `anc`, `EHR`, `NAMS`, `RTO`, `LAF`, `IIT`, `FPR` | 논문 약어와 기호다(ancestor 함수, 전자건강기록, Neo4j Agent Memory Service 등). |
 | gitleaks | 정규식 `family/partner`, 파일 `gatemem-2606.18829.md` | 벤치마크 설명의 산문이 `generic-api-key` 규칙에 걸린다. |
 | ruff | `tests/**`에서 `S101`(assert), `PLR2004`(매직 값) | assert는 테스트의 문법이고, 기대값 리터럴이 곧 단언이다. |
+| deptry | `DEP002`: `psycopg-binary` | `psycopg[binary]` extra가 끌어오는 C 가속기이고 import하지 않는다. |
 | ruff | 파일 제외: `.semgrep/` | Semgrep 규칙 테스트 픽스처는 일부러 나쁜 SQL을 담고 있고 타입 주석이 필요 없다. |
 | shellcheck | 없음 (`-S style`) | |
 | zizmor | 없음 (기본 persona, 온라인) | |
@@ -94,8 +96,9 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 
 ## 앱 게이트 (활성)
 
-위 표의 `app-*`, `semgrep`, `docker-build`가 애플리케이션 코드 게이트다. 도구는 `uv.lock`(`uv sync --locked`)로만 설치한다. 로컬에서는 `uv sync --locked`로 CI와 같은 환경을 만든다.
+위 표의 `app-*`, `schema-drift`, `semgrep`, `docker-build`가 애플리케이션 코드 게이트다. 도구는 `uv.lock`(`uv sync --locked`)로만 설치한다. 로컬에서는 `uv sync --locked`로 CI와 같은 환경을 만든다.
 
+- 마이그레이션: `db/migrations/NNNN_slug.sql`을 `python -m nunchi.migrate`가 순서대로 적용하고 `schema_migrations(version, checksum, applied_at)`에 기록한다. 다시 돌리면 아무것도 하지 않고, 적용된 파일이 수정되었거나 사라졌거나 적용된 것보다 앞 번호의 새 파일이 생기면 실패한다. `0001_baseline.sql`은 `scripts/migrate-baseline.sh`가 `db/schema.sql`에서 만든다. 어디에도 적용되기 전에만 다시 만들 수 있다. 이후 `schema.sql` 변경은 새 번호의 마이그레이션으로 함께 낸다.
 - `pr-size`: `uv.lock`은 같은 PR에서 `pyproject.toml`이 바뀐 경우에만 면제다. 다른 잠금 파일과 같은 이유(생성 파일, 리뷰어는 매니페스트를 본다)다.
 - `app-tests`의 100% 커버리지는 스켈레톤이 작을 때의 기준이다. 코드가 늘면 `fail_under`를 낮추지 말고 diff-cover 80%를 주 게이트로 삼을지 별도 PR에서 정한다. `if __name__ == "__main__"` 줄만 커버리지에서 제외한다.
 

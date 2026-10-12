@@ -11,6 +11,7 @@ FROM python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc1
 RUN useradd --system --uid 10001 --no-create-home nunchi
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
+COPY db/migrations ./db/migrations
 ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1
 USER 10001
-CMD ["python", "-c", "import nunchi"]
+CMD ["python", "-m", "nunchi.migrate"]
