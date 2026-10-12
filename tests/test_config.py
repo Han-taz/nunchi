@@ -38,3 +38,12 @@ def test_min_above_max_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_unknown_field_is_rejected() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
         Settings.model_validate({"database_url": "x", "bogus": 1})
+
+
+def test_timeouts_default_and_validate() -> None:
+    settings = Settings(database_url="postgres://u:p@h/db")
+    assert (settings.db_pool_timeout, settings.db_connect_timeout) == (30.0, 10)
+    with pytest.raises(ValidationError, match="db_pool_timeout"):
+        Settings(database_url="postgres://u:p@h/db", db_pool_timeout=0)
+    with pytest.raises(ValidationError, match="db_connect_timeout"):
+        Settings(database_url="postgres://u:p@h/db", db_connect_timeout=0)
