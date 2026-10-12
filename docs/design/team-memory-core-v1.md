@@ -104,6 +104,7 @@ DB 수준에서 거는 제약
    - fail-closed: `begin_request`를 부르지 않았거나 xid가 맞지 않으면 컨텍스트가 NULL이고 권한은 없다(오류도 권한도 아님). 비활성·group·agent id를 user 자리에 넣거나 user id를 agent 자리에 넣으면 `begin_request`가 `28000`으로 거부한다. 에이전트가 있으면 사용자·에이전트 중 한쪽이라도 grant가 없을 때 NULL이다(`least()`는 NULL을 무시하므로 명시 처리). 비활성 principal과 비활성 그룹은 권한을 주지 않는다.
    - append-only 트리거: memory_version은 snapshot→NULL(redact)만 허용하고, snapshot을 뺀 모든 컬럼(reason 포함)이 같아야 한다. review는 UPDATE/DELETE 모두 금지.
    - 해시 체인: 각 버전 행은 `snapshot_hash`, 직전 행의 `prev_hash`, 둘을 묶은 `row_hash`를 가진다. snapshot이 redact돼도 해시는 남아 `app_sec.verify_chain(memory_id)`가 계속 검증할 수 있고, 행의 actor나 순서를 바꾸면 `false`가 된다(앵커링은 worker가 맡는다).
+   - 검색: RLS 아래에서는 `@@`가 LEAKPROOF가 아니라 GIN 인덱스를 쓰지 못한다(10만 행에서 41ms 순차 스캔). 검색은 `app_sec.search(query, stores, statuses)`(SECURITY DEFINER)로 제공한다. 함수가 `my_store_roles()`로 `memory_read` 정책과 같은 규칙을 직접 적용하고(같은 호출자가 직접 읽는 행과 같은지는 사용자별로 테스트한다), 기본 status는 active이며, 점수 순 50건까지, 본문 없이 id·제목만 돌려준다(같은 조건에서 2.2ms).
 4. 원천 링크에 `inherit_acl: true`가 붙은 메모리는 조회할 때 원천 시스템에서 사용자의 접근 가능 여부를 확인한다. 결과는 짧게 캐시한다. 원천에서 권한이 사라지면 메모리도 안 보인다. v1에서는 Google Drive, SharePoint, Notion 어댑터만 만든다.
 
 ### 스모크 테스트 결과 (Postgres 16, `db/tests/smoke_test.sql`)
@@ -127,6 +128,7 @@ DB 수준에서 거는 제약
 | F8 | deleted_hash·memory_version·review 직접 쓰기, 남의 deleted_hash 조회 | 쓰기 `42501`, 조회 0건 ✔ |
 | F9 | 승인 → origin 세탁 → created_by 변경 → 삭제 → 소생 → 체인 | 버전 2 / `P0001` / `P0001` / 본문 NULL·snapshot 전부 NULL·deleted_hash 1 / `P0001` / `verify_chain` true; 변조하면 false ✔ |
 | F10 | 삭제된 본문의 공백만 바꾼 재제안 | `23505` ✔ |
+| N10 | 검색 함수: 못 읽는 store, 기본 status, 자기 proposed, curator 전용 상태, 컨텍스트 없음 | hr 단어 0건, 기본 active만, 작성자·curator만 proposed, 컨텍스트 없으면 0건; 사용자별로 직접 읽은 결과와 일치 ✔ |
 | N8 | 교차 테넌트 principal·store로 grant, store와 tenant가 다른 memory (소유자 권한) | 모두 `23503` ✔ |
 | F11 | 10만 행 `count(*)` (app_rw) | 로컬 한도 200ms, CI 한도 1000ms ✔ |
 | A10 | `app_rw` 속성, `FORCE ROW LEVEL SECURITY` 대상 | `LOGIN`/`NOBYPASSRLS`/`NOINHERIT`, memory·memory_version·review ✔ |

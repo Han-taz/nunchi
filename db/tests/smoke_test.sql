@@ -450,7 +450,7 @@ SELECT t_eq('P3 functions app_rw can execute equal the allowlist', $q$SELECT str
   WHERE n.nspname IN ('public', 'app_sec') AND has_function_privilege('app_rw', p.oid, 'EXECUTE')
     AND p.proname NOT IN ('t_eq', 't_err', 't_ctx', 't_ctx_soft', 't_role')
     AND NOT EXISTS (SELECT 1 FROM pg_depend AS d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')$q$,
-  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.my_store_roles,app_sec.my_stores,app_sec.verify_chain,public.principal_closure');
+  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.my_store_roles,app_sec.my_stores,app_sec.search,app_sec.verify_chain,public.principal_closure');
 
 -- A9) 체인은 변조를 드러낸다: 소유자가 트리거를 끄고 actor 를 바꾸면 verify_chain 이 false
 RESET ROLE;
@@ -465,5 +465,56 @@ ALTER TABLE memory_version DISABLE TRIGGER memory_version_append_only;
 UPDATE memory_version SET reason = 'rewritten' WHERE memory_id = '00000000-0000-0000-0000-0000000cc001' AND op = 'approve';
 SELECT t_eq('P5 tampered reason breaks the chain', $q$SELECT app_sec.verify_chain('00000000-0000-0000-0000-0000000cc001')::text$q$, 'false');
 ROLLBACK;
+-- ═══ P0 하드닝 (A11): 검색 함수 ═════════════════════════════
+-- 사전 데이터(소유자 권한): 같은 단어를 가진 행을 store, 상태, 작성자별로 흩어 놓는다
+INSERT INTO principal (id, tenant_id, kind, external_id, display_name) VALUES
+ ('00000000-0000-0000-0000-0000000000f4','00000000-0000-0000-0000-000000000001','user','fay','Fay(영업 contributor)');
+INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
+ ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f4','contributor','00000000-0000-0000-0000-000000000001');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, on_behalf_of) VALUES
+ ('00000000-0000-0000-0000-0000000e0001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f002','note','active','zebra hr active','x','[]','00000000-0000-0000-0000-0000000000b1',NULL),
+ ('00000000-0000-0000-0000-0000000e0002','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','active','zebra sales active','x','[]','00000000-0000-0000-0000-0000000000c1',NULL),
+ ('00000000-0000-0000-0000-0000000e0003','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','proposed','zebra sales proposed by bot for alice','x','[]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1'),
+ ('00000000-0000-0000-0000-0000000e0004','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','proposed','zebra sales proposed by fay','x','[]','00000000-0000-0000-0000-0000000000f4',NULL),
+ ('00000000-0000-0000-0000-0000000e0005','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','rejected','zebra sales rejected','x','[]','00000000-0000-0000-0000-0000000000f4',NULL),
+ ('00000000-0000-0000-0000-0000000e0006','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','superseded','zebra sales superseded','x','[]','00000000-0000-0000-0000-0000000000c1',NULL);
+
+SET ROLE app_rw;
+
+-- 정책과 같은 가시성: 호출자가 읽을 수 있는 행만, 기본은 active (N10)
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t_eq('N10a alice+bot searches zebra: default status is active, hr hidden', $q$SELECT string_agg(title, ',' ORDER BY title) FROM app_sec.search('zebra')$q$, 'zebra sales active');
+SELECT t_eq('N10b alice+bot searches an hr-only word', $q$SELECT count(*)::text FROM app_sec.search('연봉', NULL, enum_range(NULL::memory_status))$q$, '0');
+SELECT t_eq('N10c alice+bot asks for the hr store by id', $q$SELECT count(*)::text FROM app_sec.search('zebra', ARRAY['00000000-0000-0000-0000-00000000f002']::uuid[], enum_range(NULL::memory_status))$q$, '0');
+COMMIT;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t_eq('N10d alice alone, all statuses: active, own proposal, superseded', $q$SELECT string_agg(title, ',' ORDER BY title) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))$q$, 'zebra sales active,zebra sales proposed by bot for alice,zebra sales superseded');
+COMMIT;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t_eq('N10e curator carol, all statuses', $q$SELECT count(*)::text FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))$q$, '5');
+SELECT t_eq('N10f curator carol asks only for proposed', $q$SELECT count(*)::text FROM app_sec.search('zebra', NULL, ARRAY['proposed']::memory_status[])$q$, '2');
+SELECT t_eq('N10g curator carol narrows to the hr store', $q$SELECT count(*)::text FROM app_sec.search('zebra', ARRAY['00000000-0000-0000-0000-00000000f002']::uuid[], enum_range(NULL::memory_status))$q$, '0');
+COMMIT;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000b1', NULL);
+SELECT t_eq('N10h hr curator bob finds the hr row', $q$SELECT string_agg(title, ',') FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))$q$, 'zebra hr active');
+COMMIT;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000f1', NULL);
+SELECT t_eq('N10i reader dave, all statuses: active and superseded only', $q$SELECT count(*)::text FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))$q$, '2');
+COMMIT;
+BEGIN;
+SELECT t_eq('N10j no request context finds nothing', $q$SELECT count(*)::text FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))$q$, '0');
+COMMIT;
+
+-- 함수가 보여 주는 행 = 같은 호출자가 memory 를 직접 읽어 보이는 행 (정책과 함수의 가시성 규칙이 어긋나지 않는다)
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t_eq('N10k parity alice+bot', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE search_tsv @@ websearch_to_tsquery('simple', 'zebra')))::text$q$, 'true');
+COMMIT;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t_eq('N10l parity carol', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE search_tsv @@ websearch_to_tsquery('simple', 'zebra')))::text$q$, 'true');
+COMMIT;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000f1', NULL);
+SELECT t_eq('N10m parity dave', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE search_tsv @@ websearch_to_tsquery('simple', 'zebra')))::text$q$, 'true');
+COMMIT;
+RESET ROLE;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP FUNCTION t_eq(text, text, text); DROP FUNCTION t_err(text, text, text); DROP FUNCTION t_ctx_soft(uuid, uuid); DROP FUNCTION t_ctx(uuid, uuid); DROP FUNCTION t_role(uuid);
