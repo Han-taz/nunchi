@@ -234,6 +234,15 @@ BEGIN
   PERFORM set_config('app.ctx_xid', pg_current_xact_id()::text, true);  -- primary 전용
 END $$;
 
+-- 토큰의 subject(발급 테넌트, 종류, external_id)를 principal id 로 바꾼다. begin_request 이전, 컨텍스트가 없는 시점에 쓴다.
+-- principal.external_id 는 app_rw 에 열려 있지 않으므로(아래 컬럼 GRANT) 이 함수가 유일한 조회 경로다.
+-- 활성 principal 만 돌려주고 그 밖에는 NULL 이다. 테넌트와 종류가 정확히 일치해야 한다.
+CREATE FUNCTION app_sec.resolve_principal(p_issuer_tenant uuid, p_kind principal_kind, p_external_id text) RETURNS uuid
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT id FROM principal
+  WHERE tenant_id = p_issuer_tenant AND kind = p_kind AND external_id = p_external_id AND active
+$$;
+
 CREATE FUNCTION app_sec.ctx_user() RETURNS uuid LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT CASE WHEN current_setting('app.ctx_xid', true) = pg_current_xact_id()::text
               THEN nullif(current_setting('app.user_id', true), '')::uuid END
@@ -659,7 +668,10 @@ END $$;
 -- ── 앱 접속 역할 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──
 GRANT USAGE ON SCHEMA public TO app_rw;
 -- 주체/권한/감사 테이블은 읽기 전용이다. 버전은 memory 트리거, 삭제 해시는 삭제 트리거, 권한과 주체는 별도 관리 역할이 쓴다
-GRANT SELECT ON tenant, principal, group_member, store, store_grant, memory_transition TO app_rw;
+GRANT SELECT ON tenant, group_member, store, store_grant, memory_transition TO app_rw;
+-- principal.external_id(IdP subject, SCIM id)는 숨긴다: 컬럼 단위 GRANT 에서 뺀다. SELECT * 는 42501 이다.
+-- 필요한 조회는 SECURITY DEFINER 함수(app_sec.resolve_principal)로 낸다.
+GRANT SELECT (id, tenant_id, kind, display_name, active) ON principal TO app_rw;
 GRANT SELECT ON memory_version, review, deleted_hash TO app_rw;
 GRANT SELECT, INSERT, UPDATE ON memory TO app_rw;
 
@@ -669,6 +681,7 @@ GRANT SELECT, INSERT, UPDATE ON memory TO app_rw;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA app_sec FROM public, app_rw;
 REVOKE ALL ON FUNCTION principal_closure(uuid), forbid_mutation() FROM public, app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.begin_request(uuid, uuid) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.resolve_principal(uuid, principal_kind, text) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_user() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_agent() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_tenant() TO app_rw;
