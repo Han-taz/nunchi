@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     database_url: SecretStr
     pool_min_size: Annotated[int, Field(ge=1)] = 1
     pool_max_size: Annotated[int, Field(ge=1)] = 10
+    db_pool_timeout: Annotated[float, Field(gt=0)] = 30.0
+    db_connect_timeout: Annotated[int, Field(ge=1)] = 10
     migrations_dir: Path = Path("db/migrations")
 
     @model_validator(mode="after")

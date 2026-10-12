@@ -1,73 +1,12 @@
 import uuid
-from collections.abc import Iterator
 
 import psycopg
 import pytest
-from psycopg import sql
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
-from nunchi import migrate
 from nunchi.config import Settings
-from nunchi.db import open_pool, request_tx
-from tests.conftest import APP_ROLE, REPO
-
-USER = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
-OTHER = uuid.UUID("00000000-0000-0000-0000-0000000000a2")
-AGENT = uuid.UUID("00000000-0000-0000-0000-0000000000b1")
-TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000c1")
-STORE = uuid.UUID("00000000-0000-0000-0000-0000000000d1")
-
-
-def _app_url(superuser_url: str) -> str:
-    return superuser_url.replace("postgres:postgres@", f"{APP_ROLE}:app@", 1)
-
-
-@pytest.fixture
-def seeded(fresh_db: str, admin_url: str) -> Iterator[str]:
-    """A migrated database with one active memory that only USER can read. Yields the app URL."""
-    with psycopg.connect(fresh_db) as conn:
-        migrate.migrate(conn, REPO / "db" / "migrations")
-        conn.execute("INSERT INTO tenant (id, name) VALUES (%s, 't')", (TENANT,))
-        for pid, kind in ((USER, "user"), (OTHER, "user"), (AGENT, "agent")):
-            conn.execute(
-                "INSERT INTO principal (id, tenant_id, kind, external_id, display_name)"
-                " VALUES (%s, %s, %s, %s, 'x')",
-                (pid, TENANT, kind, str(pid)),
-            )
-        conn.execute(
-            "INSERT INTO store (id, tenant_id, kind, slug, description)"
-            " VALUES (%s, %s, 'team', 's', 'd')",
-            (STORE, TENANT),
-        )
-        conn.execute(
-            "INSERT INTO store_grant (store_id, principal_id, role, tenant_id)"
-            " VALUES (%s, %s, 'contributor', %s), (%s, %s, 'reader', %s)",
-            (STORE, USER, TENANT, STORE, AGENT, TENANT),
-        )
-        conn.execute(
-            "INSERT INTO memory (tenant_id, store_id, kind, status, title, created_by)"
-            " VALUES (%s, %s, 'note', 'active', 'hello', %s)",
-            (TENANT, STORE, USER),
-        )
-    with psycopg.connect(admin_url, autocommit=True) as admin:
-        admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(APP_ROLE)))
-        admin.execute(
-            sql.SQL("CREATE ROLE {} LOGIN PASSWORD 'app' IN ROLE app_rw").format(
-                sql.Identifier(APP_ROLE)
-            )
-        )
-        try:
-            yield _app_url(fresh_db)
-        finally:
-            admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(APP_ROLE)))
-
-
-@pytest.fixture
-def pool(seeded: str) -> Iterator[ConnectionPool[psycopg.Connection[tuple[object, ...]]]]:
-    settings = Settings(database_url=seeded, pool_max_size=2)
-    opened = open_pool(settings)
-    yield opened
-    opened.close()
+from nunchi.db import bind_identity, open_pool, request_tx
+from tests.conftest import AGENT, AGENT_NO_GRANT, OTHER, STORE, TENANT, USER
 
 
 def count_visible(
@@ -139,5 +78,47 @@ def test_open_pool_honours_the_configured_bounds(seeded: str) -> None:
     try:
         assert (pool.min_size, pool.max_size) == (2, 3)
         assert pool.get_stats()["pool_size"] == 2
+    finally:
+        pool.close()
+
+
+@pytest.mark.db
+def test_agent_without_a_grant_sees_nothing(
+    pool: ConnectionPool[psycopg.Connection[tuple[object, ...]]],
+) -> None:
+    assert count_visible(pool, USER, None) == 1
+    assert count_visible(pool, USER, AGENT_NO_GRANT) == 0
+
+
+@pytest.mark.db
+def test_bind_identity_carries_the_agent(
+    pool: ConnectionPool[psycopg.Connection[tuple[object, ...]]],
+) -> None:
+    with pool.connection() as conn, conn.transaction():
+        bind_identity(conn, USER, AGENT)
+        row = conn.execute("SELECT app_sec.ctx_user(), app_sec.ctx_agent()").fetchone()
+    assert row == (USER, AGENT)
+
+
+def test_open_pool_gives_up_when_the_server_is_unreachable() -> None:
+    settings = Settings(
+        database_url="postgresql://u:p@127.0.0.1:1/db",
+        db_pool_timeout=0.5,
+        db_connect_timeout=1,
+    )
+    with pytest.raises(PoolTimeout):
+        open_pool(settings)
+
+
+@pytest.mark.db
+def test_a_connection_the_server_killed_is_replaced(seeded: str, admin_url: str) -> None:
+    pool = open_pool(Settings(database_url=seeded, pool_min_size=1, pool_max_size=1))
+    try:
+        with pool.connection() as conn:
+            row = conn.execute("SELECT pg_backend_pid()").fetchone()
+        assert row is not None
+        with psycopg.connect(admin_url, autocommit=True) as admin:
+            admin.execute("SELECT pg_terminate_backend(%s)", (row[0],))
+        assert count_visible(pool, USER, None) == 1
     finally:
         pool.close()
