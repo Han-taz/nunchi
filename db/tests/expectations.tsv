@@ -124,3 +124,15 @@ N10j	(ok)	fail
 N10k	(ok)	fail
 N10l	(ok)	fail
 N10m	(ok)	fail
+S1	(ok)	fail
+S2a	(ok)	fail
+S2e	(ok)	fail
+S2b	(ok)	fail
+S2c	(ok)	fail
+S2d	(ok)	fail
+S3	(ok)	pass	Postgres never searches pg_temp for function names, so v1.0 is immune too. The test pins that guarantee against a future schema that qualifies pg_temp.
+S4	(ok)	fail
+S5a	(ok)	pass	baseline: v1.0 closure also returns alice and sales
+S5b	(ok)	fail
+S5c	(ok)	fail
+S5d	(ok)	pass	control: reactivation restores the closure on both schemas

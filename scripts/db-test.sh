@@ -7,7 +7,7 @@
 # and CREATE ROLE (the superuser of a throwaway server). Every run creates and
 # drops its own database, so two runs never share state.
 #
-# Each test prints one line that starts with its id (T1, X3a, F11, N8a, A10a, P1, ...). The file
+# Each test prints one line that starts with its id (T1, X3a, F11, N8a, A10a, S1, P1, ...). The file
 # db/tests/expectations.tsv is the registry: a registered id that prints
 # nothing, an unregistered id that prints something, or an id whose outcome
 # differs from the registry makes the script exit nonzero.
@@ -70,8 +70,11 @@ fi
 # stdout carries SELECT results and stderr carries RAISE NOTICE output.
 # Separate files keep psql's buffered streams from interleaving mid-line.
 psql_status=0
-psql -X -q -t -v ON_ERROR_STOP=1 -v f11_limit_ms="$f11_limit_ms" "$test_url" -f "$tests_dir/smoke_test.sql" \
+# S1 lints the schema's own functions, so it runs before smoke_test.sql adds its helpers.
+psql -X -q -t -v ON_ERROR_STOP=1 "$test_url" -f "$tests_dir/lint_search_path.sql" \
   >"$work/out.txt" 2>"$work/err.txt" || psql_status=$?
+psql -X -q -t -v ON_ERROR_STOP=1 -v f11_limit_ms="$f11_limit_ms" "$test_url" -f "$tests_dir/smoke_test.sql" \
+  >>"$work/out.txt" 2>>"$work/err.txt" || psql_status=$?
 cat "$work/out.txt" "$work/err.txt"
 if [ "$psql_status" -ne 0 ]; then
   echo "db-test: psql exited with status $psql_status" >&2
@@ -80,7 +83,7 @@ fi
 
 # Normalise to "<id> <rest>" lines.
 sed -E -e 's/^psql:[^ ]+ NOTICE:  //' -e 's/^[[:space:]]+//' "$work/out.txt" "$work/err.txt" \
-  | grep -E '^(T[0-9]+[a-z]?|[XFNAP][0-9]+[a-z]?) ' >"$work/lines.txt" || true
+  | grep -E '^(T[0-9]+[a-z]?|[XFNASP][0-9]+[a-z]?) ' >"$work/lines.txt" || true
 
 awk -F '\t' -v profile="$profile" -v results="$results_out" '
   FNR == NR {

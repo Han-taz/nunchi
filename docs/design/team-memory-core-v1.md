@@ -101,6 +101,8 @@ DB 수준에서 거는 제약
    - deleted_hash: 해당 store의 curator만 읽는다. 쓰기는 삭제 트리거만. contributor의 재제안 검사는 `app_sec.is_deleted_content()`(SECURITY DEFINER)가 대신하고, 해시는 평문 sha256이 아니라 서버 비밀키 HMAC이라 추측 오라클이 되지 않는다.
 3. API는 RLS를 우회하지 않는 전용 DB 역할(`app_rw`: `LOGIN NOBYPASSRLS NOINHERIT`, 최소 권한)로 **직접** 접속한다. 테이블과 SECURITY DEFINER 함수의 소유자는 접속에 쓰지 않는 별도 역할(운영에서는 `NOLOGIN` 인 `app_owner`)이고, RLS 테이블에는 `FORCE ROW LEVEL SECURITY`가 걸려 있다. 관리 작업(SCIM 동기화, worker)만 별도 역할을 쓴다. 스모크 테스트의 `SET ROLE app_rw`는 테스트 전용이다. superuser로 접속해 `SET ROLE`하는 구조는 SQL 인젝션 한 번이 `RESET ROLE`로 이어지므로 쓰지 않는다.
    - `app_rw` 권한: tenant/principal/group_member/store/store_grant/memory_transition/memory_version/review/deleted_hash는 SELECT만(스스로 권한 부여 불가, 감사 위조 불가). memory만 SELECT/INSERT/UPDATE. 역할 생성과 GRANT는 `schema.sql`에 있다.
+   - 신뢰 경계: `app_rw`는 한 트랜잭션 안에서 `set_config`로 `app.user_id`, `app.agent_id`, `app.tenant_id`, `app.ctx_xid`를 직접 쓸 수 있다. 탈취된 앱은 컨텍스트를 위조할 수 있다. app_rw can forge context inside a transaction; DB-side token verification is P1 (fable report §6.2). `begin_request`는 실수와 풀러 누수를 막는 장치이지 탈취된 앱을 막는 장치가 아니다. v1.1에서는 이 한계를 받아들인다.
+   - 임시 객체 하이재킹 방어: 모든 함수에 `SET search_path = pg_catalog, public, pg_temp`를 건다. `pg_temp`를 빼면 임시 스키마가 관계 조회에서 가장 먼저 검색되어, `app_rw`의 `CREATE TEMP TABLE store_grant`가 `my_store_roles()`를 가로챈다(`principal`, `group_member`도 같다). `pg_temp`는 반드시 마지막에 둔다. `TEMPORARY` 권한도 `PUBLIC`에서 회수한다(기본 권한이 `PUBLIC`에 있어 `app_rw`만 회수하면 효과가 없다). 임시 테이블이 필요한 관리 작업은 소유자로 하거나 따로 GRANT한다. 새 함수가 이 규칙을 어기면 `db-test.sh`의 lint(S1)가 CI에서 실패한다.
    - fail-closed: `begin_request`를 부르지 않았거나 xid가 맞지 않으면 컨텍스트가 NULL이고 권한은 없다(오류도 권한도 아님). 비활성·group·agent id를 user 자리에 넣거나 user id를 agent 자리에 넣으면 `begin_request`가 `28000`으로 거부한다. 에이전트가 있으면 사용자·에이전트 중 한쪽이라도 grant가 없을 때 NULL이다(`least()`는 NULL을 무시하므로 명시 처리). 비활성 principal과 비활성 그룹은 권한을 주지 않는다.
    - append-only 트리거: memory_version은 snapshot→NULL(redact)만 허용하고, snapshot을 뺀 모든 컬럼(reason 포함)이 같아야 한다. review는 UPDATE/DELETE 모두 금지.
    - 해시 체인: 각 버전 행은 `snapshot_hash`, 직전 행의 `prev_hash`, 둘을 묶은 `row_hash`를 가진다. snapshot이 redact돼도 해시는 남아 `app_sec.verify_chain(memory_id)`가 계속 검증할 수 있고, 행의 actor나 순서를 바꾸면 `false`가 된다(앵커링은 worker가 맡는다).
@@ -137,6 +139,11 @@ DB 수준에서 거는 제약
 | X4 | 타 store의 버전·리뷰 조회 / app_rw의 버전·리뷰 기록 | 0건, 기록 거부(42501) ✔ |
 | X5 | redact 시 reason 등 변조, review 수정·삭제, app_rw의 redact | 트리거 차단, app_rw의 redact 거부(42501) ✔ |
 | X6 | 비활성 사용자·그룹·에이전트 | 권한 NULL, 재활성화 시 복구 ✔ |
+| S1 | `public`/`app_sec`의 모든 함수(확장 제외)가 `search_path`를 고정하고 `pg_temp`를 마지막에 둠 (lint) | 함수 전부 고정 ✔ |
+| S2 | 임시 `store_grant`/`principal`/`group_member`로 권한 상승 시도 | 진짜 role 그대로, 임시 principal은 `begin_request`가 `28000` ✔ |
+| S3 | `pg_temp.ctx_user()`, `pg_temp.current_setting()` 함수로 가리기 | 효과 없음 ✔ |
+| S4 | `app_rw`의 `CREATE TEMP TABLE` | `42501` ✔ |
+| S5 | `principal_closure`를 직접 호출: 비활성 그룹, 비활성 사용자 | 클로저에서 빠짐(`begin_request`를 거치지 않고 확인) ✔ |
 
 ## 6. API (MCP 툴 = REST 엔드포인트)
 
