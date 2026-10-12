@@ -2,15 +2,88 @@ rules:
   - id: nunchi-formatted-sql-in-execute
     languages: [python]
     severity: ERROR
+    mode: taint
     message: >-
-      SQL built with an f-string, %-formatting, str.format or concatenation is passed to
-      execute(). Pass parameters as the second argument, or compose with psycopg.sql.
-    pattern-either:
-      - pattern: $CONN.execute(f"...", ...)
-      - pattern: $CONN.execute("..." % $ARGS, ...)
-      - pattern: $CONN.execute("...".format(...), ...)
-      - pattern: $CONN.execute("..." + $X, ...)
-      - pattern: $CONN.executemany(f"...", ...)
-      - pattern: $CONN.executemany("..." % $ARGS, ...)
-      - pattern: $CONN.executemany("...".format(...), ...)
-      - pattern: $CONN.executemany("..." + $X, ...)
+      SQL built with an f-string, %-formatting, str.format, str.join or concatenation reaches
+      the first argument of execute(), executemany() or copy(). Pass parameters as the second
+      argument, or compose with psycopg.sql.
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: f"..."
+              - pattern: '$X % $Y'
+              - pattern: '$X.format(...)'
+              - pattern: '$X + $Y'
+              - pattern: '$S.join(...)'
+          - pattern-not: sql.SQL("...").format(...)
+          - pattern-not: sql.SQL("...").join(...)
+          - pattern-not: sql.SQL("...") + $Y
+          - pattern-not: $X + sql.SQL("...")
+      - patterns:
+          - pattern: $Q += $X
+          - pattern-not: $Q += "..."
+          - focus-metavariable: $Q
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CONN.execute($Q, ...)
+              - pattern: $CONN.execute(..., query=$Q, ...)
+              - pattern: $CONN.executemany($Q, ...)
+              - pattern: $CONN.executemany(..., query=$Q, ...)
+              - pattern: $CONN.copy($Q, ...)
+              - pattern: $CONN.copy(..., statement=$Q, ...)
+          - focus-metavariable: $Q
+
+  # Semgrep OSS tracks taint only inside one function body, so a value returned by a local
+  # helper loses its taint at the call site. These patterns flag the call site directly: a
+  # helper defined in the same file that returns a formatted string and is passed to a sink.
+  - id: nunchi-formatted-sql-from-helper
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A local helper that returns a formatted string (f-string, %, str.format, str.join or +)
+      is passed as the first argument of execute(), executemany() or copy(). Pass parameters
+      as the second argument, or compose with psycopg.sql.
+    patterns:
+      - pattern-either:
+          - pattern: $C.$M($F(...), ...)
+          - pattern: $C.$M(self.$F(...), ...)
+      - metavariable-regex:
+          metavariable: $M
+          regex: ^(execute|executemany|copy)$
+      - pattern-either:
+          - pattern-inside: |
+              def $F(...):
+                ...
+                return $R
+              ...
+          - pattern-inside: |
+              ...
+              def $F(...):
+                ...
+                return $R
+          - pattern-inside: |
+              def $F(...):
+                ...
+                $V = $R
+                ...
+                return $V
+              ...
+          - pattern-inside: |
+              ...
+              def $F(...):
+                ...
+                $V = $R
+                ...
+                return $V
+      - metavariable-pattern:
+          metavariable: $R
+          patterns:
+            - pattern-either:
+                - pattern: f"..."
+                - pattern: '$X % $Y'
+                - pattern: '$X.format(...)'
+                - pattern: '$X + $Y'
+                - pattern: '$S.join(...)'
+            - pattern-not: sql.SQL(...).format(...)
+            - pattern-not: sql.SQL(...) + $Y
