@@ -46,6 +46,39 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 - 워크플로를 만들거나 이 상태를 CI에서 게시하면 안 된다. 게시 주체가 독립적이라는 점이 이 체크의 의미다.
 - 새 커밋을 push하면 헤드 SHA가 바뀌므로 상태가 무효가 된다. 검증을 다시 받아야 한다.
 
+## gate-integrity
+
+`pull_request`로 도는 `ci.yml`은 **PR 헤드의 워크플로와 스크립트**를 실행한다. 그래서 PR이 `scripts/ci/*.sh`, 셀프테스트, `ci.yml`의 job, `ci-gate`의 `needs`를 같은 PR에서 약하게 고치면 약해진 게이트로 자기 자신을 통과시킬 수 있다(#2, #3, #14의 검증자가 확인). `.github/workflows/gate-integrity.yml`은 이 구멍을 베이스에서 한 번 더 막는다. job 이름은 `gate-integrity`이고, 브랜치 보호의 필수 체크 등록은 병합 뒤에 코디네이터가 한다.
+
+| 단계 | 하는 일 |
+|---|---|
+| 베이스 체크아웃 | `pull_request.base.sha`만 체크아웃한다(`persist-credentials: false`, `contents: read`). 신뢰하는 스크립트는 전부 여기서 나온다. |
+| 헤드 가져오기 | `git fetch origin pull/<n>/head`로 객체만 `refs/remotes/pr/head`에 받는다. 작업 트리에 풀지 않는다. |
+| gate files report | `.github/**`, `scripts/ci/**`, `scripts/db-test.sh`, 린트 설정(`.sqlfluff`, `.squawk.toml`, `.semgrep/**` 등), `pyproject.toml`, `expectations.tsv`, `SHA256SUMS`를 건드렸으면 job 로그와 step summary에 파일 목록을 크게 찍는다. 이것만으로는 실패하지 않는다. 검증자가 어떤 게이트가 바뀌었는지 바로 보게 하려는 것이다. |
+| 베이스 `pr-size.sh` | 베이스의 스크립트로 헤드의 크기를 센다. 헤드가 스크립트를 `exit 0`으로 바꿔도 소용없다. |
+| 베이스 `migrations-immutable.sh` | 베이스의 스크립트로 베이스의 마이그레이션이 헤드에서 그대로인지 본다. |
+| 베이스 `check-commits.sh` | 커밋 제목 규칙, 머지 커밋 금지, AI 표기 금지를 베이스의 스크립트로 검사한다. |
+| `expectations-guard.sh` | `expectations.tsv`에서 행을 지우면 실패한다. 단 같은 PR이 `db/tests/*.sql`에서 그 테스트(출력 줄이 따옴표 뒤 id와 공백으로 시작하는 SQL)도 지웠으면 허용하고 무엇이 지워졌는지 출력한다. 베이스에서 `on_vulnerable = fail`이던 행을 다른 값으로 바꾸는 것도 실패다. |
+
+### 헤드를 실행하지 않는다는 불변식
+
+`pull_request_target`은 시크릿과 쓰기 토큰이 있는 컨텍스트에서 돈다. 여기서 PR 헤드의 코드를 한 줄이라도 실행하면 외부 기여자가 저장소 권한을 얻는다. 그래서 이 워크플로는 헤드를 **데이터로만** 읽는다.
+
+- 체크아웃은 한 번이고 베이스 SHA다. `path`, `repository`, `submodules`, `working-directory`를 쓰지 않는다.
+- 쓰는 action은 `actions/checkout` 하나다. `uv sync`, `pip install`, `npm ci`, `bash <헤드 경로>`는 없다.
+- `run:`의 모든 줄은 읽기 전용 git(`fetch`, `diff`, `ls-tree`, `cat-file`, `log`, `rev-parse`, `show`, `rev-list`, `merge-base`)이거나 베이스 체크아웃의 `scripts/ci/<이름>.sh`다. 명령 연결(`;`, `&&`, `|`), 치환(`$(…)`, 백틱), 리다이렉션은 허용하지 않는다.
+- PR 번호와 SHA는 `env:`로만 넘기고 `run:` 본문에 `${{ }}`를 쓰지 않는다.
+
+`scripts/ci/gate-integrity-lint.sh`가 위 규칙을 YAML에서 기계로 검사하고, `gate-integrity-lint-selftest.sh`가 규칙마다 위반하는 변형 워크플로를 만들어 거부되는지 증명한다. 둘 다 `ci.yml`의 `workflow-lint` job에서 돈다. `expectations-guard.sh`와 `gate-files-report.sh`의 동작은 `gate-integrity-selftest.sh`가 임시 저장소에서 증명한다.
+
+zizmor의 `dangerous-triggers`는 `pull_request_target` 자체를 경고한다. 위 불변식이 그 위험을 막으므로 `.github/zizmor.yml`에서 이 워크플로 한 곳(`gate-integrity.yml:3`, `on:` 블록)만 제외한다. 다른 워크플로나 다른 규칙은 제외하지 않는다.
+
+### 한계
+
+- `pull_request_target`은 항상 **베이스 브랜치의 워크플로 사본**을 실행한다. 이 파일을 새로 추가하는 PR에서는 아직 베이스에 없으므로 자기 자신에게는 돌지 않는다. 병합된 뒤에 열리는 PR부터 적용된다.
+- 이 job은 `ci-gate`의 `needs`에 없다. 별도의 필수 체크로 등록해야 하며 등록은 병합 뒤에 한다.
+- 헤드가 `ci.yml` 자체를 지우거나 약하게 만드는 것은 `ci-gate`가 아니라 이 job도 막지 못한다. 그 변경은 gate files report에 나타나고 검증자가 읽어야 한다.
+
 ## DB 테스트 레지스트리
 
 `scripts/db-test.sh`는 `db/tests/expectations.tsv`를 기준으로 판정한다.
