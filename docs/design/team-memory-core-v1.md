@@ -12,12 +12,14 @@ files: db/schema.sql, db/tests/smoke_test.sql
 조직 종류(개발, 영업, 인사, 운영)와 상관없이, 여러 사람과 여러 에이전트가 함께 쓰는 팀 메모리를 만든다.
 
 하는 것
+
 - 에이전트가 배운 것을 제안하고, 담당자가 승인한 것만 공유한다.
 - 권한 범위(store)별로 읽기와 쓰기를 DB가 직접 강제한다.
 - 사실을 정정할 때 덮어쓰지 않고 이력과 감사 기록을 남긴다. 삭제 요청에도 대응한다.
 - 원본 데이터는 기존 시스템에 두고 링크로만 참조한다.
 
 안 하는 것 (v1)
+
 - 원본 데이터를 한곳에 모아 복사하는 수집 파이프라인
 - 벡터 DB, 지식 그래프 (필요해지면 확장점으로 추가)
 - 에이전트 개인 작업 기억 (각 에이전트 런타임 몫)
@@ -25,7 +27,7 @@ files: db/schema.sql, db/tests/smoke_test.sql
 
 ## 2. 전체 구성
 
-```
+```text
  사용자 ── 에이전트 런타임 (Claude Code / Codex / Hermes / Copilot / 자체 봇)
               │  ① 원천 읽기: 기존 MCP/공식 커넥터, "사용자 권한"으로 (복사 안 함)
               │  ② 메모리 읽기/제안: MCP
@@ -81,6 +83,7 @@ files: db/schema.sql, db/tests/smoke_test.sql
 - `deleted_hash`: 삭제한 내용의 해시. 정리 작업이나 재제안이 지운 내용을 되살리지 못하게 막는다.
 
 DB 수준에서 거는 제약
+
 - deleted 상태면 body가 NULL이어야 한다(tombstone).
 - note를 빼고는 source_refs가 비면 안 된다.
 - auto_approve는 user store에만 켤 수 있다.
@@ -90,9 +93,13 @@ DB 수준에서 거는 제약
 1. API가 요청마다 토큰을 검증한 뒤, 트랜잭션 시작 시 `SET LOCAL app.user_id`, `app.agent_id`를 설정한다. **store나 사용자를 모델이 파라미터로 고르지 않는다.** 모델은 store slug를 고를 수 있지만, 권한은 DB가 다시 판정한다.
 2. RLS 정책
    - 읽기: 실효 권한이 reader 이상. proposed는 작성자와 curator만 본다. rejected와 deleted는 curator만 본다.
-   - INSERT: contributor 이상이고 status가 proposed일 때만.
+   - INSERT: contributor 이상이고 status가 proposed일 때만. 작성자는 DB가 바인딩한다: `created_by` = 에이전트(없으면 사용자), `on_behalf_of` = 에이전트일 때만 사용자, `tenant_id` = store의 tenant.
    - UPDATE: curator만.
-3. API는 RLS를 우회하지 않는 전용 DB 역할로 접속한다. 관리 작업(SCIM 동기화, worker)만 별도 역할을 쓴다.
+   - memory_version, review: 부모 memory가 보일 때만 보인다(memory의 RLS 승계). 기록은 contributor 이상(review의 approve/reject는 curator), actor는 호출 주체 본인. redact는 curator만.
+3. API는 RLS를 우회하지 않는 전용 DB 역할(`app_rw`, 최소 권한)로 접속한다. 관리 작업(SCIM 동기화, worker)만 별도 역할을 쓴다.
+   - `app_rw` 권한: tenant/principal/group_member/store/store_grant는 SELECT만(스스로 권한 부여 불가). memory는 SELECT/INSERT/UPDATE. memory_version은 SELECT/INSERT와 `UPDATE(snapshot)`만(redact용). review, deleted_hash는 SELECT/INSERT. 역할 생성과 GRANT는 `schema.sql`에 있다.
+   - fail-closed: `app.user_id`/`app.agent_id`가 미설정이거나 빈 문자열이면 NULL로 읽고 권한은 없다(오류도 권한도 아님). 에이전트가 있으면 사용자·에이전트 중 한쪽이라도 grant가 없을 때 NULL이다(`least()`는 NULL을 무시하므로 명시 처리). 비활성 principal과 비활성 그룹은 권한을 주지 않는다.
+   - append-only 트리거: memory_version은 snapshot→NULL(redact)만 허용하고, snapshot을 뺀 모든 컬럼(reason 포함)이 같아야 한다. review는 UPDATE/DELETE 모두 금지.
 4. 원천 링크에 `inherit_acl: true`가 붙은 메모리는 조회할 때 원천 시스템에서 사용자의 접근 가능 여부를 확인한다. 결과는 짧게 캐시한다. 원천에서 권한이 사라지면 메모리도 안 보인다. v1에서는 Google Drive, SharePoint, Notion 어댑터만 만든다.
 
 ### 스모크 테스트 결과 (Postgres 16, `db/tests/smoke_test.sql`)
@@ -106,6 +113,12 @@ DB 수준에서 거는 제약
 | T5 | curator Carol이 승인 | 1건 반영 ✔ |
 | T6 | Carol이 영업봇과 함께 승인 시도 (봇은 contributor) | 0건, 교집합 동작 ✔ |
 | T7 | 버전 기록 변조 / redact | 변조 차단, redact 허용 ✔ |
+| X1 | 인사 Bob + 영업봇(교집합에 한쪽 grant 없음), 빈 user_id | 권한 NULL, 0건 ✔ |
+| X2 | created_by / on_behalf_of / tenant_id 위조 제안 | RLS 거부, 정상 제안만 성공 ✔ |
+| X3 | app_rw가 store_grant 등 권한 테이블 쓰기 | 거부(42501) ✔ |
+| X4 | 타 store의 버전·리뷰 조회 / 기록 | 0건, 기록 거부 ✔ |
+| X5 | redact 시 reason 등 변조, review 수정·삭제 | 트리거 차단, curator의 redact만 허용 ✔ |
+| X6 | 비활성 사용자·그룹·에이전트 | 권한 NULL, 재활성화 시 복구 ✔ |
 
 ## 6. API (MCP 툴 = REST 엔드포인트)
 
@@ -138,7 +151,7 @@ DB 수준에서 거는 제약
    - 같은 store의 active와 해시가 같으면 → 중복으로 거부
    - `origin=external`이면서 지시문 패턴("항상 ~해라", "이전 지시 무시")이 있으면 → 표시
 3. 선택적 리뷰 에이전트가 기존 active와 충돌하는지, 대체 후보는 뭔지 의견을 단다. 의견만 달고 승인하지 않는다.
-4. 승인 봇이 store의 curator들에게 카드를 보낸다. 내용, 출처, 게이트 결과, 충돌 후보, [승인][반려][기존 항목 대체로 승인] 버튼이 붙는다.
+4. 승인 봇이 store의 curator들에게 카드를 보낸다. 내용, 출처, 게이트 결과, 충돌 후보, `[승인][반려][기존 항목 대체로 승인]` 버튼이 붙는다.
 5. 승인되면 active가 되고 버전 기록이 남는다. 대체 승인이면 옛 항목은 superseded가 되고 `supersedes_id`로 연결된다.
 6. 일정 기간(기본 14일) 처리되지 않으면 자동으로 rejected 처리한다. 검토 대기함이 쌓이지 않게 하려는 것이다.
 
