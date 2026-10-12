@@ -670,7 +670,42 @@ SELECT t.eq('N11r no context: principal rows', $q$SELECT count(*)::text FROM pri
 SELECT t.eq('N11s no context: store_grant rows', $q$SELECT count(*)::text FROM store_grant$q$, '0');
 COMMIT;
 
+-- N12) 삭제된 본문(F5)을 보이지 않는 문자로 변형해 재제안해도 막힌다
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.err('N12a re-propose of deleted content with U+00AD', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\u00ad5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('N12b re-propose of deleted content with U+180E', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\u180e5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('N12c re-propose of deleted content with U+0085', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문\u0085F5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('N12d re-propose of deleted content with U+FEFF', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\ufeff5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('N12e re-propose of deleted content with U+2060', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\u20605','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+ROLLBACK;
 RESET ROLE;
+BEGIN;
+-- N12f-h) 삭제된 본문 'café'(U+00E9)의 해시를 소유자 권한으로 심고, 결합 문자 사이에 보이지 않는 문자를 끼운 변형을 재제안한다.
+-- 첫 번째 제거가 U+034F/U+200B 를 지운 뒤에야 NFKC 가 e + U+0301 을 é 로 합성한다. v1.0 에는 content_hmac 이 없어 심지 않는다.
+DO $do$ BEGIN
+  IF to_regprocedure('app_sec.content_hmac(text)') IS NOT NULL THEN
+    INSERT INTO deleted_hash (store_id, content_hash, reason)
+    VALUES ('00000000-0000-0000-0000-00000000f001', app_sec.content_hmac(E'caf\u00e9'), 'n12');
+  END IF;
+END $do$;
+SET ROLE app_rw;
+SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.err('N12f re-propose of cafe + U+034F + U+0301 (composes to the deleted cafe)', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'cafe\u034f\u0301','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('N12g re-propose of cafe + U+200B + U+0301', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'cafe\u200b\u0301','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('N12h re-propose of the deleted cafe itself', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'caf\u00e9','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+ROLLBACK;
+RESET ROLE;
+-- N12i) 최신 유니코드에서 추가된 Cf 도 지워진다: U+0890 U+0891 U+110BD U+110CD U+13430-1343F 와 U+061C U+08E2 U+FFF9 U+E0001 U+E007F
+SELECT t.eq('N12i content_hmac ignores new Cf characters', $q$SELECT bool_and(app_sec.content_hmac('a' || chr(c) || 'b') = app_sec.content_hmac('ab'))::text
+  FROM (SELECT unnest(ARRAY[2192, 2193, 69821, 69837, 1564, 2274, 65529, 917505, 917631]) AS c UNION ALL SELECT generate_series(78896, 78911)) AS s$q$, 'true');
 
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;

@@ -174,3 +174,12 @@ N15c	(ok)	fail
 N15d	(ok)	fail
 N15e	(ok)	fail
 P3c	(ok)	pass	schema.sql of the vulnerable fixture never creates schema t either; the test inspects the catalog before the helpers exist
+N12a	(ok)	fail
+N12b	(ok)	fail
+N12c	(ok)	fail
+N12d	(ok)	fail
+N12e	(ok)	fail
+N12f	(ok)	fail
+N12g	(ok)	fail
+N12h	(ok)	fail
+N12i	(ok)	fail

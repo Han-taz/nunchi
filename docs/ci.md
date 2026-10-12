@@ -17,7 +17,7 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 |---|---|---|
 | `db-tests` | `postgres:16` 서비스에 새 DB를 만들어 `db/schema.sql`을 적용하고 `db/tests/smoke_test.sql`을 실행한다. 두 번, 각각 새 DB에서 돈다. 두 실행의 결과 파일이 달라도 실패한다. | RLS가 권한 경계의 전부이므로 회귀가 곧 보안 사고다. 두 번 도는 이유는 순서 의존이나 flaky 테스트를 잡기 위해서다. |
 | `mutation-gate` | 같은 테스트를 알려진 취약 스키마(`db/tests/fixtures/schema_v1_0_vulnerable.sql` + 권한 shim)에 돌리고, X 시리즈가 레지스트리가 말한 대로 실패하는지 확인한다. | 취약점이 있는 스키마에서 통과하는 테스트는 아무것도 지키지 못한다. 테스트가 이빨을 잃으면 이 job이 잡는다. |
-| `sql-lint` | `sqlfluff`(postgres 방언)로 저장소 전체(`.`)를 검사하고, `squawk`으로 `db/schema.sql`을 검사한다. 크기 때문에 건너뛰는 파일은 없다(`large_file_skip_byte_limit = 0`). 커버리지 단언: `sqlfluff lint . --format json`이 실제로 검사한 파일 목록을 `git ls-files '*.sql'`에서 `.sqlfluffignore`에 적힌 경로를 뺀 목록과 비교하고, 빠진 파일이나 예상 밖의 파일이 있으면 실패한다. `.sqlfluffignore`에는 정확한 경로와 `dir/` 접두사만 쓸 수 있다(그 밖의 패턴은 단언이 거부한다). | 스키마 스타일과 위험한 DDL 패턴을 기계로 고정한다. sqlfluff 기본값은 20000바이트를 넘는 파일을 경고만 남기고 조용히 건너뛰므로, 큰 `db/schema.sql`이 린트 없이 통과할 수 있었다. 단언은 같은 일이 설정 변경이나 새 파일로 다시 생기는 것을 막는다. |
+| `sql-lint` | `sqlfluff`(postgres 방언)로 저장소 전체(`.`)를 검사하고, `squawk`으로 `db/schema.sql`을 검사한다. 크기 때문에 건너뛰는 파일은 없다(`large_file_skip_byte_limit = 0`). 커버리지 단언: `sqlfluff lint . --format json`이 실제로 검사한 파일 목록을 `git ls-files '*.sql'`에서 `.sqlfluffignore`에 적힌 경로를 뺀 목록과 비교하고, 빠진 파일이나 예상 밖의 파일이 있으면 실패한다. `.sqlfluffignore`에는 정확한 경로와 `dir/` 접두사만 쓸 수 있다(그 밖의 패턴은 단언이 거부한다). | 스키마 스타일과 위험한 DDL 패턴을 기계로 고정한다. sqlfluff 기본값은 20000바이트를 넘는 파일을 경고만 남기고 조용히 건너뛰므로, 큰 `db/schema.sql`이 린트 없이 통과할 수 있었다. 단언은 같은 일이 설정 변경이나 새 파일로 다시 생기는 것을 막는다. 마지막으로 `scripts/gen-unicode-ignorables.py --check db/schema.sql`이 고정된 UCD 18.0.0 파일(버전과 sha256이 스크립트에 박혀 있다)에서 보이지 않는 문자(일반 범주 Cf 전체, Default_Ignorable_Code_Point, 공백이 아닌 Cc)의 정규식 클래스를 다시 만들어 `schema.sql`의 생성 블록과 비교한다. 유니코드 버전을 올릴 때는 스크립트의 버전과 해시를 바꾸고 새 마이그레이션으로 함수를 다시 만든다. |
 | `markdown` | `markdownlint-cli2`, 그리고 `lychee --offline`으로 상대 링크와 앵커를 검사한다. | 문서 이동(리네임) 뒤 깨진 링크를 막는다. |
 | `secrets` | `gitleaks`로 전체 히스토리(`fetch-depth: 0`)와 작업 트리를 검사한다. | 공개 저장소다. 한 번 올라간 비밀값은 지울 수 없다. |
 | `workflow-lint` | `actionlint`, `zizmor`(기본 persona, 온라인 감사 포함). | 워크플로 자체가 공급망 공격면이다. 인젝션, 과한 권한, 고정되지 않은 action을 잡는다. |
@@ -81,7 +81,7 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 | markdownlint | `MD060` (표 열 스타일) | 가져온 리서치 표 전체를 다시 정렬하라는 규칙이다. |
 | markdownlint | `MD036` (강조를 제목으로) | 출처 노트가 굵은 글씨 한 줄로 하위 블록을 표시한다. 제목으로 바꾸면 모든 노트의 개요가 바뀐다. |
 | markdownlint | `MD025` 설정 `front_matter_title: ""` | YAML front matter의 `title`과 본문 H1이 함께 있는 것이 의도다. |
-| typos | 단어 `anc`, `EHR`, `NAMS`, `RTO`, `LAF`, `IIT`, `FPR` | 논문 약어와 기호다(ancestor 함수, 전자건강기록, Neo4j Agent Memory Service 등). |
+| typos | 단어 `anc`, `EHR`, `NAMS`, `RTO`, `LAF`, `IIT`, `FPR`, `caf` | 논문 약어와 기호다(ancestor 함수, 전자건강기록, Neo4j Agent Memory Service 등). `caf`는 테스트 문자열 `café`를 `E'caf\u00e9'`로 적을 때 남는 어간이다. |
 | gitleaks | 정규식 `family/partner`, 파일 `gatemem-2606.18829.md` | 벤치마크 설명의 산문이 `generic-api-key` 규칙에 걸린다. |
 | ruff | `tests/**`에서 `S101`(assert), `PLR2004`(매직 값) | assert는 테스트의 문법이고, 기대값 리터럴이 곧 단언이다. |
 | deptry | `DEP002`: `psycopg-binary` | `psycopg[binary]` extra가 끌어오는 C 가속기이고 import하지 않는다. |

@@ -8,3 +8,4 @@ LAF = "LAF"    # acronym used in the cited paper
 IIT = "IIT"    # acronym used in the cited paper
 FPR = "FPR"    # false positive rate
 
+caf = "caf"  # the stem of the test string cafe + U+00E9, written E'café' in db/tests/smoke_test.sql

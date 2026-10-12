@@ -122,6 +122,8 @@ jobs:
           if missing or extra:
               sys.exit(f"sqlfluff coverage mismatch: not linted={missing} unexpectedly linted={extra}")
           PY
+      - name: The generated Unicode class in db/schema.sql is current
+        run: python3 scripts/gen-unicode-ignorables.py --check db/schema.sql
       - name: squawk
         run: .github/tools/node_modules/.bin/squawk --config .squawk.toml db/schema.sql
 
