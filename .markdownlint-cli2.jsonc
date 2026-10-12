@@ -1,0 +1,14 @@
+{
+  "config": {
+    "default": true,
+    // Prose and tables are one long line per paragraph or row (Korean text, wide tables).
+    "MD013": false,
+    // The table column alignment style rule (MD060) would force re-padding of every imported research table.
+    "MD060": false,
+    // The YAML front matter carries a title next to the H1 on purpose.
+    // Source notes label sub-blocks with a bold line; turning them into headings would change every note outline.
+    "MD036": false,
+    "MD025": { "front_matter_title": "" }
+  },
+  "gitignore": true
+}

@@ -1,0 +1,12 @@
+[sqlfluff]
+dialect = postgres
+templater = raw
+max_line_length = 120
+# RF04 (keywords as identifiers) is off. The columns name, role, version,
+# snapshot and at are part of the schema contract and of the tests, and
+# Postgres accepts them unquoted.
+exclude_rules = references.keywords
+
+[sqlfluff:indentation]
+indent_unit = space
+tab_space_size = 2

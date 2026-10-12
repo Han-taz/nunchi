@@ -1,0 +1,10 @@
+[default.extend-words]
+# Domain terms and symbols in the research notes that the dictionary reads as typos.
+anc = "anc"    # anc^t(m): ancestor function in the AkasicMEM paper
+EHR = "EHR"    # electronic health record
+NAMS = "NAMS"  # Neo4j agent memory service
+RTO = "RTO"    # recovery time objective
+LAF = "LAF"    # acronym used in the cited paper
+IIT = "IIT"    # acronym used in the cited paper
+FPR = "FPR"    # false positive rate
+

@@ -1,0 +1,6 @@
+# psql scripts: they use backslash meta-commands and SET LOCAL app.x = '...',
+# which the sqlfluff postgres dialect cannot parse.
+db/tests/smoke_test.sql
+docs/reviews/exp/
+# Known-vulnerable schema kept verbatim as the mutation-gate fixture, and its grant shim.
+db/tests/fixtures/

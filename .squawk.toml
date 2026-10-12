@@ -1,0 +1,14 @@
+# squawk checks migrations that run against live tables. db/schema.sql is the
+# one-shot bootstrap of an empty database, so the rules about locking, retries
+# and large tables do not apply. Each exclusion says why.
+excluded_rules = [
+  # No live traffic exists while the bootstrap runs, so long locks cannot block anyone.
+  "require-lock-timeout",
+  "require-statement-timeout",
+  # CREATE INDEX CONCURRENTLY cannot run inside a transaction and gains nothing on empty tables.
+  "require-concurrent-index-creation",
+  # The file runs once against a fresh database; a failed run is fixed by dropping the database.
+  "prefer-robust-stmts",
+  # memory.version and memory_version.version are per-row revision counters, not id spaces.
+  "prefer-bigint-over-int",
+]

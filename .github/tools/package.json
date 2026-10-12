@@ -1,0 +1,9 @@
+{
+  "name": "nunchi-ci-tools",
+  "private": true,
+  "description": "Pinned Node-based lint tools used by .github/workflows/ci.yml",
+  "devDependencies": {
+    "markdownlint-cli2": "0.23.3",
+    "squawk-cli": "2.68.0"
+  }
+}

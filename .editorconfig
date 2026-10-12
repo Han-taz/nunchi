@@ -1,0 +1,21 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.sql]
+# Continuation lines are aligned by hand (function bodies, VALUES lists), so no fixed step.
+indent_size = unset
+
+[*.md]
+# Nested lists in the imported notes use 2, 3 or 4 spaces.
+indent_size = unset
+
+[LICENSE]
+indent_style = unset
+indent_size = unset
