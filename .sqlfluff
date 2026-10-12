@@ -2,6 +2,9 @@
 dialect = postgres
 templater = raw
 max_line_length = 120
+# 0 disables the large-file skip. The default (20000 bytes) made sqlfluff silently
+# skip big files such as db/schema.sql. CI also asserts every tracked .sql was linted.
+large_file_skip_byte_limit = 0
 # RF04 (keywords as identifiers) is off. The columns name, role, version,
 # snapshot and at are part of the schema contract and of the tests, and
 # Postgres accepts them unquoted.

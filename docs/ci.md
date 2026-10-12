@@ -1,6 +1,6 @@
 # CI 가이드
 
-nunchi의 CI는 `.github/workflows/ci.yml` 하나다. PR(`develop`, `main` 대상)과 `develop`/`main` push, 매일 18:17 UTC 스케줄에서 돈다. `develop` 브랜치 보호는 **`ci-gate`와 `independent-verify` 두 체크**를 요구한다. 나머지 job은 `ci-gate`가 묶어서 판정한다.
+nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치와 무관하게, 스택된 자식 PR 포함)과 `develop`/`main` push, 매일 18:17 UTC 스케줄에서 돈다. `develop` 브랜치 보호는 **`ci-gate`와 `independent-verify` 두 체크**를 요구한다. 나머지 job은 `ci-gate`가 묶어서 판정한다.
 
 ## 공통 원칙
 
@@ -17,7 +17,7 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. PR(`develop`, `main` 대�
 |---|---|---|
 | `db-tests` | `postgres:16` 서비스에 새 DB를 만들어 `db/schema.sql`을 적용하고 `db/tests/smoke_test.sql`을 실행한다. 두 번, 각각 새 DB에서 돈다. 두 실행의 결과 파일이 달라도 실패한다. | RLS가 권한 경계의 전부이므로 회귀가 곧 보안 사고다. 두 번 도는 이유는 순서 의존이나 flaky 테스트를 잡기 위해서다. |
 | `mutation-gate` | 같은 테스트를 알려진 취약 스키마(`db/tests/fixtures/schema_v1_0_vulnerable.sql` + 권한 shim)에 돌리고, X 시리즈가 레지스트리가 말한 대로 실패하는지 확인한다. | 취약점이 있는 스키마에서 통과하는 테스트는 아무것도 지키지 못한다. 테스트가 이빨을 잃으면 이 job이 잡는다. |
-| `sql-lint` | `sqlfluff`(postgres 방언)로 `db/`를 검사하고, `squawk`으로 `db/schema.sql`을 검사한다. | 스키마 스타일과 위험한 DDL 패턴을 기계로 고정한다. |
+| `sql-lint` | `sqlfluff`(postgres 방언)로 저장소 전체(`.`)를 검사하고, `squawk`으로 `db/schema.sql`을 검사한다. 크기 때문에 건너뛰는 파일은 없다(`large_file_skip_byte_limit = 0`). 커버리지 단언: `sqlfluff lint . --format json`이 실제로 검사한 파일 목록을 `git ls-files '*.sql'`에서 `.sqlfluffignore`에 적힌 경로를 뺀 목록과 비교하고, 빠진 파일이나 예상 밖의 파일이 있으면 실패한다. `.sqlfluffignore`에는 정확한 경로와 `dir/` 접두사만 쓸 수 있다(그 밖의 패턴은 단언이 거부한다). | 스키마 스타일과 위험한 DDL 패턴을 기계로 고정한다. sqlfluff 기본값은 20000바이트를 넘는 파일을 경고만 남기고 조용히 건너뛰므로, 큰 `db/schema.sql`이 린트 없이 통과할 수 있었다. 단언은 같은 일이 설정 변경이나 새 파일로 다시 생기는 것을 막는다. |
 | `markdown` | `markdownlint-cli2`, 그리고 `lychee --offline`으로 상대 링크와 앵커를 검사한다. | 문서 이동(리네임) 뒤 깨진 링크를 막는다. |
 | `secrets` | `gitleaks`로 전체 히스토리(`fetch-depth: 0`)와 작업 트리를 검사한다. | 공개 저장소다. 한 번 올라간 비밀값은 지울 수 없다. |
 | `workflow-lint` | `actionlint`, `zizmor`(기본 persona, 온라인 감사 포함). | 워크플로 자체가 공급망 공격면이다. 인젝션, 과한 권한, 고정되지 않은 action을 잡는다. |
@@ -46,11 +46,7 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. PR(`develop`, `main` 대�
 - 등록되지 않은 id가 출력되면 실패한다. 테스트를 추가하면 레지스트리에도 추가해야 한다.
 - `on_vulnerable` 열이 `fail`이면 취약 스키마에서 반드시 실패해야 하고, `pass`면 반드시 통과해야 한다. X 테스트를 `pass`로 두려면 이유를 note에 적어야 한다.
 
-취약 스키마에서도 통과하는 X 테스트 9개는 모두 이유가 있다.
-
-- 양성 대조군(정상 동작이 계속 되는지 확인): X1g, X2e, X2h, X4c, X4i, X5f.
-- X3c, X3f(DELETE 거부): 취약 스키마용 grant shim이 애초에 DELETE 권한을 주지 않아서 스키마와 무관하게 거부된다. shim에 DELETE를 주면 `store_grant`가 통째로 지워져 이후 테스트 상태가 망가지므로 주지 않았다.
-- X5e(redact 해제 거부): v1.0 트리거가 이미 막고 있었다.
+취약 스키마에서도 통과하는(`on_vulnerable = pass`) 테스트의 목록과 이유는 `expectations.tsv`의 `on_vulnerable`, `note` 열이 유일한 출처다. 이 문서에 개수나 id를 복사하지 않는다.
 
 ## 로컬 실행
 

@@ -2,7 +2,6 @@ name: ci
 
 on:
   pull_request:
-    branches: [develop, main]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [develop, main]
@@ -97,7 +96,32 @@ jobs:
           pip install --require-hashes --no-deps -r .github/tools/requirements.txt
           npm ci --ignore-scripts --prefix .github/tools
       - name: sqlfluff
-        run: sqlfluff lint db
+        run: sqlfluff lint .
+      - name: sqlfluff linted every tracked .sql file
+        run: |
+          sqlfluff lint . --format json > "$RUNNER_TEMP/sqlfluff.json"
+          python3 - "$RUNNER_TEMP/sqlfluff.json" <<'PY'
+          import json, os, subprocess, sys
+
+          linted = {d["filepath"] for d in json.load(open(sys.argv[1]))}
+          tracked = subprocess.run(
+              ["git", "ls-files", "*.sql"], check=True, capture_output=True, text=True
+          ).stdout.split()
+          ignored = []
+          for line in open(".sqlfluffignore"):
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              if any(c in line for c in "*?[!"):
+                  sys.exit(f".sqlfluffignore: unsupported pattern {line!r}: only exact paths and dir/ prefixes")
+              ignored.append(line)
+          expected = {f for f in tracked if not any(f == i or (i.endswith("/") and f.startswith(i)) for i in ignored)}
+          missing = sorted(expected - linted)
+          extra = sorted(linted - expected)
+          print(f"tracked={len(tracked)} ignored={len(tracked) - len(expected)} expected={len(expected)} linted={len(linted)}")
+          if missing or extra:
+              sys.exit(f"sqlfluff coverage mismatch: not linted={missing} unexpectedly linted={extra}")
+          PY
       - name: squawk
         run: .github/tools/node_modules/.bin/squawk --config .squawk.toml db/schema.sql
 
