@@ -88,6 +88,36 @@ other_migration_with_schema() {
   echo 'create table t();' > db/schema.sql
 }
 
+cr_only_padding() { head -c 600000 /dev/zero | tr '\0' '\r' > f.txt; }
+single_line_padding() { head -c 600000 /dev/zero | tr '\0' 'a' > f.txt; }
+many_files_total_bytes() {
+  for i in 1 2 3 4; do head -c 400000 /dev/zero | tr '\0' 'a' > "f$i.txt"; done
+}
+small_files_total_ok() {
+  for i in 1 2 3 4; do head -c 200000 /dev/zero | tr '\0' 'a' > "f$i.txt"; done
+}
+chained_md() {
+  mkdir -p docs/research
+  seq 1 5000 | sed 's/.*/select &;/' > docs/research/exp.sql.md
+}
+chained_py_md() {
+  mkdir -p docs/reviews
+  seq 1 5000 > docs/reviews/run.py.md
+}
+numeric_dotted_md() {
+  mkdir -p docs/research/sources
+  seq 1 5000 > docs/research/sources/gatemem-2606.18829.md
+}
+huge_md() {
+  mkdir -p docs/research
+  head -c 600000 /dev/zero | tr '\0' 'a' > docs/research/huge.md
+}
+big_png() { { printf '\211PNG\0\0'; head -c 102400 /dev/zero; } > big.png; }
+big_png_ok() { { printf '\211PNG\0\0'; head -c 30000 /dev/zero; } > mid.png; }
+many_big_pngs() {
+  for i in $(seq 1 20); do { printf '\211PNG\0\0'; head -c 102400 /dev/zero; } > "p$i.png"; done
+}
+
 case_ "800 lines" 0 lines_800
 case_ "801 lines" 1 lines_801 "Split the PR"
 case_ ".gitattributes '* -diff' + 5000-line .sql" 1 gitattr_hides_sql "Split the PR"
@@ -103,4 +133,15 @@ case_ "5000-line uv.lock with pyproject.toml" 0 uv_lock_with_manifest
 case_ "5000-line 0001_baseline.sql newly added" 1 baseline_new "Split the PR"
 case_ "5000-line 0001_baseline.sql edit with schema.sql" 1 baseline_edited_with_schema "Split the PR"
 case_ "5000-line 0002 migration with schema.sql" 1 other_migration_with_schema "Split the PR"
+case_ "CR-only 600 KB file (one line)" 1 cr_only_padding "file cap"
+case_ "single 600 KB line" 1 single_line_padding "file cap"
+case_ "four 400 KB files exceed the total cap" 1 many_files_total_bytes "total cap"
+case_ "four 200 KB files fit" 0 small_files_total_ok
+case_ "5000-line .sql.md under docs/research" 1 chained_md "Split the PR"
+case_ "5000-line .py.md under docs/reviews" 1 chained_py_md "Split the PR"
+case_ "5000-line numeric-dotted .md stays exempt" 0 numeric_dotted_md
+case_ "600 KB .md exceeds the file cap" 1 huge_md "file cap"
+case_ "100 KB png counts 550 lines" 0 big_png "lines after exemptions: 550"
+case_ "30 KB png counts 150 lines" 0 big_png_ok "lines after exemptions: 150"
+case_ "twenty 100 KB pngs exceed the limit" 1 many_big_pngs "Split the PR"
 echo "pr-size self-test ok"

@@ -6,12 +6,20 @@
 # Lines are added + deleted, counted against the merge base, with repository
 # attributes ignored so a .gitattributes in the PR cannot hide a file.
 #
-#   docs/research/** and docs/reviews/**   *.md only is exempt (reference prose)
+#   docs/research/** and docs/reviews/**   real *.md only is exempt (reference
+#                                          prose). A chained extension such as
+#                                          .sql.md or .py.md is not exempt.
 #   lock files                             exempt only when the manifest it is
 #                                          generated from changed in the same PR
 #                                          (uv.lock needs pyproject.toml)
-#   png jpg gif svg pdf ico                count as BINARY_LINES each
+#   png jpg gif svg pdf ico                count as 50 lines per 10 KB (min 50)
 #   any other binary file                  fails the job
+#
+# Line counts alone are bypassed by CR-only files and single huge lines, so
+# bytes are capped too, measured from the blob at HEAD:
+#   any file                               at most 512 KB (lock files that pass
+#                                          their manifest rule are exempt)
+#   all non-exempt files together          at most 1 MiB
 #
 # There is no bypass. A PR over the limit must be split.
 set -euo pipefail
@@ -19,15 +27,37 @@ set -euo pipefail
 base="${1:?base ref required}"
 head="${2:?head ref required}"
 limit="${3:-800}"
+file_byte_cap=524288
+total_byte_cap=1048576
 
 # --attr-source=<empty tree> stops git reading .gitattributes from the work tree,
 # so `-diff`, `binary` and custom diff drivers cannot turn a file into "- -".
 empty_tree="$(git mktree </dev/null)"
 export GIT_ATTR_NOSYSTEM=1
 
-result=$(git -c core.attributesFile=/dev/null --attr-source="$empty_tree" \
-  diff --no-ext-diff --no-textconv --no-renames --numstat -z "$base...$head" | tr '\0' '\n' |
-  awk -v binary_lines=50 '
+git_diff() {
+  git -c core.attributesFile=/dev/null --attr-source="$empty_tree" \
+    diff --no-ext-diff --no-textconv --no-renames "$@"
+}
+
+# "<bytes>\t<path>" for every added or modified file, sized from its HEAD blob.
+sizes="$(mktemp)"
+trap 'rm -f "$sizes"' EXIT
+git_diff --raw -z --no-abbrev --diff-filter=d "$base...$head" |
+  while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+    read -r _ mode _ sha _ <<<"${meta#:}"
+    if [ "$mode" = 160000 ]; then size=0; else size=$(git cat-file -s "$sha"); fi
+    printf '%s\t%s\n' "$size" "$path"
+  done >"$sizes"
+
+result=$(git_diff --numstat -z "$base...$head" | tr '\0' '\n' |
+  awk -v file_cap="$file_byte_cap" -v total_cap="$total_byte_cap" -v sizes="$sizes" '
+    BEGIN {
+      while ((getline line < sizes) > 0) {
+        tab = index(line, "\t")
+        bytes[substr(line, tab + 1)] = substr(line, 1, tab - 1) + 0
+      }
+    }
     $0 !~ /^([0-9]+|-)\t([0-9]+|-)\t/ { print "BINARY malformed numstat record: " $0; bad = 1; next }
     {
       split($0, f, "\t")
@@ -41,22 +71,37 @@ result=$(git -c core.attributesFile=/dev/null --attr-source="$empty_tree" \
       lock["requirements.txt"] = "requirements.in"
       for (i = 1; i <= NR; i++) {
         path = p[i]
-        if (path ~ /^docs\/(research|reviews)\/.*\.md$/) continue
         if (path ~ /^\.github\/tools\/[^\/]+$/) {
           name = substr(path, length(".github/tools/") + 1)
           if (name in lock && (".github/tools/" lock[name]) in changed) continue
         }
         if (path == "uv.lock" && "pyproject.toml" in changed) continue
+        size = bytes[path] + 0
+        if (size > file_cap) { print "BYTES " path " is " size " bytes (file cap " file_cap ")"; bad = 1; continue }
+        if (path ~ /^docs\/(research|reviews)\/.*\.md$/ && path !~ /\.[A-Za-z][A-Za-z0-9_]*\.md$/) continue
+        total_bytes += size
         if (add[i] == "-") {
-          if (path ~ /\.(png|jpg|gif|svg|pdf|ico)$/) { sum += binary_lines; continue }
+          if (path ~ /\.(png|jpg|gif|svg|pdf|ico)$/) {
+            units = int((size + 10239) / 10240); if (units < 1) units = 1
+            sum += units * 50
+            continue
+          }
           print "BINARY " path
           bad = 1
           continue
         }
         sum += add[i] + del[i]
       }
+      if (total_bytes > total_cap) { print "BYTES changed files total " total_bytes " bytes (total cap " total_cap ")"; bad = 1 }
       if (!bad) print "TOTAL " sum + 0
     }')
+
+if grep -q '^BYTES ' <<<"$result"; then
+  grep '^BYTES ' <<<"$result" | while IFS= read -r line; do
+    echo "::error::${line#BYTES }. Split the PR."
+  done
+  exit 1
+fi
 
 if grep -q '^BINARY ' <<<"$result"; then
   grep '^BINARY ' <<<"$result" | while IFS= read -r line; do

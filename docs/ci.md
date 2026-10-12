@@ -24,7 +24,7 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 | `shell` | `scripts/` 아래 모든 `*.sh`에 `shellcheck -S style`. | CI와 테스트 러너가 셸이다. |
 | `hygiene` | `editorconfig-checker`(후행 공백, 마지막 개행, 줄바꿈, 들여쓰기 규칙), `typos`. | 노이즈 diff를 막는다. |
 | `commits` | PR 범위의 모든 커밋이 conventional commit 형식인지, 병합 커밋이 없는지, AI 공동 저자 표기(`Co-Authored-By:` Claude/Anthropic 등, "Generated with Claude")가 없는지 검사한다. 스크립트: `scripts/ci/check-commits.sh`. | 히스토리를 선형으로 읽히게 하고, 이 저장소의 커밋 정책을 강제한다. |
-| `pr-size` | 변경이 800줄(추가+삭제)을 넘으면 실패한다. 저장소 속성(`.gitattributes`)은 무시하고 센다. 면제는 셋뿐이다. (1) `docs/research/**`와 `docs/reviews/**`의 `*.md`(다른 확장자는 센다), (2) 잠금 파일(`.github/tools/package-lock.json`, `.github/tools/requirements.txt`)은 같은 PR에서 원본 매니페스트(`package.json`, `requirements.in`)가 함께 바뀐 경우에만, (3) 바이너리 허용 목록(png, jpg, gif, svg, pdf, ico)은 파일당 50줄로 센다. 허용 목록에 없는 바이너리는 실패한다. 스크립트: `scripts/ci/pr-size.sh`. | 리뷰 가능한 크기를 유지한다. 경로나 속성으로 파일을 숨길 수 없게 한다. |
+| `pr-size` | 변경이 800줄(추가+삭제)을 넘으면 실패한다. 저장소 속성(`.gitattributes`)은 무시하고 센다. 면제는 셋뿐이다. (1) `docs/research/**`와 `docs/reviews/**`의 진짜 `*.md`(`.sql.md`, `.py.md`처럼 확장자가 겹친 파일과 다른 확장자는 센다), (2) 잠금 파일(`.github/tools/package-lock.json`, `.github/tools/requirements.txt`)은 같은 PR에서 원본 매니페스트(`package.json`, `requirements.in`)가 함께 바뀐 경우에만, (3) 바이너리 허용 목록(png, jpg, gif, svg, pdf, ico)은 10 KB마다 50줄(최소 50줄)로 센다. 줄 수만으로는 CR만 있는 파일이나 한 줄짜리 거대 파일을 막지 못하므로 바이트도 제한한다. HEAD blob 기준으로 파일당 512 KB, 면제가 아닌 파일의 합계 1 MiB를 넘으면 실패한다(`.md` 면제 파일도 파일당 한도는 적용된다). 허용 목록에 없는 바이너리는 실패한다. 스크립트: `scripts/ci/pr-size.sh`. | 리뷰 가능한 크기를 유지한다. 경로나 속성으로 파일을 숨길 수 없게 한다. |
 | `codeql` | CodeQL, 언어 `actions`. | 워크플로의 알려진 취약 패턴을 GitHub의 쿼리로 한 번 더 본다. |
 | `app-lint` | `ruff check`(규칙: E F W I S B UP SIM PL RUF ANN), `ruff format --check`, `mypy --strict src tests`, `deptry`. | 타입과 스타일, 선언되지 않았거나 쓰지 않는 의존성을 기계로 고정한다. |
 | `app-tests` | `postgres:16` 서비스에 대해 `pytest`를 `-W error`(경고는 오류)로 돌린다. 마이그레이션 러너(적용, 재적용은 무동작, 변조 감지)와 Hypothesis 속성 테스트, RLS 테스트(`request_tx`가 만든 컨텍스트를 RLS 쿼리가 보는지)가 여기서 돈다. 스켈레톤 전체 커버리지 100%(분기 포함)가 아니면 실패하고, PR에서는 `diff-cover`로 변경된 줄의 80%를 추가로 요구한다. | 앱 코드가 늘어도 변경분이 테스트 없이 들어오지 못하게 한다. |
@@ -122,7 +122,7 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 | shellcheck | 없음 (`-S style`) | |
 | zizmor | 없음 (기본 persona, 온라인) | |
 
-`pr-size`에는 우회 장치가 없다. 라벨을 포함해 어떤 입력도 한도를 바꾸지 못한다. 한도(800줄)를 넘으면 규칙은 하나다. PR을 쪼갠다. 게이트 자체는 `scripts/ci/pr-size-selftest.sh`가 합성 diff로 검증한다(800줄 통과, 801줄 실패, `* -diff`와 `*.sql binary` 속성 아래 5000줄 .sql 실패, NUL 바이트가 있는 .sql 실패, `docs/research`의 5000줄 .sql 실패와 5000줄 .md 통과, png 통과, 매니페스트 없는 잠금 파일 5000줄 실패와 매니페스트가 함께 바뀐 경우 통과, 5000줄 `0001_baseline.sql` 추가와 수정은 `schema.sql` 동반 여부와 무관하게 실패). 이 self-test는 `pr-size` job에서 매번 돈다.
+`pr-size`에는 우회 장치가 없다. 라벨을 포함해 어떤 입력도 한도를 바꾸지 못한다. 한도(800줄)를 넘으면 규칙은 하나다. PR을 쪼갠다. 게이트 자체는 `scripts/ci/pr-size-selftest.sh`가 합성 diff로 검증한다(800줄 통과, 801줄 실패, `* -diff`와 `*.sql binary` 속성 아래 5000줄 .sql 실패, NUL 바이트가 있는 .sql 실패, `docs/research`의 5000줄 .sql 실패와 5000줄 .md 통과, png 통과, CR만 있는 600 KB 파일과 한 줄 600 KB 파일 실패, 400 KB 파일 4개(합계 초과) 실패와 200 KB 파일 4개 통과, `.sql.md`와 `.py.md` 5000줄 실패와 숫자 확장자(`2606.18829.md`) 통과, 100 KB png는 550줄로 계산, 매니페스트 없는 잠금 파일 5000줄 실패와 매니페스트가 함께 바뀐 경우 통과, 5000줄 `0001_baseline.sql` 추가와 수정은 `schema.sql` 동반 여부와 무관하게 실패). 이 self-test는 `pr-size` job에서 매번 돈다.
 
 속성 무시는 `git --attr-source=<빈 트리>`와 `core.attributesFile=/dev/null`, `GIT_ATTR_NOSYSTEM=1`로 한다(git 2.40 이상). 잠금 파일은 CI에서 다시 잠가 비교하는 방식 대신 매니페스트 동반 변경을 요구하는 방식을 골랐다. 다시 잠그려면 네트워크와 pip-tools/npm 해석 결과가 시점마다 달라져 게이트가 불안정해지기 때문이다. 남는 틈은 매니페스트를 건드리면서 잠금 파일을 부풀리는 경우이며, 잠금 파일은 리뷰어가 diff로 본다.
 
