@@ -415,10 +415,30 @@ jobs:
         run: uv sync --locked
       - name: schema.sql and the migrations must build the same schema
         run: scripts/ci/schema-drift.sh --url "$PG_URL"
-      - name: The committed baseline must be the generator's exact output
-        run: |
-          scripts/migrate-baseline.sh "$RUNNER_TEMP/0001_baseline.sql"
-          cmp "$RUNNER_TEMP/0001_baseline.sql" db/migrations/0001_baseline.sql
+
+  migrations-immutable:
+    name: migrations-immutable
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Base migrations are untouched and SHA256SUMS matches the files
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/ci/migrations-immutable.sh "$PR_BASE" "$HEAD_SHA"
+      - name: SHA256SUMS matches the files
+        if: github.event_name != 'pull_request'
+        run: scripts/ci/migrations-immutable.sh
+      - name: Self-test the immutability gate
+        run: scripts/ci/migrations-immutable-selftest.sh
 
   app-mutation:
     name: app-mutation
@@ -529,6 +549,7 @@ jobs:
       - app-lint
       - app-tests
       - schema-drift
+      - migrations-immutable
       - app-mutation
       - app-audit
       - semgrep

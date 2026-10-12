@@ -10,6 +10,15 @@ from nunchi import migrate as m
 from tests.conftest import REPO
 
 
+def seal(directory: Path) -> None:
+    """Write SHA256SUMS the way `shasum -a 256 *.sql > SHA256SUMS` does."""
+    lines = [
+        f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}"
+        for p in sorted(directory.glob("*.sql"))
+    ]
+    (directory / "SHA256SUMS").write_text("\n".join(lines) + "\n")
+
+
 def mig(version: str, body: bytes = b"SELECT 1") -> m.Migration:
     return m.Migration(version, body, hashlib.sha256(body).hexdigest())
 
@@ -45,6 +54,7 @@ def test_new_migration_sorting_before_an_applied_one_is_refused() -> None:
 def test_load_orders_by_version_and_hashes_bytes(tmp_path: Path) -> None:
     (tmp_path / "0002_b.sql").write_bytes(b"SELECT 2;\n")
     (tmp_path / "0001_a.sql").write_bytes(b"SELECT 1;\n")
+    seal(tmp_path)
     loaded = m.load_migrations(tmp_path)
     assert [x.version for x in loaded] == ["0001", "0002"]
     assert loaded[0].checksum == hashlib.sha256(b"SELECT 1;\n").hexdigest()
@@ -63,9 +73,61 @@ def test_load_rejects_duplicate_version(tmp_path: Path) -> None:
         m.load_migrations(tmp_path)
 
 
+def test_load_refuses_a_file_edited_without_resealing(tmp_path: Path) -> None:
+    (tmp_path / "0001_a.sql").write_text("SELECT 1;\n")
+    (tmp_path / "0002_b.sql").write_text("SELECT 2;\n")
+    seal(tmp_path)
+    (tmp_path / "0002_b.sql").write_text("SELECT 3;\n")
+    with pytest.raises(
+        m.MigrationError, match=r"SHA256SUMS does not match the migration files: 0002_b\.sql$"
+    ):
+        m.load_migrations(tmp_path)
+
+
+def test_load_refuses_a_file_missing_from_the_manifest(tmp_path: Path) -> None:
+    (tmp_path / "0001_a.sql").write_text("SELECT 1;\n")
+    seal(tmp_path)
+    (tmp_path / "0002_b.sql").write_text("SELECT 2;\n")
+    with pytest.raises(m.MigrationError, match=r"files: 0002_b\.sql$"):
+        m.load_migrations(tmp_path)
+
+
+def test_load_refuses_a_manifest_entry_without_a_file(tmp_path: Path) -> None:
+    (tmp_path / "0001_a.sql").write_text("SELECT 1;\n")
+    (tmp_path / "0002_b.sql").write_text("SELECT 2;\n")
+    seal(tmp_path)
+    (tmp_path / "0002_b.sql").unlink()
+    with pytest.raises(m.MigrationError, match=r"files: 0002_b\.sql$"):
+        m.load_migrations(tmp_path)
+
+
+def test_load_refuses_a_missing_manifest(tmp_path: Path) -> None:
+    (tmp_path / "0001_a.sql").write_text("SELECT 1;\n")
+    with pytest.raises(m.MigrationError, match=r"^SHA256SUMS is missing$"):
+        m.load_migrations(tmp_path)
+
+
+@pytest.mark.parametrize("line", ["nothing", "abc  0001_a.sql", f"{'0' * 64}  "])
+def test_load_refuses_a_malformed_manifest(tmp_path: Path, line: str) -> None:
+    (tmp_path / "0001_a.sql").write_text("SELECT 1;\n")
+    (tmp_path / "SHA256SUMS").write_text(line + "\n")
+    with pytest.raises(m.MigrationError, match="malformed or duplicate line"):
+        m.load_migrations(tmp_path)
+
+
+def test_load_refuses_a_duplicate_manifest_entry(tmp_path: Path) -> None:
+    (tmp_path / "0001_a.sql").write_text("SELECT 1;\n")
+    seal(tmp_path)
+    line = (tmp_path / "SHA256SUMS").read_text()
+    (tmp_path / "SHA256SUMS").write_text(line + line)
+    with pytest.raises(m.MigrationError, match="malformed or duplicate line"):
+        m.load_migrations(tmp_path)
+
+
 @pytest.fixture
 def migrations(tmp_path: Path) -> Path:
     (tmp_path / "0001_t.sql").write_text("CREATE TABLE t (id int);\nINSERT INTO t VALUES (1);\n")
+    seal(tmp_path)
     return tmp_path
 
 
@@ -82,6 +144,7 @@ def test_apply_then_reapply_is_a_noop(fresh_db: str, migrations: Path) -> None:
 @pytest.mark.db
 def test_later_migration_applies_after_earlier(fresh_db: str, migrations: Path) -> None:
     (migrations / "0002_u.sql").write_text("INSERT INTO t VALUES (2);\n")
+    seal(migrations)
     with psycopg.connect(fresh_db) as conn:
         assert m.migrate(conn, migrations) == ["0001", "0002"]
         assert conn.execute("SELECT sum(id) FROM t").fetchone() == (3,)
@@ -92,6 +155,7 @@ def test_tampered_applied_migration_is_refused(fresh_db: str, migrations: Path) 
     with psycopg.connect(fresh_db) as conn:
         m.migrate(conn, migrations)
         (migrations / "0001_t.sql").write_text("CREATE TABLE t (id int, extra int);\n")
+        seal(migrations)
         with pytest.raises(m.MigrationError, match="0001 was edited"):
             m.migrate(conn, migrations)
 
@@ -99,6 +163,7 @@ def test_tampered_applied_migration_is_refused(fresh_db: str, migrations: Path) 
 @pytest.mark.db
 def test_failing_migration_rolls_back_everything(fresh_db: str, migrations: Path) -> None:
     (migrations / "0002_bad.sql").write_text("INSERT INTO t VALUES (2);\nSELECT nope();\n")
+    seal(migrations)
     with psycopg.connect(fresh_db) as conn:
         with pytest.raises(psycopg.errors.UndefinedFunction):
             m.migrate(conn, migrations)
@@ -112,7 +177,8 @@ def test_main_applies_baseline_and_reports(
     monkeypatch.setenv("NUNCHI_DATABASE_URL", fresh_db)
     monkeypatch.setenv("NUNCHI_MIGRATIONS_DIR", str(REPO / "db" / "migrations"))
     assert m.main() == 0
-    assert "applied ['0001']" in capsys.readouterr().out
+    versions = sorted(f.name[:4] for f in (REPO / "db" / "migrations").glob("*.sql"))
+    assert f"applied {versions}" in capsys.readouterr().out
     assert m.main() == 0
     assert "applied nothing" in capsys.readouterr().out
     with psycopg.connect(fresh_db) as conn:
@@ -130,5 +196,6 @@ def test_main_exits_nonzero_on_tamper(
     monkeypatch.setenv("NUNCHI_MIGRATIONS_DIR", str(migrations))
     assert m.main() == 0
     (migrations / "0001_t.sql").write_text("SELECT 1;\n")
+    seal(migrations)
     assert m.main() == 1
     assert "0001 was edited" in capsys.readouterr().err

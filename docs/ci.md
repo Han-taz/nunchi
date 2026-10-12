@@ -24,11 +24,12 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 | `shell` | `scripts/` 아래 모든 `*.sh`에 `shellcheck -S style`. | CI와 테스트 러너가 셸이다. |
 | `hygiene` | `editorconfig-checker`(후행 공백, 마지막 개행, 줄바꿈, 들여쓰기 규칙), `typos`. | 노이즈 diff를 막는다. |
 | `commits` | PR 범위의 모든 커밋이 conventional commit 형식인지, 병합 커밋이 없는지, AI 공동 저자 표기(`Co-Authored-By:` Claude/Anthropic 등, "Generated with Claude")가 없는지 검사한다. 스크립트: `scripts/ci/check-commits.sh`. | 히스토리를 선형으로 읽히게 하고, 이 저장소의 커밋 정책을 강제한다. |
-| `pr-size` | 변경이 800줄(추가+삭제)을 넘으면 실패한다. 저장소 속성(`.gitattributes`)은 무시하고 센다. 면제는 넷뿐이다. (1) `docs/research/**`와 `docs/reviews/**`의 `*.md`(다른 확장자는 센다), (2) 잠금 파일(`.github/tools/package-lock.json`, `.github/tools/requirements.txt`)은 같은 PR에서 원본 매니페스트(`package.json`, `requirements.in`)가 함께 바뀐 경우에만, (3) `db/migrations/0001_baseline.sql`은 같은 PR에서 `db/schema.sql`이 바뀌었거나 새로 추가된 경우에만(아래 앱 게이트 절 참고), (4) 바이너리 허용 목록(png, jpg, gif, svg, pdf, ico)은 파일당 50줄로 센다. 허용 목록에 없는 바이너리는 실패한다. 스크립트: `scripts/ci/pr-size.sh`. | 리뷰 가능한 크기를 유지한다. 경로나 속성으로 파일을 숨길 수 없게 한다. |
+| `pr-size` | 변경이 800줄(추가+삭제)을 넘으면 실패한다. 저장소 속성(`.gitattributes`)은 무시하고 센다. 면제는 셋뿐이다. (1) `docs/research/**`와 `docs/reviews/**`의 `*.md`(다른 확장자는 센다), (2) 잠금 파일(`.github/tools/package-lock.json`, `.github/tools/requirements.txt`)은 같은 PR에서 원본 매니페스트(`package.json`, `requirements.in`)가 함께 바뀐 경우에만, (3) 바이너리 허용 목록(png, jpg, gif, svg, pdf, ico)은 파일당 50줄로 센다. 허용 목록에 없는 바이너리는 실패한다. 스크립트: `scripts/ci/pr-size.sh`. | 리뷰 가능한 크기를 유지한다. 경로나 속성으로 파일을 숨길 수 없게 한다. |
 | `codeql` | CodeQL, 언어 `actions`. | 워크플로의 알려진 취약 패턴을 GitHub의 쿼리로 한 번 더 본다. |
 | `app-lint` | `ruff check`(규칙: E F W I S B UP SIM PL RUF ANN), `ruff format --check`, `mypy --strict src tests`, `deptry`. | 타입과 스타일, 선언되지 않았거나 쓰지 않는 의존성을 기계로 고정한다. |
 | `app-tests` | `postgres:16` 서비스에 대해 `pytest`를 `-W error`(경고는 오류)로 돌린다. 마이그레이션 러너(적용, 재적용은 무동작, 변조 감지)와 Hypothesis 속성 테스트, RLS 테스트(`request_tx`가 만든 컨텍스트를 RLS 쿼리가 보는지)가 여기서 돈다. 스켈레톤 전체 커버리지 100%(분기 포함)가 아니면 실패하고, PR에서는 `diff-cover`로 변경된 줄의 80%를 추가로 요구한다. | 앱 코드가 늘어도 변경분이 테스트 없이 들어오지 못하게 한다. |
-| `schema-drift` | 먼저 `scripts/migrate-baseline.sh`를 임시 경로에 돌려 커밋된 `db/migrations/0001_baseline.sql`과 바이트 단위로 `cmp`한다. 손으로 고친 베이스라인은 여기서 실패한다. 이어서 새 DB 둘을 만든다. 하나는 `db/schema.sql`, 다른 하나는 `python -m nunchi.migrate`로 만들고 `pg_dump --schema-only`(`schema_migrations` 제외, 매번 바뀌는 `\restrict` 줄 제거) 결과를 비교한다. 스크립트: `scripts/ci/schema-drift.sh`. | `schema.sql`을 고치고 마이그레이션을 빼먹는 일을 막는다. |
+| `schema-drift` | 새 DB 둘을 만든다. 하나는 `db/schema.sql`, 다른 하나는 `python -m nunchi.migrate`로 만들고 `pg_dump --schema-only`(`schema_migrations` 제외, 매번 바뀌는 `\restrict` 줄 제거) 결과를 비교한다. 스크립트: `scripts/ci/schema-drift.sh`. | `schema.sql`을 고치고 마이그레이션을 빼먹는 일을 막는다. |
+| `migrations-immutable` | PR의 base에 있는 `db/migrations/` 아래 모든 파일이 head에서 같은 모드와 blob 해시로 남아 있는지 `git ls-tree`로 비교한다. 수정, 삭제, 이름 변경이 모두 실패한다. `0001_baseline.sql`도 예외가 아니다. `db/migrations/SHA256SUMS`는 `*.sql` 전체의 sha256과 정확히 같아야 하고(다시 만들어 diff), base의 줄이 head에서 사라져도 실패한다. 스크립트: `scripts/ci/migrations-immutable.sh`, 자체 테스트 `scripts/ci/migrations-immutable-selftest.sh`(0001 수정, 매니페스트 재생성 후 수정, 삭제, 이름 변경, 매니페스트 누락이 실패하고 새 마이그레이션 추가는 통과). | 병합된 마이그레이션을 고쳐 쓰면 이미 적용된 DB와 새 DB가 조용히 갈라진다. 베이스라인 생성기 비교(`cmp`)는 0001을 처음 추가하는 PR에서만 의미가 있었고 그 PR은 이미 병합되었으므로 삭제했다. 생성기 `scripts/migrate-baseline.sh`도 함께 지웠다. |
 | `app-mutation` | `mutmut`. PR에서는 변경된 `src/nunchi` 모듈만, 그 밖의 실행(push, 스케줄)에서는 전부 돌려 죽인 뮤턴트 비율이 80% 미만이면 실패한다(timeout은 죽인 것으로 센다). 스크립트: `scripts/ci/mutation-gate.sh`. | 커버리지만으로는 단언 없는 테스트를 못 잡는다. |
 | `app-audit` | `uv export`로 잠금 파일의 전체 의존성(개발 그룹 포함)을 뽑아 `pip-audit`로 검사한다. 알려진 취약점이 하나라도 있으면 실패한다. | 공급망 취약점은 예외 없이 막는다. |
 | `semgrep` | `p/python`, `p/secrets`와 자체 규칙 `.semgrep/sql-injection.yml`(f-string, `%`, `.format`, `+`로 만든 SQL을 `execute`/`executemany`에 넘기면 실패). 자체 규칙은 `.semgrep/sql-injection.py`의 `ruleid`/`ok` 주석으로 먼저 테스트한다. | 파라미터 바인딩을 우회하는 SQL 조립을 기계로 금지한다. |
@@ -88,7 +89,7 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 | shellcheck | 없음 (`-S style`) | |
 | zizmor | 없음 (기본 persona, 온라인) | |
 
-`pr-size`에는 우회 장치가 없다. 라벨을 포함해 어떤 입력도 한도를 바꾸지 못한다. 한도(800줄)를 넘으면 규칙은 하나다. PR을 쪼갠다. 게이트 자체는 `scripts/ci/pr-size-selftest.sh`가 합성 diff로 검증한다(800줄 통과, 801줄 실패, `* -diff`와 `*.sql binary` 속성 아래 5000줄 .sql 실패, NUL 바이트가 있는 .sql 실패, `docs/research`의 5000줄 .sql 실패와 5000줄 .md 통과, png 통과, 매니페스트 없는 잠금 파일 5000줄 실패와 매니페스트가 함께 바뀐 경우 통과). 이 self-test는 `pr-size` job에서 매번 돈다.
+`pr-size`에는 우회 장치가 없다. 라벨을 포함해 어떤 입력도 한도를 바꾸지 못한다. 한도(800줄)를 넘으면 규칙은 하나다. PR을 쪼갠다. 게이트 자체는 `scripts/ci/pr-size-selftest.sh`가 합성 diff로 검증한다(800줄 통과, 801줄 실패, `* -diff`와 `*.sql binary` 속성 아래 5000줄 .sql 실패, NUL 바이트가 있는 .sql 실패, `docs/research`의 5000줄 .sql 실패와 5000줄 .md 통과, png 통과, 매니페스트 없는 잠금 파일 5000줄 실패와 매니페스트가 함께 바뀐 경우 통과, 5000줄 `0001_baseline.sql` 추가와 수정은 `schema.sql` 동반 여부와 무관하게 실패). 이 self-test는 `pr-size` job에서 매번 돈다.
 
 속성 무시는 `git --attr-source=<빈 트리>`와 `core.attributesFile=/dev/null`, `GIT_ATTR_NOSYSTEM=1`로 한다(git 2.40 이상). 잠금 파일은 CI에서 다시 잠가 비교하는 방식 대신 매니페스트 동반 변경을 요구하는 방식을 골랐다. 다시 잠그려면 네트워크와 pip-tools/npm 해석 결과가 시점마다 달라져 게이트가 불안정해지기 때문이다. 남는 틈은 매니페스트를 건드리면서 잠금 파일을 부풀리는 경우이며, 잠금 파일은 리뷰어가 diff로 본다.
 
@@ -98,8 +99,8 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 
 위 표의 `app-*`, `schema-drift`, `semgrep`, `docker-build`가 애플리케이션 코드 게이트다. 도구는 `uv.lock`(`uv sync --locked`)로만 설치한다. 로컬에서는 `uv sync --locked`로 CI와 같은 환경을 만든다.
 
-- 마이그레이션: `db/migrations/NNNN_slug.sql`을 `python -m nunchi.migrate`가 순서대로 적용하고 `schema_migrations(version, checksum, applied_at)`에 기록한다. 다시 돌리면 아무것도 하지 않고, 적용된 파일이 수정되었거나 사라졌거나 적용된 것보다 앞 번호의 새 파일이 생기면 실패한다. `0001_baseline.sql`은 `scripts/migrate-baseline.sh`가 `db/schema.sql`에서 만든다. 어디에도 적용되기 전에만 다시 만들 수 있다. 이후 `schema.sql` 변경은 새 번호의 마이그레이션으로 함께 낸다.
-- `pr-size`: `db/migrations/0001_baseline.sql`은 같은 PR에서 `db/schema.sql`이 바뀌었거나 이 파일이 새로 추가된 경우에만 면제다. `schema.sql`에서 생성되는 파일이고(원본 `schema.sql`은 그대로 센다) `schema-drift` 잡이 생성기 출력과 바이트 단위로 같은지 확인하므로 리뷰어는 `schema.sql`만 보면 된다. 경로가 정확히 일치할 때만 면제하며 `db/migrations/`의 다른 파일(앞으로 추가될 마이그레이션)은 모두 센다. 자체 테스트는 `scripts/ci/pr-size-selftest.sh`다.
+- 마이그레이션: `db/migrations/NNNN_slug.sql`을 `python -m nunchi.migrate`가 순서대로 적용하고 `schema_migrations(version, checksum, applied_at)`에 기록한다. 다시 돌리면 아무것도 하지 않고, 적용된 파일이 수정되었거나 사라졌거나 적용된 것보다 앞 번호의 새 파일이 생기면 실패한다. 러너는 `db/migrations/SHA256SUMS`(`sha256sum` 형식)도 읽어 디스크의 `*.sql`과 파일 이름 집합, 해시가 모두 같은지 확인하고 다르면 아무것도 적용하지 않는다. 그래서 새 DB에서 파일만 고쳐 조용히 적용하는 길이 없다. 새 마이그레이션을 추가하면 `cd db/migrations && sha256sum *.sql > SHA256SUMS`로 매니페스트를 다시 만든다. `0001_baseline.sql`은 동결이다. `schema.sql` 변경은 항상 새 번호의 마이그레이션으로 함께 낸다.
+- `pr-size`: `db/migrations/`의 어떤 파일도 면제가 아니다. 동결된 `0001_baseline.sql`을 고치면 `migrations-immutable`이 먼저 실패하므로 크기 면제로 숨길 이유가 없다. 자체 테스트는 `scripts/ci/pr-size-selftest.sh`다.
 - `pr-size`: `uv.lock`은 같은 PR에서 `pyproject.toml`이 바뀐 경우에만 면제다. 다른 잠금 파일과 같은 이유(생성 파일, 리뷰어는 매니페스트를 본다)다.
 - `app-tests`의 100% 커버리지는 스켈레톤이 작을 때의 기준이다. 코드가 늘면 `fail_under`를 낮추지 말고 diff-cover 80%를 주 게이트로 삼을지 별도 PR에서 정한다. `if __name__ == "__main__"` 줄만 커버리지에서 제외한다.
 
