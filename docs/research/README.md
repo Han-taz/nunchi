@@ -9,10 +9,11 @@ date: 2026-10-12
 
 ## 읽는 순서
 
-1. [implementation-guide-v1.md](implementation-guide-v1.md) — **실제 팀 도입용**: 저장소 구조, 파일 형식, 쓰기/읽기 흐름, 단계별 도입
-2. [synthesis.md](synthesis.md) — 수렴하는 개념 9가지, 첫 답변 정정, 미해결 문제, 참조 아키텍처, 설계 체크리스트
-3. [platform-comparison.md](platform-comparison.md) — Claude / Letta / AWS / Databricks / Tencent / Asana 비교표
-4. `sources/` — 출처별 상세 노트 (섹션 번호, 수치, 저자가 밝힌 한계와 내가 본 약점을 구분, 확인 필요 항목)
+1. [../design/team-memory-core-v1.md](../design/team-memory-core-v1.md) — **Memory Core 설계서** (Postgres+RLS 스키마 `db/schema.sql`, 스모크 테스트 `db/tests/smoke_test.sql`)
+2. [implementation-guide-v1.md](implementation-guide-v1.md) — **실제 팀 도입용**: 저장소 구조, 파일 형식, 쓰기/읽기 흐름, 단계별 도입
+3. [synthesis.md](synthesis.md) — 수렴하는 개념 9가지, 첫 답변 정정, 미해결 문제, 참조 아키텍처, 설계 체크리스트
+4. [platform-comparison.md](platform-comparison.md) — Claude / Letta / AWS / Databricks / Tencent / Asana 비교표
+5. `sources/` — 출처별 상세 노트 (섹션 번호, 수치, 저자가 밝힌 한계와 내가 본 약점을 구분, 확인 필요 항목)
 
 ## 출처 노트 목록
 
