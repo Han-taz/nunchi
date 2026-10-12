@@ -273,11 +273,9 @@ jobs:
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-        run: |
-          override=false
-          if jq -e 'index("size-override")' <<<"$LABELS" >/dev/null; then override=true; fi
-          SIZE_OVERRIDE="$override" scripts/ci/pr-size.sh "$PR_BASE" "$HEAD_SHA" 800
+        run: scripts/ci/pr-size.sh "$PR_BASE" "$HEAD_SHA" 800
+      - name: Self-test the size gate
+        run: scripts/ci/pr-size-selftest.sh
 
   codeql:
     name: codeql

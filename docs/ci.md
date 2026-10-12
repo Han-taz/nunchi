@@ -82,7 +82,7 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 | shellcheck | 없음 (`-S style`) | |
 | zizmor | 없음 (기본 persona, 온라인) | |
 
-`pr-size`에는 우회 장치가 하나 있다. PR에 `size-override` 라벨이 붙어 있으면 한도를 넘어도 경고만 남기고 통과한다. 라벨은 저장소 쓰기 권한이 있는 사람만 붙일 수 있다. 부트스트랩 PR처럼 일회성으로 큰 변경에만 쓴다.
+`pr-size`에는 우회 장치가 없다. 라벨을 포함해 어떤 입력도 한도를 바꾸지 못한다. 한도(800줄)를 넘으면 규칙은 하나다. PR을 쪼갠다. 게이트 자체는 `scripts/ci/pr-size-selftest.sh`가 합성 diff로 검증한다(800줄은 통과, 801줄은 실패). 이 self-test는 `pr-size` job에서 매번 돈다.
 
 도구 의존성에는 `npm audit`가 보고하는 알려진 취약점(개발용 린터의 파서 DoS)이 있다. 신뢰하는 입력에만 돌리고 산출물에 들어가지 않으므로 게이트로 삼지 않았다.
 
