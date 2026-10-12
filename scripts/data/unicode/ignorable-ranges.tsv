@@ -1,0 +1,43 @@
+# Unicode 18.0.0: Cc, Cf and Default_Ignorable_Code_Point ranges derived
+# from the files in ucd-sources.sha256 by scripts/gen-unicode-ignorables.py --refresh.
+# property<TAB>first<TAB>last (hex code points, inclusive)
+Cc	0000	001F
+Cc	007F	009F
+Cf	00AD	00AD
+Cf	0600	0605
+Cf	061C	061C
+Cf	06DD	06DD
+Cf	070F	070F
+Cf	0890	0891
+Cf	08E2	08E2
+Cf	180E	180E
+Cf	200B	200F
+Cf	202A	202E
+Cf	2060	2064
+Cf	2066	206F
+Cf	FEFF	FEFF
+Cf	FFF9	FFFB
+Cf	110BD	110BD
+Cf	110CD	110CD
+Cf	13430	1343F
+Cf	1BCA0	1BCA3
+Cf	1D173	1D17A
+Cf	E0001	E0001
+Cf	E0020	E007F
+Default_Ignorable_Code_Point	00AD	00AD
+Default_Ignorable_Code_Point	034F	034F
+Default_Ignorable_Code_Point	061C	061C
+Default_Ignorable_Code_Point	115F	1160
+Default_Ignorable_Code_Point	17B4	17B5
+Default_Ignorable_Code_Point	180B	180F
+Default_Ignorable_Code_Point	200B	200F
+Default_Ignorable_Code_Point	202A	202E
+Default_Ignorable_Code_Point	2060	206F
+Default_Ignorable_Code_Point	3164	3164
+Default_Ignorable_Code_Point	FE00	FE0F
+Default_Ignorable_Code_Point	FEFF	FEFF
+Default_Ignorable_Code_Point	FFA0	FFA0
+Default_Ignorable_Code_Point	FFF0	FFF8
+Default_Ignorable_Code_Point	1BCA0	1BCA3
+Default_Ignorable_Code_Point	1D173	1D17A
+Default_Ignorable_Code_Point	E0000	E0FFF
