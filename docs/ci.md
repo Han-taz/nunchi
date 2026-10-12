@@ -81,7 +81,7 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 | markdownlint | `MD060` (표 열 스타일) | 가져온 리서치 표 전체를 다시 정렬하라는 규칙이다. |
 | markdownlint | `MD036` (강조를 제목으로) | 출처 노트가 굵은 글씨 한 줄로 하위 블록을 표시한다. 제목으로 바꾸면 모든 노트의 개요가 바뀐다. |
 | markdownlint | `MD025` 설정 `front_matter_title: ""` | YAML front matter의 `title`과 본문 H1이 함께 있는 것이 의도다. |
-| typos | 단어 `anc`, `EHR`, `NAMS`, `RTO`, `LAF`, `IIT`, `FPR` | 논문 약어와 기호다(ancestor 함수, 전자건강기록, Neo4j Agent Memory Service 등). |
+| typos | 단어 `anc`, `EHR`, `NAMS`, `RTO`, `LAF`, `IIT`, `FPR`, `caf` | 논문 약어와 기호다(ancestor 함수, 전자건강기록, Neo4j Agent Memory Service 등). `caf`는 테스트 문자열 `café`를 `E'caf\u00e9'`로 적을 때 남는 어간이다. |
 | gitleaks | 정규식 `family/partner`, 파일 `gatemem-2606.18829.md` | 벤치마크 설명의 산문이 `generic-api-key` 규칙에 걸린다. |
 | ruff | `tests/**`에서 `S101`(assert), `PLR2004`(매직 값) | assert는 테스트의 문법이고, 기대값 리터럴이 곧 단언이다. |
 | deptry | `DEP002`: `psycopg-binary` | `psycopg[binary]` extra가 끌어오는 C 가속기이고 import하지 않는다. |
