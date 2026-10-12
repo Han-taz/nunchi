@@ -8,7 +8,7 @@
 # A new test in smoke_test.sql must be added here, or the db-tests job fails.
 T1	= 0	pass
 T2	propose ok	pass
-T3	(ok)	pass
+T3	(ok)	fail
 T4	rows = 0	pass
 T5	rows = 1	pass
 T6	rows = 0	pass
@@ -44,9 +44,9 @@ X4e	(ok)	fail
 X4f	(ok)	fail
 X4g	(ok)	fail
 X4h	(ok)	fail
-X4i	(ok)	pass	positive control: a contributor comment review must keep working
+X4i	(ok)	fail
 X4j	(ok)	fail
-X4k	(ok)	fail
+X4k	(ok)	pass	positive control: a store's curator still reads its own versions (the old fail came from X3b's grant damage, now rolled back)
 X4l	(ok)	fail
 X5a	(ok)	fail
 X5b	(ok)	fail
@@ -77,3 +77,28 @@ N8a	(ok)	fail
 N8b	(ok)	fail
 N8c	(ok)	fail
 F11	(ok)	fail
+F5	(ok)	fail
+F7a	(ok)	fail
+F7b	(ok)	pass	v1.0 FK already rejects an absent supersedes target; the test pins that the new trigger keeps the same code
+F7c	(ok)	fail
+F7d	(ok)	fail
+F7e	(ok)	fail
+F7f	(ok)	fail
+F7h	(ok)	fail
+F7g	(ok)	pass	positive control: citing an internal memory keeps the derived memory internal
+F8a	(ok)	fail
+F8b	(ok)	fail
+F8c	(ok)	fail
+F8d	(ok)	fail
+N4b	(ok)	fail
+N4c	(ok)	pass	positive control: the store's own curator still reads its deleted_hash rows
+N6c	(ok)	fail
+F9a	(ok)	fail
+F9b	(ok)	fail
+F9c	(ok)	fail
+F9d	(ok)	fail
+F9e	(ok)	fail
+F9f	(ok)	fail
+F9g	(ok)	fail
+F9h	(ok)	fail
+F10	(ok)	fail

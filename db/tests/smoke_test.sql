@@ -68,9 +68,11 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
  ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000c1','curator','00000000-0000-0000-0000-000000000001'),
  ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000d1','contributor','00000000-0000-0000-0000-000000000001'),
  ('00000000-0000-0000-0000-00000000f002','00000000-0000-0000-0000-0000000000b1','curator','00000000-0000-0000-0000-000000000001');
+SET app.reason = 'original';
 INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES
  ('00000000-0000-0000-0000-0000000aa001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f002',
   'fact','active','연봉 밴드 정책','비공개','[{"uri":"https://hr/x"}]','00000000-0000-0000-0000-0000000000b1');
+RESET app.reason;
 
 SET ROLE app_rw;
 
@@ -85,15 +87,12 @@ VALUES ('00000000-0000-0000-0000-0000000bb001','00000000-0000-0000-0000-00000000
  'fact','A사 갱신 담당자 변경','김OO → 이OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1');
 SELECT 'T2 propose ok'; COMMIT;
 
--- 3) 영업봇이 active 로 바로 쓰기 시도 → RLS 거부
+-- 3) 영업봇이 active 로 바로 쓰기 시도 → 성공하되 트리거가 proposed 로 덮어쓴다
 BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SAVEPOINT s;
-DO $$ BEGIN
+SELECT t_eq('T3 bot insert with status=active is stored as', $q$WITH i AS (
   INSERT INTO memory (tenant_id, store_id, kind, status, title, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','우회','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1');
-  RAISE NOTICE 'T3 FAIL: active insert allowed';
-EXCEPTION WHEN insufficient_privilege THEN RAISE NOTICE 'T3 blocked direct active write (ok)';
-END $$;
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','우회','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')
+  RETURNING status) SELECT status::text FROM i$q$, 'proposed');
 COMMIT;
 
 -- 4) Alice(contributor)는 승인 불가 → 0 rows updated
@@ -114,20 +113,22 @@ SELECT 'T6 carol+bot curate rows = ' || count(*) FROM u; COMMIT;
 -- 7) 버전 기록 수정 금지
 RESET ROLE;
 INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot)
-VALUES ('00000000-0000-0000-0000-0000000bb001',1,'propose','00000000-0000-0000-0000-0000000000d1','{"title":"x"}');
+VALUES ('00000000-0000-0000-0000-0000000bb001',1,'propose','00000000-0000-0000-0000-0000000000d1','{"title":"x"}')
+ON CONFLICT DO NOTHING;
 DO $$ BEGIN
   UPDATE memory_version SET reason='tamper';
   RAISE NOTICE 'T7 FAIL';
 EXCEPTION WHEN raise_exception THEN RAISE NOTICE 'T7 version tamper blocked (ok)';
 END $$;
-UPDATE memory_version SET snapshot = NULL;  -- redact 허용
-SELECT 'T7b redact ok, snapshot null = ' || (snapshot IS NULL) FROM memory_version;
+UPDATE memory_version SET snapshot = NULL WHERE memory_id = '00000000-0000-0000-0000-0000000bb001' AND version = 1;  -- redact 허용
+SELECT 'T7b redact ok, snapshot null = ' || bool_and(snapshot IS NULL) FROM memory_version WHERE memory_id = '00000000-0000-0000-0000-0000000bb001' AND version = 1;
 
 -- ═══ 회귀 테스트 X1–X6 (보안 수정 검증) ═══════════════════
 -- 사전 데이터(소유자 권한): 다른 tenant, hr/sales 버전·리뷰 행
 INSERT INTO tenant (id, name) VALUES ('00000000-0000-0000-0000-000000000002', 'other');
 INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot, reason) VALUES
- ('00000000-0000-0000-0000-0000000aa001',1,'propose','00000000-0000-0000-0000-0000000000b1','{"title":"hr"}','original');
+ ('00000000-0000-0000-0000-0000000aa001',1,'propose','00000000-0000-0000-0000-0000000000b1','{"title":"hr"}','original')
+ON CONFLICT DO NOTHING;
 INSERT INTO review (memory_id, reviewer_id, verdict, note) VALUES
  ('00000000-0000-0000-0000-0000000aa001','00000000-0000-0000-0000-0000000000b1','comment','hr 전용'),
  ('00000000-0000-0000-0000-0000000bb001','00000000-0000-0000-0000-0000000000c1','comment','sales 리뷰');
@@ -188,26 +189,26 @@ ROLLBACK;
 BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
 SELECT t_eq('X4a alice+bot hr memory_version rows', $q$SELECT count(*)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000aa001'$q$, '0');
 SELECT t_eq('X4b alice+bot hr review rows', $q$SELECT count(*)::text FROM review WHERE memory_id='00000000-0000-0000-0000-0000000aa001'$q$, '0');
-SELECT t_eq('X4c alice+bot sales memory_version rows (own store visible)', $q$SELECT count(*)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000bb001'$q$, '1');
+SELECT t_eq('X4c alice+bot sees sales memory_version rows (own store visible)', $q$SELECT (count(*) >= 1)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000bb001'$q$, 'true');
 SELECT t_eq('X4d alice+bot sales review rows', $q$SELECT count(*)::text FROM review$q$, '1');
 SELECT t_err('X4e insert version on hr memory', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000aa001',2,'edit','00000000-0000-0000-0000-0000000000d1','{}')$q$, '42501');
 SELECT t_err('X4f insert review on hr memory', $q$INSERT INTO review (memory_id, reviewer_id, verdict) VALUES ('00000000-0000-0000-0000-0000000aa001','00000000-0000-0000-0000-0000000000d1','comment')$q$, '42501');
 SELECT t_err('X4g version actor forged as carol', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000bb001',2,'edit','00000000-0000-0000-0000-0000000000c1','{}')$q$, '42501');
-SELECT t_err('X4h insert version on sales memory', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000bb001',2,'edit','00000000-0000-0000-0000-0000000000d1','{"title":"v2"}')$q$, 'ok');
-SELECT t_err('X4i bot comment review on sales memory', $q$INSERT INTO review (memory_id, reviewer_id, verdict) VALUES ('00000000-0000-0000-0000-0000000bb001','00000000-0000-0000-0000-0000000000d1','comment')$q$, 'ok');
+SELECT t_err('X4h insert version on sales memory (triggers only)', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000bb001',2,'edit','00000000-0000-0000-0000-0000000000d1','{"title":"v2"}')$q$, '42501');
+SELECT t_err('X4i bot comment review on sales memory (decision function only)', $q$INSERT INTO review (memory_id, reviewer_id, verdict) VALUES ('00000000-0000-0000-0000-0000000bb001','00000000-0000-0000-0000-0000000000d1','comment')$q$, '42501');
 SELECT t_err('X4j bot approve review (needs curator)', $q$INSERT INTO review (memory_id, reviewer_id, verdict) VALUES ('00000000-0000-0000-0000-0000000bb001','00000000-0000-0000-0000-0000000000d1','approve')$q$, '42501');
 COMMIT;
 BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000b1', NULL);
-SELECT t_eq('X4k bob(hr) sees hr version', $q$SELECT count(*)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000aa001'$q$, '1');
+SELECT t_eq('X4k bob(hr) sees hr version', $q$SELECT (count(*) >= 1)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000aa001'$q$, 'true');
 SELECT t_eq('X4l bob(hr) sees no sales version/review', $q$SELECT (SELECT count(*) FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000bb001') + (SELECT count(*) FROM review WHERE memory_id='00000000-0000-0000-0000-0000000bb001')$q$, '0');
 COMMIT;
 
 -- X5) redact 는 curator 만, snapshot 외 컬럼(reason 포함) 변경 불가 / review 는 append-only
 BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', NULL);
-SELECT t_eq('X5a contributor alice redact rows', $q$WITH u AS (UPDATE memory_version SET snapshot=NULL WHERE memory_id='00000000-0000-0000-0000-0000000bb001' AND version=2 RETURNING 1) SELECT count(*)::text FROM u$q$, '0');
+SELECT t_err('X5a contributor alice redact (no UPDATE privilege)', $q$UPDATE memory_version SET snapshot=NULL WHERE memory_id='00000000-0000-0000-0000-0000000bb001' AND version=2$q$, '42501');
 COMMIT;
 BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t_eq('X5b curator carol redact rows', $q$WITH u AS (UPDATE memory_version SET snapshot=NULL WHERE memory_id='00000000-0000-0000-0000-0000000bb001' AND version=2 RETURNING 1) SELECT count(*)::text FROM u$q$, '1');
+SELECT t_err('X5b curator carol redact (only the delete trigger redacts)', $q$UPDATE memory_version SET snapshot=NULL WHERE memory_id='00000000-0000-0000-0000-0000000bb001' AND version=2$q$, '42501');
 COMMIT;
 RESET ROLE;
 SELECT t_err('X5c redact + rewrite reason (owner)', $q$UPDATE memory_version SET snapshot=NULL, reason='rewritten' WHERE reason='original'$q$, 'P0001');
@@ -267,7 +268,7 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
 
 -- A10) 앱 역할은 LOGIN NOBYPASSRLS NOINHERIT, RLS 테이블은 소유자에게도 정책을 강제한다
 SELECT t_eq('A10a app_rw login/bypassrls/inherit', $q$SELECT rolcanlogin || '/' || rolbypassrls || '/' || rolinherit FROM pg_roles WHERE rolname = 'app_rw'$q$, 'true/false/false');
-SELECT t_eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'memory,memory_version,review');
+SELECT t_eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,memory,memory_version,review');
 
 SET ROLE app_rw;
 
@@ -340,4 +341,94 @@ BEGIN
 END $$;
 COMMIT;
 RESET ROLE;
+
+-- ═══ P0 하드닝 (A3, A4, A7, A8, A9): 쓰기 경로는 트리거와 함수뿐 ═════════
+-- 사전 데이터(소유자 권한): hr 의 삭제 해시, 외부 출처 active 메모리
+INSERT INTO deleted_hash (store_id, content_hash, reason) VALUES ('00000000-0000-0000-0000-00000000f002', 'seed', 'seed');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, origin, created_by) VALUES
+ ('00000000-0000-0000-0000-0000000ee001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001',
+  'fact','active','외부 문서','외부 본문','[{"uri":"https://ext/1"}]','external','00000000-0000-0000-0000-0000000000c1');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES
+ ('00000000-0000-0000-0000-0000000ff001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f003',
+  'fact','active','성능 store 메모리','다른 store 본문','[{"uri":"https://perf/1"}]','00000000-0000-0000-0000-0000000000c1');
+INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
+ ('00000000-0000-0000-0000-00000000f003','00000000-0000-0000-0000-0000000000a1','reader','00000000-0000-0000-0000-000000000001');
+
+SET ROLE app_rw;
+
+-- A7) 서버가 정하는 값: 상태, 내용 해시. 클라이언트가 보낸 status/content_hash 는 무시된다
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t_eq('F5 client status=active and content_hash are replaced', $q$WITH i AS (
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, on_behalf_of, content_hash)
+  VALUES ('00000000-0000-0000-0000-0000000cc001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','F5','본문 F5','[{"uri":"https://crm/1"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','client-hash')
+  RETURNING status, content_hash, body) SELECT status || '/' || (content_hash = app_sec.content_hmac(body)) FROM i$q$, 'proposed/true');
+COMMIT;
+
+-- 존재 오라클 차단: 못 읽는 행과 없는 행은 같은 오류 (N3)
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t_err('F7a supersedes an hr memory (exists, unreadable)', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of, supersedes_id)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000aa001')$q$, '23503');
+SELECT t_err('F7b supersedes a random uuid (absent)', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of, supersedes_id)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-00000000dead')$q$, '23503');
+SELECT t_err('F7h supersedes a readable memory of another store', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of, supersedes_id)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000ff001')$q$, '23503');
+SELECT t_err('F7c memory:// citation of an hr memory', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"memory://00000000-0000-0000-0000-0000000aa001"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23503');
+SELECT t_err('F7d memory:// citation of a random uuid', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"memory://00000000-0000-0000-0000-00000000dead"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23503');
+SELECT t_err('F7e memory:// citation that is not a uuid', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"memory://not-a-uuid"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23503');
+SELECT t_eq('F7f citing an external memory makes the derived memory external (N11)', $q$WITH i AS (
+  INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"memory://00000000-0000-0000-0000-0000000ee001"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')
+  RETURNING origin) SELECT origin::text FROM i$q$, 'external');
+SELECT t_eq('F7g citing an internal memory keeps it internal', $q$WITH i AS (
+  INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','y','[{"uri":"memory://00000000-0000-0000-0000-0000000bb001"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')
+  RETURNING origin) SELECT origin::text FROM i$q$, 'internal');
+ROLLBACK;
+
+-- A3, A4) 감사·삭제 해시·리뷰는 앱이 직접 쓰지 못한다 (N4, N6)
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t_err('F8a deleted_hash INSERT into hr (N4a)', $q$INSERT INTO deleted_hash (store_id, content_hash, reason) VALUES ('00000000-0000-0000-0000-00000000f002','h1','censor')$q$, '42501');
+SELECT t_err('F8b bot inserts an approve version as itself (N6a)', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000bb001', 9, 'approve', '00000000-0000-0000-0000-0000000000d1', '{"forged":true}')$q$, '42501');
+SELECT t_err('F8c memory_version UPDATE', $q$UPDATE memory_version SET snapshot = NULL$q$, '42501');
+SELECT t_err('F8d bot inserts an approve review (N6b)', $q$INSERT INTO review (memory_id, reviewer_id, verdict) VALUES ('00000000-0000-0000-0000-0000000bb001','00000000-0000-0000-0000-0000000000d1','approve')$q$, '42501');
+SELECT t_eq('N4b alice+bot reads deleted_hash rows', $q$SELECT count(*)::text FROM deleted_hash$q$, '0');
+ROLLBACK;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t_err('N6c contributor inserts an approve version in her own name', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000bb001', 9, 'approve', '00000000-0000-0000-0000-0000000000a1', '{"forged":true}')$q$, '42501');
+ROLLBACK;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000b1', NULL);
+SELECT t_eq('N4c hr curator bob reads hr deleted_hash rows', $q$SELECT count(*)::text FROM deleted_hash$q$, '1');
+ROLLBACK;
+
+-- A8, A9) 승인 → origin 세탁 → 작성자 변경 → 삭제 → 소생 → 체인 검증
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000c1', NULL); SET LOCAL app.reason = 'looks good';
+UPDATE memory SET status = 'active' WHERE id = '00000000-0000-0000-0000-0000000cc001' AND version = 1;
+SELECT t_eq('F9a approved: version / versions logged', $q$SELECT version || '/' || (SELECT count(*) FROM memory_version WHERE memory_id = '00000000-0000-0000-0000-0000000cc001') FROM memory WHERE id = '00000000-0000-0000-0000-0000000cc001'$q$, '2/2');
+UPDATE memory SET origin = 'external' WHERE id = '00000000-0000-0000-0000-0000000cc001';
+SELECT t_err('F9b launder origin external -> internal (N5a)', $q$UPDATE memory SET origin = 'internal' WHERE id = '00000000-0000-0000-0000-0000000cc001'$q$, 'P0001');
+SELECT t_err('F9c rewrite created_by (N5a)', $q$UPDATE memory SET created_by = '00000000-0000-0000-0000-0000000000a1' WHERE id = '00000000-0000-0000-0000-0000000cc001'$q$, 'P0001');
+SET LOCAL app.reason = 'PII erasure request #42';
+UPDATE memory SET status = 'deleted' WHERE id = '00000000-0000-0000-0000-0000000cc001';
+SELECT t_eq('F9d deleted: body null / snapshots all null / deleted_hash rows', $q$SELECT (body IS NULL) || '/' || (SELECT bool_and(snapshot IS NULL) FROM memory_version WHERE memory_id = '00000000-0000-0000-0000-0000000cc001') || '/' || (SELECT count(*) FROM deleted_hash WHERE store_id = '00000000-0000-0000-0000-00000000f001') FROM memory WHERE id = '00000000-0000-0000-0000-0000000cc001'$q$, 'true/true/1');
+SELECT t_err('F9e resurrect deleted -> active with a new body (N5b)', $q$UPDATE memory SET status = 'active', body = '되살림' WHERE id = '00000000-0000-0000-0000-0000000cc001'$q$, 'P0001');
+SELECT t_eq('F9f chain valid', $q$SELECT app_sec.verify_chain('00000000-0000-0000-0000-0000000cc001')::text$q$, 'true');
+SELECT t_eq('F9g ops in order', $q$SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id = '00000000-0000-0000-0000-0000000cc001'$q$, 'propose,approve,edit,delete');
+COMMIT;
+
+-- A4) 삭제된 본문의 공백만 바꾼 재제안은 막힌다
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t_err('F10 re-propose of deleted content with different whitespace', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again','본문  F5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+ROLLBACK;
+
+-- A9) 체인은 변조를 드러낸다: 소유자가 트리거를 끄고 actor 를 바꾸면 verify_chain 이 false
+RESET ROLE;
+BEGIN;
+ALTER TABLE memory_version DISABLE TRIGGER memory_version_append_only;
+UPDATE memory_version SET actor_id = '00000000-0000-0000-0000-0000000000b1' WHERE memory_id = '00000000-0000-0000-0000-0000000cc001' AND op = 'approve';
+SELECT t_eq('F9h tampered actor breaks the chain', $q$SELECT app_sec.verify_chain('00000000-0000-0000-0000-0000000cc001')::text$q$, 'false');
+ROLLBACK;
 DROP FUNCTION t_eq(text, text, text); DROP FUNCTION t_err(text, text, text); DROP FUNCTION t_ctx_soft(uuid, uuid); DROP FUNCTION t_ctx(uuid, uuid); DROP FUNCTION t_role(uuid);
