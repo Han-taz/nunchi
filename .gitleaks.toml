@@ -1,0 +1,9 @@
+title = "nunchi gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Prose 'family/partner' in a benchmark note matches the generic-api-key rule"
+regexes = ['''family/partner''']
+paths = ['''docs/research/sources/gatemem-2606\.18829\.md''']

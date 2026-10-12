@@ -1,0 +1,65 @@
+# Test registry for scripts/db-test.sh. Columns are tab separated:
+#   id | marker | on_vulnerable | note
+# marker: text that must appear in the test's output line, and the line must not contain FAIL.
+# on_vulnerable: expected outcome against db/tests/fixtures/schema_v1_0_vulnerable.sql
+#   (mutation gate). fail = the test detects the vulnerability. pass = it cannot,
+#   so an X test marked pass needs a note saying why.
+# T tests are v1.0 behaviour that the fixes must not change, so they pass on both schemas.
+# A new test in smoke_test.sql must be added here, or the db-tests job fails.
+T1	= 0	pass
+T2	propose ok	pass
+T3	(ok)	pass
+T4	rows = 0	pass
+T5	rows = 1	pass
+T6	rows = 0	pass
+T7	(ok)	pass
+T7b	= true	pass
+X1a	(ok)	fail
+X1b	(ok)	fail
+X1c	(ok)	fail
+X1d	(ok)	fail
+X1e	(ok)	fail
+X1f	(ok)	fail
+X1g	(ok)	pass	positive control: a legitimate curator keeps access
+X2a	(ok)	fail
+X2b	(ok)	fail
+X2c	(ok)	fail
+X2d	(ok)	fail
+X2e	(ok)	pass	positive control: an honest agent proposal must keep working
+X2f	(ok)	fail
+X2g	(ok)	fail
+X2h	(ok)	pass	positive control: an honest human proposal must keep working
+X3a	(ok)	fail
+X3b	(ok)	fail
+X3c	(ok)	pass	the grant shim has no DELETE privilege, so the v1.0 setup blocks this by itself
+X3d	(ok)	fail
+X3e	(ok)	fail
+X3f	(ok)	pass	the grant shim has no DELETE privilege, so the v1.0 setup blocks this by itself
+X3g	(ok)	fail
+X4a	(ok)	fail
+X4b	(ok)	fail
+X4c	(ok)	pass	positive control: own-store versions stay visible
+X4d	(ok)	fail
+X4e	(ok)	fail
+X4f	(ok)	fail
+X4g	(ok)	fail
+X4h	(ok)	fail
+X4i	(ok)	pass	positive control: a contributor comment review must keep working
+X4j	(ok)	fail
+X4k	(ok)	fail
+X4l	(ok)	fail
+X5a	(ok)	fail
+X5b	(ok)	fail
+X5c	(ok)	fail
+X5d	(ok)	fail
+X5e	(ok)	pass	the v1.0 trigger already rejected un-redaction
+X5f	(ok)	pass	positive control: a plain redact must keep working
+X5g	(ok)	fail
+X5h	(ok)	fail
+X5i	(ok)	fail
+X6a	(ok)	fail
+X6b	(ok)	fail
+X6c	(ok)	fail
+X6d	(ok)	fail
+X6e	(ok)	fail
+X6f	(ok)	fail
