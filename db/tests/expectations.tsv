@@ -156,6 +156,10 @@ N11p	(ok)	fail
 N11q	(ok)	pass	positive control: agent closure
 N11r	(ok)	fail
 N11s	(ok)	fail
+N16a	= acme	fail
+N16b	= 0	fail
+N16c	= other	fail
+N16d	= 0	fail
 N13a	(ok)	fail
 N13b	(ok)	fail
 N13c	(ok)	fail
