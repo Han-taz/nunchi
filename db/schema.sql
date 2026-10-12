@@ -9,6 +9,16 @@
 --                       비밀번호는 배포 때 ALTER ROLE 로 설정한다 (이 파일에는 두지 않는다).
 --   smoke_test.sql 의 SET ROLE app_rw 는 테스트 전용 패턴이다. 앱은 app_rw 로 직접 접속해야 한다.
 --                       superuser 로 접속해 SET ROLE 하면 SQL 인젝션 한 번이 RESET ROLE 로 이어진다.
+--
+-- 신뢰 경계 (v1.1 에서 받아들인 한계)
+--   app_rw 는 한 트랜잭션 안에서 set_config 로 app.user_id / app.agent_id / app.tenant_id / app.ctx_xid 를 직접 쓸 수 있다.
+--   즉 app_rw 가 탈취되면 컨텍스트를 위조할 수 있다. begin_request 는 실수와 풀러 누수를 막을 뿐 탈취된 앱은 막지 못한다.
+--   app_rw can forge context inside a transaction; DB-side token verification is P1 (fable report §6.2).
+--
+-- 함수 보안
+--   모든 함수는 SET search_path = pg_catalog, public, pg_temp 로 고정한다. pg_temp 를 빼면 임시 스키마가 관계(테이블)
+--   조회에서 가장 먼저 검색되어, app_rw 의 CREATE TEMP TABLE store_grant 가 SECURITY DEFINER 함수까지 가로챈다.
+--   TEMPORARY 권한도 PUBLIC 에서 회수한다 (아래). 이 규칙은 db-test.sh 의 lint(S1)가 강제한다.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -24,6 +34,12 @@ DO $$ BEGIN
   ELSE
     ALTER ROLE app_rw LOGIN NOBYPASSRLS NOINHERIT;
   END IF;
+END $$;
+
+-- 임시 테이블로 관계 조회를 가로채는 길을 닫는다. 기본 권한은 PUBLIC 에 있어서 app_rw 한 명만 회수해서는 효과가 없다.
+-- 이 데이터베이스의 모든 역할에서 회수한다. 임시 테이블이 필요한 관리 작업은 소유자(superuser)로 하거나 따로 GRANT 한다.
+DO $$ BEGIN
+  EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC, app_rw', current_database());
 END $$;
 
 -- ── 주체(사람/그룹/에이전트) ─────────────────────────────
@@ -177,7 +193,7 @@ INSERT INTO memory_transition (from_status, to_status) VALUES
 
 -- 버전/리뷰 테이블은 수정·삭제 금지. 예외: memory_version.snapshot 을 NULL 로 만드는 redact 만 허용
 -- (snapshot 을 뺀 모든 컬럼이 동일해야 함. 컬럼이 추가돼도 자동으로 비교 대상에 포함)
-CREATE FUNCTION forbid_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION forbid_mutation() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END IF;
   IF TG_TABLE_NAME <> 'memory_version' THEN
@@ -202,7 +218,7 @@ CREATE SCHEMA app_sec;
 GRANT USAGE ON SCHEMA app_sec TO app_rw;
 
 CREATE FUNCTION app_sec.begin_request(p_user uuid, p_agent uuid DEFAULT null) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE t uuid;
 BEGIN
   SELECT tenant_id INTO t FROM principal WHERE id = p_user AND kind = 'user' AND active;
@@ -218,21 +234,23 @@ BEGIN
   PERFORM set_config('app.ctx_xid', pg_current_xact_id()::text, true);  -- primary 전용
 END $$;
 
-CREATE FUNCTION app_sec.ctx_user() RETURNS uuid LANGUAGE sql STABLE AS $$
+CREATE FUNCTION app_sec.ctx_user() RETURNS uuid LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT CASE WHEN current_setting('app.ctx_xid', true) = pg_current_xact_id()::text
               THEN nullif(current_setting('app.user_id', true), '')::uuid END
 $$;
-CREATE FUNCTION app_sec.ctx_agent() RETURNS uuid LANGUAGE sql STABLE AS $$
+CREATE FUNCTION app_sec.ctx_agent() RETURNS uuid LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT CASE WHEN current_setting('app.ctx_xid', true) = pg_current_xact_id()::text
               THEN nullif(current_setting('app.agent_id', true), '')::uuid END
 $$;
-CREATE FUNCTION app_sec.ctx_tenant() RETURNS uuid LANGUAGE sql STABLE AS $$
+CREATE FUNCTION app_sec.ctx_tenant() RETURNS uuid LANGUAGE sql
+STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT CASE WHEN current_setting('app.ctx_xid', true) = pg_current_xact_id()::text
               THEN nullif(current_setting('app.tenant_id', true), '')::uuid END
 $$;
 
 -- 비활성 principal(사용자/에이전트)과 비활성 그룹은 아무 권한도 주지 않는다
-CREATE FUNCTION principal_closure(p uuid) RETURNS SETOF uuid LANGUAGE sql STABLE AS $$
+CREATE FUNCTION principal_closure(p uuid) RETURNS SETOF uuid LANGUAGE sql
+STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT id FROM principal WHERE id = p AND active
   UNION
   SELECT gm.group_id FROM group_member gm
@@ -244,7 +262,7 @@ $$;
 -- 실효 권한 = (사용자 role) ∩ (에이전트 role). 에이전트가 있으면 양쪽 grant 가 모두 있어야 하고 낮은 쪽을 쓴다.
 -- 정책에서 store_id IN (SELECT ... FROM my_store_roles()) 로 쓰면 행마다가 아니라 요청당 한 번 평가된다.
 CREATE FUNCTION app_sec.my_store_roles() RETURNS TABLE (store_id uuid, role store_role)
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   WITH ctx AS (SELECT app_sec.ctx_user() AS u, app_sec.ctx_agent() AS a, app_sec.ctx_tenant() AS t),
   ur AS (
     SELECT g.store_id, max(g.role) AS role FROM ctx, store_grant AS g
@@ -263,7 +281,8 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- 정책용: 최소 role 이상을 가진 store 집합
-CREATE FUNCTION app_sec.my_stores(min_role store_role) RETURNS SETOF uuid LANGUAGE sql STABLE AS $$
+CREATE FUNCTION app_sec.my_stores(min_role store_role) RETURNS SETOF uuid LANGUAGE sql
+STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT store_id FROM app_sec.my_store_roles() WHERE role >= min_role
 $$;
 
@@ -349,7 +368,7 @@ INSERT INTO app_sec.secret (name, value) VALUES ('hash_key', gen_random_bytes(32
 -- 내용 해시 = HMAC(정규화 본문). 정규화 = NFKC(NBSP 와 전각/특수 공백을 U+0020 으로) + 폭 없는 문자 제거 + 공백 접기 + 소문자.
 -- 평문 sha256 으로 삭제된 내용을 추측하는 오라클을 막는다
 CREATE FUNCTION app_sec.content_hmac(t text) RETURNS text
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT encode(
     hmac(
       convert_to(
@@ -368,7 +387,7 @@ $$;
 
 -- 삭제 해시는 curator 만 읽으므로 contributor 의 재제안 검사는 이 함수가 대신한다
 CREATE FUNCTION app_sec.is_deleted_content(s uuid, h text) RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT EXISTS (SELECT 1 FROM deleted_hash WHERE store_id = s AND content_hash = h)
 $$;
 
@@ -376,7 +395,8 @@ $$;
 -- status/version 을 제안 상태로 고정한다. 컨텍스트가 없는 소유자 적재는 값을 그대로 둔다.
 -- 이 트리거는 호출자(app_rw) 권한으로 돈다: 정책과 RLS 가 그대로 적용된다. 내부 함수(content_hmac 등)는
 -- app_rw 가 부를 수 없으므로 해시 계산은 SECURITY DEFINER 트리거 memory_bi2_hash / memory_bu2_hash 가 한다.
-CREATE FUNCTION app_sec.memory_before_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION app_sec.memory_before_insert() RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   by_whom uuid := coalesce(app_sec.ctx_agent(), app_sec.ctx_user());
   on_behalf uuid := CASE WHEN app_sec.ctx_agent() IS NULL THEN NULL ELSE app_sec.ctx_user() END;
@@ -419,7 +439,8 @@ BEGIN
 END $$;
 
 -- UPDATE: 불변 컬럼, origin 단방향, memory_transition 표, 본문 편집 범위, 버전 증가, 삭제 시 본문 제거
-CREATE FUNCTION app_sec.memory_before_update() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION app_sec.memory_before_update() RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF (NEW.id, NEW.tenant_id, NEW.store_id, NEW.kind, NEW.created_by, NEW.on_behalf_of, NEW.created_at, NEW.session_ref)
      IS DISTINCT FROM
@@ -450,7 +471,7 @@ END $$;
 -- 내용 해시와 삭제 내용 재제안 검사. 소유자 권한으로 돌아 app_rw 가 content_hmac / is_deleted_content 를 직접 부르지 않아도 된다.
 -- 트리거 이름 순서(memory_bi < memory_bi2_hash)로 memory_bi 가 본문을 확정한 뒤에 실행된다.
 CREATE FUNCTION app_sec.memory_set_hash() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
     NEW.content_hash := CASE WHEN NEW.body IS NULL THEN NULL ELSE app_sec.content_hmac(NEW.body) END;
@@ -466,7 +487,7 @@ END $$;
 -- 감사 체인: 행마다 직전 row_hash 에 이어 붙인다. 같은 memory 의 동시 기록은 advisory lock 으로 줄 세운다.
 -- 시각은 epoch 로 해시한다 (세션 TimeZone 에 따라 text 표기가 달라지는 것을 피함)
 CREATE FUNCTION app_sec.write_version(p_mem memory, p_op memory_op, p_actor uuid, p_reason text) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   snap jsonb;
   prev text;
@@ -495,7 +516,7 @@ END $$;
 
 -- 쓰기 후: 버전 기록. 삭제면 삭제 해시를 등록하고 과거 snapshot 을 전부 redact 한다
 CREATE FUNCTION app_sec.memory_after_write() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   op memory_op;
   actor uuid := coalesce(app_sec.ctx_user(), app_sec.ctx_agent(), NEW.created_by);
@@ -529,7 +550,8 @@ CREATE TRIGGER memory_bu2_hash BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNC
 CREATE TRIGGER memory_aw AFTER INSERT OR UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_after_write();
 
 -- 체인 검증. 호출자의 RLS 가 적용되므로 보이는 버전만 검증한다 (없거나 못 보면 NULL)
-CREATE FUNCTION app_sec.verify_chain(p_mem uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+CREATE FUNCTION app_sec.verify_chain(p_mem uuid) RETURNS boolean LANGUAGE sql
+STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT bool_and(
     row_hash = encode(
       sha256(convert_to(concat_ws('|', prev_hash, memory_id, version, op, actor_id, snapshot_hash, extract(EPOCH FROM at), coalesce(reason, '')), 'UTF8')),
@@ -552,7 +574,7 @@ CREATE FUNCTION app_sec.search(
   p_stores uuid[] DEFAULT null,
   p_statuses memory_status[] DEFAULT ARRAY['active']::memory_status[]
 ) RETURNS TABLE (id uuid, store_id uuid, kind memory_kind, title text, status memory_status, score real)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   WITH q AS (SELECT websearch_to_tsquery('simple', p_query) AS tsq)
   SELECT m.id, m.store_id, m.kind, m.title, m.status, ts_rank(m.search_tsv, q.tsq) AS score
   FROM q, memory AS m

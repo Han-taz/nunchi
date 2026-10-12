@@ -516,5 +516,74 @@ BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000f1', NULL);
 SELECT t_eq('N10m parity dave', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE search_tsv @@ websearch_to_tsquery('simple', 'zebra')))::text$q$, 'true');
 COMMIT;
 RESET ROLE;
+
+-- ═══ search_path·임시 객체 하이재킹 (S1–S5) ═══════════════
+-- S1(모든 함수의 search_path 고정 lint)은 scripts/db-test.sh 가 lint_search_path.sql 로 실행한다.
+-- S4) app_rw 는 임시 테이블을 만들 수 없다 (TEMPORARY 를 PUBLIC 에서 회수)
+SET ROLE app_rw;
+SELECT t_err('S4 app_rw CREATE TEMP TABLE', $q$CREATE TEMP TABLE s4_probe (x int)$q$, '42501');
+RESET ROLE;
+
+-- 아래 S2/S3 는 방어의 두 번째 겹을 본다: TEMPORARY 를 일부러 되돌려 줘도 함수의 search_path 고정만으로 막혀야 한다
+DO $$ BEGIN EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO app_rw', current_database()); END $$;
+SET ROLE app_rw;
+
+-- S2a) 임시 store_grant 로 Alice 에게 인사 store curator 를 만들어 준다 → 진짜 role(없음)
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+CREATE TEMP TABLE store_grant (LIKE public.store_grant) ON COMMIT DROP;
+INSERT INTO pg_temp.store_grant (store_id, principal_id, role, tenant_id) VALUES
+ ('00000000-0000-0000-0000-00000000f002','00000000-0000-0000-0000-0000000000a1','curator','00000000-0000-0000-0000-000000000001');
+SELECT t_eq('S2a temp store_grant: alice role on hr', $q$SELECT t_role('00000000-0000-0000-0000-00000000f002')$q$, 'NULL');
+SELECT t_eq('S2e temp store_grant: alice role on sales is still her real one', $q$SELECT t_role('00000000-0000-0000-0000-00000000f001')$q$, 'contributor');
+COMMIT;
+
+-- S2b) 임시 principal/store_grant 에만 있는 사용자는 begin_request 를 통과하지 못한다
+BEGIN;
+CREATE TEMP TABLE principal (LIKE public.principal) ON COMMIT DROP;
+INSERT INTO pg_temp.principal (id, tenant_id, kind, external_id, display_name, active) VALUES
+ ('00000000-0000-0000-0000-0000000000a9','00000000-0000-0000-0000-000000000001','user','forged','Forged',true);
+SELECT t_err('S2b begin_request for a user that exists only in a temp principal', $q$SELECT t_ctx('00000000-0000-0000-0000-0000000000a9', NULL)$q$, '28000');
+COMMIT;
+
+-- S2c) 임시 group_member 로 Dave(sales reader)를 sales 그룹에 넣는다 → 여전히 reader
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000f1', NULL);
+CREATE TEMP TABLE group_member (LIKE public.group_member) ON COMMIT DROP;
+INSERT INTO pg_temp.group_member (group_id, member_id) VALUES
+ ('00000000-0000-0000-0000-0000000000e1','00000000-0000-0000-0000-0000000000f1');
+SELECT t_eq('S2c temp group_member: dave role on sales', $q$SELECT t_role('00000000-0000-0000-0000-00000000f001')$q$, 'reader');
+COMMIT;
+RESET ROLE;
+
+-- S2d) 비활성화된 sales 그룹을 임시 principal 로 되살려도 Alice 는 role 을 얻지 못한다
+UPDATE principal SET active = false WHERE external_id = 'sales' AND kind = 'group';
+SET ROLE app_rw;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+CREATE TEMP TABLE principal AS SELECT * FROM public.principal;
+UPDATE pg_temp.principal SET active = true;
+SELECT t_eq('S2d temp principal revives deactivated group: alice role on sales', $q$SELECT t_role('00000000-0000-0000-0000-00000000f001')$q$, 'NULL');
+COMMIT;
+DROP TABLE pg_temp.principal;
+RESET ROLE;
+UPDATE principal SET active = true WHERE external_id = 'sales' AND kind = 'group';
+
+-- S3) pg_temp 의 함수로 ctx_user / current_setting 을 가리려 해도 효과가 없다 (함수 조회는 pg_temp 를 보지 않는다)
+SET ROLE app_rw;
+BEGIN; SELECT t_ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+CREATE FUNCTION pg_temp.ctx_user() RETURNS uuid LANGUAGE sql AS $$ SELECT '00000000-0000-0000-0000-0000000000b1'::uuid $$;
+CREATE FUNCTION pg_temp.current_setting(text, boolean) RETURNS text LANGUAGE sql AS $$ SELECT '00000000-0000-0000-0000-0000000000b1'::text $$;
+SELECT t_eq('S3 temp function shadowing: alice role on hr', $q$SELECT t_role('00000000-0000-0000-0000-00000000f002')$q$, 'NULL');
+COMMIT;
+RESET ROLE;
+DO $$ BEGIN EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM app_rw', current_database()); END $$;
+
+-- S5) principal_closure 의 active 검사는 begin_request 를 거치지 않고 직접 확인한다
+SELECT t_eq('S5a closure of alice = alice + sales', $q$SELECT count(*)::text FROM principal_closure('00000000-0000-0000-0000-0000000000a1')$q$, '2');
+UPDATE principal SET active = false WHERE external_id = 'sales' AND kind = 'group';
+SELECT t_eq('S5b closure of alice with sales deactivated', $q$SELECT count(*)::text FROM principal_closure('00000000-0000-0000-0000-0000000000a1')$q$, '1');
+UPDATE principal SET active = true WHERE external_id = 'sales' AND kind = 'group';
+UPDATE principal SET active = false WHERE external_id = 'alice';
+SELECT t_eq('S5c closure of deactivated alice (member of an active group)', $q$SELECT count(*)::text FROM principal_closure('00000000-0000-0000-0000-0000000000a1')$q$, '0');
+UPDATE principal SET active = true WHERE external_id = 'alice';
+SELECT t_eq('S5d closure of reactivated alice', $q$SELECT count(*)::text FROM principal_closure('00000000-0000-0000-0000-0000000000a1')$q$, '2');
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP FUNCTION t_eq(text, text, text); DROP FUNCTION t_err(text, text, text); DROP FUNCTION t_ctx_soft(uuid, uuid); DROP FUNCTION t_ctx(uuid, uuid); DROP FUNCTION t_role(uuid);
