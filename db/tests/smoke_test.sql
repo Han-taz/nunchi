@@ -101,10 +101,10 @@ SELECT 'T2 propose ok'; COMMIT;
 
 -- 3) 영업봇이 active 로 바로 쓰기 시도 → 성공하되 트리거가 proposed 로 덮어쓴다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.eq('T3 bot insert with status=active is stored as', $q$WITH i AS (
+SELECT t.eq('T3 bot insert with status=active is stored as status/tier', $q$WITH i AS (
   INSERT INTO memory (tenant_id, store_id, kind, status, title, source_refs, created_by, on_behalf_of)
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','우회','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')
-  RETURNING status) SELECT status::text FROM i$q$, 'proposed');
+  RETURNING status, tier) SELECT status || '/' || tier FROM i$q$, 'proposed/one_curator');
 COMMIT;
 
 -- 4) Alice(contributor)는 승인 불가 → 0 rows updated
@@ -718,6 +718,128 @@ RESET ROLE;
 -- N12i) 최신 유니코드에서 추가된 Cf 도 지워진다: U+0890 U+0891 U+110BD U+110CD U+13430-1343F 와 U+061C U+08E2 U+FFF9 U+E0001 U+E007F
 SELECT t.eq('N12i content_hmac ignores new Cf characters', $q$SELECT bool_and(app_sec.content_hmac('a' || chr(c) || 'b') = app_sec.content_hmac('ab'))::text
   FROM (SELECT unnest(ARRAY[2192, 2193, 69821, 69837, 1564, 2274, 65529, 917505, 917631]) AS c UNION ALL SELECT generate_series(78896, 78911)) AS s$q$, 'true');
+
+-- ═══ 승인 모델 B (B1–B3, B5, B6, B9): 위험 등급, provisional, 전이 표 ═══════════
+-- 헬퍼: t.mid(n) = 이 구역의 메모리 id, t.prop = 현재 요청 컨텍스트의 작성자로 제안 하나를 넣는다 (실패는 NOTICE 로만 남겨 mutation gate 가 끝까지 돈다)
+CREATE FUNCTION t.mid(n int) RETURNS uuid LANGUAGE sql IMMUTABLE AS $$ SELECT ('00000000-0000-0000-0000-0000000a' || lpad(n::text, 4, '0'))::uuid $$;
+CREATE FUNCTION t.prop(
+  n int, p_kind memory_kind, p_title text,
+  p_gate jsonb DEFAULT '{"flags":[],"containment":"ok"}', p_sup uuid DEFAULT NULL,
+  p_src text DEFAULT 'https://crm/acct/A', p_store uuid DEFAULT '00000000-0000-0000-0000-00000000f001'
+) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+  u uuid := nullif(current_setting('app.user_id', true), '')::uuid;
+  a uuid := nullif(current_setting('app.agent_id', true), '')::uuid;
+BEGIN
+  INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of, gate_result, supersedes_id)
+  VALUES (t.mid(n), '00000000-0000-0000-0000-000000000001', p_store, p_kind, p_title, p_title,
+    jsonb_build_array(jsonb_build_object('uri', p_src)), coalesce(a, u), CASE WHEN a IS NULL THEN NULL ELSE u END, p_gate, p_sup);
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup % failed: % %', n, SQLSTATE, SQLERRM;
+END $$;
+
+-- 사전 데이터(소유자 권한): Alice 의 개인 store, 전사 store, 대체 대상 3개 (decision / curator 작성 / 출처 권위 3)
+INSERT INTO store (id, tenant_id, kind, slug, description) VALUES
+ ('00000000-0000-0000-0000-00000000f0a1','00000000-0000-0000-0000-000000000001','user','alice','Alice 개인 노트'),
+ ('00000000-0000-0000-0000-00000000f0a2','00000000-0000-0000-0000-000000000001','org','acme-org','전사 지식');
+INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
+ ('00000000-0000-0000-0000-00000000f0a1','00000000-0000-0000-0000-0000000000a1','contributor','00000000-0000-0000-0000-000000000001'),
+ ('00000000-0000-0000-0000-00000000f0a2','00000000-0000-0000-0000-0000000000a1','contributor','00000000-0000-0000-0000-000000000001');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, gate_result) VALUES
+ (t.mid(10),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','decision','active','할인 상한 결정','근거','[{"uri":"https://crm/pol/1"}]','00000000-0000-0000-0000-0000000000a1','{}'),
+ (t.mid(11),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','curator 가 쓴 사실','근거','[{"uri":"https://crm/pol/2"}]','00000000-0000-0000-0000-0000000000c1','{}'),
+ (t.mid(12),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','권위 3 사실','근거','[{"uri":"https://crm/pol/3"}]','00000000-0000-0000-0000-0000000000a1','{"authority":3}');
+
+SET ROLE app_rw;
+
+-- G1) 사람(Alice)의 제안: 등급표 위에서부터 첫 일치 행
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.prop(1, 'fact', 'pangolin 담당자');
+SELECT t.prop(4, 'fact', 'pangolin 정정', p_sup => t.mid(1));
+SELECT t.err('setup 5 client sends status, tier, conflict_with and a gate flag', $q$INSERT INTO memory (id, tenant_id, store_id, kind, status, tier, conflict_with, title, body, source_refs, created_by, gate_result)
+  VALUES (t.mid(5),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','auto',t.mid(1),'spoof','spoof','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','{"flags":["imperative"]}')$q$, 'ok');
+SELECT t.prop(6, 'fact', 'cites a provisional', p_src => 'memory://' || t.mid(1));
+SELECT t.prop(7, 'fact', 'containment unverified', p_gate => '{"flags":[],"containment":"unverified"}');
+SELECT t.prop(8, 'fact', 'private note', p_store => '00000000-0000-0000-0000-00000000f0a1');
+SELECT t.prop(9, 'note', 'org note', p_store => '00000000-0000-0000-0000-00000000f0a2');
+SELECT t.prop(13, 'fact', 'cites a user store', p_src => 'memory://' || t.mid(8));
+SELECT t.prop(14, 'fact', 'replaces a decision', p_sup => t.mid(10));
+SELECT t.prop(15, 'fact', 'replaces a curator fact', p_sup => t.mid(11));
+SELECT t.prop(16, 'fact', 'lower authority replaces', p_gate => '{"flags":[],"authority":1}', p_sup => t.mid(12));
+SELECT t.prop(17, 'fact', 'equal authority replaces', p_gate => '{"flags":[],"authority":3}', p_sup => t.mid(12));
+SELECT t.prop(18, 'procedure', 'howto');
+SELECT t.eq('G1a human fact, clean, internal: tier/status/origin/ops', $q$SELECT tier || '/' || status || '/' || origin || '/' || (SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id = t.mid(1)) FROM memory WHERE id = t.mid(1)$q$, 'auto_labeled/provisional/internal/propose,auto_activate');
+SELECT t.eq('G1f supersede declared', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(4)$q$, 'one_curator/proposed');
+SELECT t.eq('G1g client status=active, tier=auto, conflict_with and a flag: stored tier/status/conflict_with null', $q$SELECT tier || '/' || status || '/' || (conflict_with IS NULL) FROM memory WHERE id = t.mid(5)$q$, 'one_curator/proposed/true');
+SELECT t.eq('G1h cites a provisional memory: tier/status/origin', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(6)$q$, 'one_curator/proposed/external');
+SELECT t.eq('G1i containment unverified', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(7)$q$, 'one_curator/proposed');
+SELECT t.eq('G1j user store, clean: tier/status/ops', $q$SELECT tier || '/' || status || '/' || (SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id = t.mid(8)) FROM memory WHERE id = t.mid(8)$q$, 'auto/active/propose,auto_activate');
+SELECT t.eq('G1k org store note', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(9)$q$, 'two_curators/proposed');
+SELECT t.eq('G1n cites a user store memory: tier/status/origin', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(13)$q$, 'one_curator/proposed/external');
+SELECT t.eq('G1o supersedes a decision', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(14)$q$, 'two_curators/proposed');
+SELECT t.eq('G1p supersedes a curator-authored fact', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(15)$q$, 'two_curators/proposed');
+SELECT t.eq('G1q supersedes a higher-authority source', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(16)$q$, 'two_curators/proposed');
+SELECT t.eq('G1r supersedes an equal-authority source', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(17)$q$, 'one_curator/proposed');
+SELECT t.eq('G1s procedure', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(18)$q$, 'one_curator/proposed');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.prop(2, 'fact', 'agent claim');
+SELECT t.eq('G1b agent fact, trust 0', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(2)$q$, 'one_curator/proposed');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.prop(3, 'decision', 'curator decision');
+SELECT t.eq('G1d decision', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(3)$q$, 'two_curators/proposed');
+COMMIT;
+
+-- G1l, G1m) 등급과 전이는 코드가 아니라 표다
+SELECT t.eq('G1l approval_tier_rule', $q$SELECT string_agg(tier || ':' || initial_status || ':' || approvals_needed, ',' ORDER BY tier) FROM approval_tier_rule$q$,
+  'auto:active:0,auto_labeled:provisional:1,one_curator:proposed:1,two_curators:proposed:2');
+SELECT t.eq('G1m memory_transition', $q$SELECT string_agg(from_status || '>' || to_status || ':' || op || ':' || by_role, ',' ORDER BY from_status, to_status) FROM memory_transition$q$,
+  'proposed>provisional:auto_activate:system,proposed>active:approve:curator,proposed>rejected:reject:curator,provisional>active:confirm:curator,provisional>superseded:supersede:curator,provisional>rejected:retract:curator,provisional>deleted:delete:curator,active>superseded:supersede:curator,active>expired:expire:system,active>deleted:delete:curator,superseded>deleted:delete:curator,rejected>deleted:delete:curator,expired>deleted:delete:curator');
+
+-- G4e-g) 신뢰: 20점이면 에이전트도 auto_labeled, 19점은 아니다, 강등 중이면 사람도 one_curator (점수 시드는 소유자 권한, 마지막에 ROLLBACK)
+BEGIN;
+RESET ROLE;
+DO $do$ BEGIN
+  IF to_regclass('proposer_trust') IS NOT NULL THEN
+    INSERT INTO proposer_trust (principal_id, store_id, points) VALUES ('00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-00000000f001', 20);
+    INSERT INTO proposer_trust (principal_id, store_id, points, demoted_until) VALUES ('00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-00000000f001', 50, now() + interval '30 days');
+  END IF;
+END $do$;
+SET ROLE app_rw;
+SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.prop(20, 'fact', 'agent with 20 points');
+SELECT t.eq('G4e agent with 20 points', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(20)$q$, 'auto_labeled/provisional');
+SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.prop(21, 'fact', 'human while demoted');
+SELECT t.eq('G4g demoted human with 50 points', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(21)$q$, 'one_curator/proposed');
+RESET ROLE;
+SELECT t.err('setup bot at 19 points', $q$UPDATE proposer_trust SET points = 19 WHERE principal_id = '00000000-0000-0000-0000-0000000000d1'$q$, 'ok');
+SET ROLE app_rw;
+SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.prop(22, 'fact', 'agent with 19 points');
+SELECT t.eq('G4f agent with 19 points', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(22)$q$, 'one_curator/proposed');
+ROLLBACK;
+
+-- G3m-p) 전이는 표에 있는 길만, 표의 역할대로만: tier 는 불변, curator 전이는 요청 컨텍스트가 있어야 하고 system 전이는 없어야 한다
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.err('G3m active -> proposed', $q$UPDATE memory SET status = 'proposed' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, 'P0001');
+SELECT t.err('G3n tier change', $q$UPDATE memory SET tier = 'auto' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, 'P0001');
+SELECT t.err('G3o curator in a request runs the system transition active -> expired', $q$UPDATE memory SET status = 'expired' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, '42501');
+ROLLBACK;
+BEGIN; RESET ROLE;
+SELECT t.err('G3p owner without a request context runs the curator transition proposed -> rejected', $q$UPDATE memory SET status = 'rejected' WHERE id = t.mid(2)$q$, '42501');
+ROLLBACK;
+SET ROLE app_rw;
+
+-- F6c) provisional 은 reader 에게도 보인다 / N10n) 검색 기본값은 active 만이고 provisional 은 명시해야 섞인다 (B9)
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.eq('F6c dave(reader)+bot sees the provisional memory as', $q$SELECT status::text FROM memory WHERE id = t.mid(1)$q$, 'provisional');
+SELECT t.eq('N10n search pangolin: default / explicit provisional', $q$SELECT (SELECT count(*) FROM app_sec.search('pangolin')) || '/' || (SELECT count(*) FROM app_sec.search('pangolin', NULL, ARRAY['provisional']::memory_status[]))$q$, '0/1');
+COMMIT;
+
+-- B6a) store.auto_approve 는 없다: user store 의 자동은 등급표가 정한다
+SELECT t.eq('B6a store has no auto_approve column', $q$SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'store' AND column_name = 'auto_approve'$q$, '0');
+RESET ROLE;
 
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;

@@ -187,3 +187,30 @@ N12f	(ok)	fail
 N12g	(ok)	fail
 N12h	(ok)	fail
 N12i	(ok)	fail
+G1a	= auto_labeled/provisional/internal/propose,auto_activate	fail
+G1b	= one_curator/proposed	fail
+G1d	= two_curators/proposed	fail
+G1f	= one_curator/proposed	fail
+G1g	= one_curator/proposed/true	fail
+G1h	= one_curator/proposed/external	fail
+G1i	= one_curator/proposed	fail
+G1j	= auto/active/propose,auto_activate	fail
+G1k	= two_curators/proposed	fail
+G1l	= auto:active:0	fail
+G1m	= proposed>provisional:auto_activate:system	fail
+G1n	= one_curator/proposed/external	fail
+G1o	= two_curators/proposed	fail
+G1p	= two_curators/proposed	fail
+G1q	= two_curators/proposed	fail
+G1r	= one_curator/proposed	fail
+G1s	= one_curator/proposed	fail
+G3m	-> P0001	fail
+G3n	-> P0001	fail
+G3o	-> 42501	fail
+G3p	-> 42501	fail
+G4e	= auto_labeled/provisional	fail
+G4f	= one_curator/proposed	fail
+G4g	= one_curator/proposed	fail
+F6c	= provisional	fail
+N10n	= 0/1	fail
+B6a	= 0	fail
