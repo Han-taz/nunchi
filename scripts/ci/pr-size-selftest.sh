@@ -9,10 +9,12 @@ cd "$tmp"
 git init -q
 git -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
 git tag base
+root=$(git rev-parse base)
 
 # case_ NAME EXPECTED_EXIT SETUP_FUNCTION [EXPECTED_OUTPUT_PATTERN]
 case_() {
   local name="$1" want="$2" setup="$3" pattern="${4:-}"
+  git tag -f base "$root" >/dev/null
   git checkout -q -B "t" base
   git clean -fdxq
   "$setup"
@@ -67,6 +69,32 @@ uv_lock_with_manifest() {
   seq 1 5000 > uv.lock
   echo '[project]' > pyproject.toml
 }
+baseline_new() {
+  mkdir -p db/migrations
+  seq 1 5000 > db/migrations/0001_baseline.sql
+}
+baseline_edited_alone() {
+  mkdir -p db/migrations
+  seq 1 3 > db/migrations/0001_baseline.sql
+  git add -A
+  git -c user.name=t -c user.email=t@t commit -q -m seed
+  git tag -f base >/dev/null
+  seq 1 5000 > db/migrations/0001_baseline.sql
+}
+baseline_edited_with_schema() {
+  baseline_edited_alone
+  echo 'create table t();' > db/schema.sql
+}
+other_migration_with_schema() {
+  mkdir -p db/migrations
+  seq 1 5000 > db/migrations/0002_big.sql
+  echo 'create table t();' > db/schema.sql
+}
+baseline_lookalike_path() {
+  mkdir -p db/migrations/sub
+  seq 1 5000 > db/migrations/sub/0001_baseline.sql
+  echo 'create table t();' > db/schema.sql
+}
 
 case_ "800 lines" 0 lines_800
 case_ "801 lines" 1 lines_801 "Split the PR"
@@ -80,4 +108,9 @@ case_ "5000-line lock file without its manifest" 1 lock_without_manifest "Split 
 case_ "5000-line lock file with its manifest" 0 lock_with_manifest
 case_ "5000-line uv.lock without pyproject.toml" 1 uv_lock_without_manifest "Split the PR"
 case_ "5000-line uv.lock with pyproject.toml" 0 uv_lock_with_manifest
+case_ "5000-line baseline newly added" 0 baseline_new
+case_ "5000-line baseline edit without schema.sql" 1 baseline_edited_alone "Split the PR"
+case_ "5000-line baseline edit with schema.sql" 0 baseline_edited_with_schema
+case_ "5000-line 0002 migration with schema.sql" 1 other_migration_with_schema "Split the PR"
+case_ "5000-line baseline-named file in a subdirectory" 1 baseline_lookalike_path "Split the PR"
 echo "pr-size self-test ok"

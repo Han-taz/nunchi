@@ -4,7 +4,11 @@ version = "0.0.0"
 description = "Team memory service with database-enforced access control"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
-dependencies = []
+dependencies = [
+  "psycopg[binary]>=3.2",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+]
 
 [dependency-groups]
 dev = [
@@ -43,6 +47,7 @@ select = ["E", "F", "W", "I", "S", "B", "UP", "SIM", "PL", "RUF", "ANN"]
 [tool.mypy]
 strict = true
 python_version = "3.12"
+plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -59,6 +64,10 @@ exclude_also = ["if __name__ == .__main__.:"]
 
 [tool.deptry]
 known_first_party = ["nunchi"]
+
+[tool.deptry.per_rule_ignores]
+# the C accelerator for psycopg, selected by the [binary] extra and never imported
+DEP002 = ["psycopg-binary"]
 
 [tool.mutmut]
 source_paths = ["src/nunchi/"]

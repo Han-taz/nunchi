@@ -385,6 +385,41 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: uv run diff-cover coverage.xml --compare-branch="$PR_BASE" --fail-under=80
 
+  schema-drift:
+    name: schema-drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.22"
+          enable-cache: false
+      - name: Install the locked environment
+        run: uv sync --locked
+      - name: schema.sql and the migrations must build the same schema
+        run: scripts/ci/schema-drift.sh --url "$PG_URL"
+      - name: The committed baseline must be the generator's exact output
+        run: |
+          scripts/migrate-baseline.sh "$RUNNER_TEMP/0001_baseline.sql"
+          cmp "$RUNNER_TEMP/0001_baseline.sql" db/migrations/0001_baseline.sql
+
   app-mutation:
     name: app-mutation
     runs-on: ubuntu-24.04
@@ -493,6 +528,7 @@ jobs:
       - codeql
       - app-lint
       - app-tests
+      - schema-drift
       - app-mutation
       - app-audit
       - semgrep
