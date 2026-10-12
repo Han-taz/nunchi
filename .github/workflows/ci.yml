@@ -415,6 +415,10 @@ jobs:
         run: uv sync --locked
       - name: schema.sql and the migrations must build the same schema
         run: scripts/ci/schema-drift.sh --url "$PG_URL"
+      - name: The committed baseline must be the generator's exact output
+        run: |
+          scripts/migrate-baseline.sh "$RUNNER_TEMP/0001_baseline.sql"
+          cmp "$RUNNER_TEMP/0001_baseline.sql" db/migrations/0001_baseline.sql
 
   app-mutation:
     name: app-mutation
