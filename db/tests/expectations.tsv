@@ -31,10 +31,10 @@ X2g	(ok)	fail
 X2h	(ok)	pass	positive control: an honest human proposal must keep working
 X3a	(ok)	fail
 X3b	(ok)	fail
-X3c	(ok)	pass	the grant shim has no DELETE privilege, so the v1.0 setup blocks this by itself
+X3c	(ok)	fail
 X3d	(ok)	fail
 X3e	(ok)	fail
-X3f	(ok)	pass	the grant shim has no DELETE privilege, so the v1.0 setup blocks this by itself
+X3f	(ok)	fail
 X3g	(ok)	fail
 X4a	(ok)	fail
 X4b	(ok)	fail
@@ -61,5 +61,19 @@ X6a	(ok)	fail
 X6b	(ok)	fail
 X6c	(ok)	fail
 X6d	(ok)	fail
-X6e	(ok)	fail
-X6f	(ok)	fail
+X6e	(ok)	pass	positive control: with the X3 tests rolled back, v1.0 also gives a user with an active group the group role
+X6f	(ok)	pass	positive control: a reactivated agent gets its grant back, on v1.0 too
+A10a	(ok)	fail
+A10b	(ok)	fail
+F1	(ok)	fail
+F3a	(ok)	fail
+F3b	(ok)	fail
+F3c	(ok)	fail
+F3d	(ok)	fail
+F4	(ok)	fail
+F6a	(ok)	fail
+F6b	(ok)	fail
+N8a	(ok)	fail
+N8b	(ok)	fail
+N8c	(ok)	fail
+F11	(ok)	fail

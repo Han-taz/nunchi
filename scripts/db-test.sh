@@ -7,7 +7,7 @@
 # and CREATE ROLE (the superuser of a throwaway server). Every run creates and
 # drops its own database, so two runs never share state.
 #
-# Each test prints one line that starts with its id (T1, X3a, ...). The file
+# Each test prints one line that starts with its id (T1, X3a, F11, N8a, A10a, ...). The file
 # db/tests/expectations.tsv is the registry: a registered id that prints
 # nothing, an unregistered id that prints something, or an id whose outcome
 # differs from the registry makes the script exit nonzero.
@@ -15,6 +15,9 @@
 #   current     schema = db/schema.sql. Every registered test must PASS.
 #   vulnerable  schema = the v1.0 fixture plus the grant shim. Each test must
 #               behave as its "on_vulnerable" column says (mutation gate).
+#
+# F11 times a 100k-row count(*). The limit is 200 ms locally and 1000 ms when CI is
+# set (shared runners are noisy). NUNCHI_F11_LIMIT_MS overrides both.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -48,6 +51,8 @@ query=${url#"$base"}
 db_name="nunchi_t_$$_$(date +%s)"
 test_url="${base%/*}/$db_name$query"
 
+f11_limit_ms=${NUNCHI_F11_LIMIT_MS:-$([ -n "${CI:-}" ] && echo 1000 || echo 200)}
+
 work=$(mktemp -d)
 [ -z "$results_out" ] || : >"$results_out"
 cleanup() {
@@ -65,7 +70,7 @@ fi
 # stdout carries SELECT results and stderr carries RAISE NOTICE output.
 # Separate files keep psql's buffered streams from interleaving mid-line.
 psql_status=0
-psql -X -q -t -v ON_ERROR_STOP=1 "$test_url" -f "$tests_dir/smoke_test.sql" \
+psql -X -q -t -v ON_ERROR_STOP=1 -v f11_limit_ms="$f11_limit_ms" "$test_url" -f "$tests_dir/smoke_test.sql" \
   >"$work/out.txt" 2>"$work/err.txt" || psql_status=$?
 cat "$work/out.txt" "$work/err.txt"
 if [ "$psql_status" -ne 0 ]; then
@@ -75,14 +80,14 @@ fi
 
 # Normalise to "<id> <rest>" lines.
 sed -E -e 's/^psql:[^ ]+ NOTICE:  //' -e 's/^[[:space:]]+//' "$work/out.txt" "$work/err.txt" \
-  | grep -E '^(T[0-9]+[a-z]?|X[0-9][a-z]) ' >"$work/lines.txt" || true
+  | grep -E '^(T[0-9]+[a-z]?|[XFNA][0-9]+[a-z]?) ' >"$work/lines.txt" || true
 
 awk -F '\t' -v profile="$profile" -v results="$results_out" '
   FNR == NR {
     if ($0 ~ /^#/ || $0 ~ /^[[:space:]]*$/) next
     if (NF < 3) { printf "registry line %d has fewer than 3 columns\n", FNR; bad = 1; next }
     id = $1; marker[id] = $2; vuln[id] = $3; note[id] = $4; order[++n] = id
-    if (id ~ /^X/ && $3 == "pass" && $4 == "") {
+    if (id !~ /^T/ && $3 == "pass" && $4 == "") {
       printf "registry: %s passes on the vulnerable schema but has no note explaining why\n", id; bad = 1
     }
     next
