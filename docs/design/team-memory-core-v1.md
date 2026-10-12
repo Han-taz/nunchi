@@ -1,0 +1,202 @@
+---
+title: Team Memory Core — 설계서 v1
+date: 2026-10-12
+status: draft (스키마·RLS는 Postgres 16에서 스모크 테스트 통과)
+files: db/schema.sql, db/tests/smoke_test.sql
+---
+
+# Team Memory Core — 설계서 v1
+
+## 1. 목표와 범위
+
+조직 종류(개발, 영업, 인사, 운영)와 상관없이, 여러 사람과 여러 에이전트가 함께 쓰는 팀 메모리를 만든다.
+
+하는 것
+- 에이전트가 배운 것을 제안하고, 담당자가 승인한 것만 공유한다.
+- 권한 범위(store)별로 읽기와 쓰기를 DB가 직접 강제한다.
+- 사실을 정정할 때 덮어쓰지 않고 이력과 감사 기록을 남긴다. 삭제 요청에도 대응한다.
+- 원본 데이터는 기존 시스템에 두고 링크로만 참조한다.
+
+안 하는 것 (v1)
+- 원본 데이터를 한곳에 모아 복사하는 수집 파이프라인
+- 벡터 DB, 지식 그래프 (필요해지면 확장점으로 추가)
+- 에이전트 개인 작업 기억 (각 에이전트 런타임 몫)
+- 자동 머지되는 정리 작업
+
+## 2. 전체 구성
+
+```
+ 사용자 ── 에이전트 런타임 (Claude Code / Codex / Hermes / Copilot / 자체 봇)
+              │  ① 원천 읽기: 기존 MCP/공식 커넥터, "사용자 권한"으로 (복사 안 함)
+              │  ② 메모리 읽기/제안: MCP
+              ▼
+     ┌─────────── Memory Core ───────────┐
+     │ MCP 서버 + REST API (같은 서비스 계층) │
+     │  - 인증: OIDC 토큰(사용자) + 에이전트 클라이언트 자격 │
+     │  - 쓰기 게이트 (결정적 검사 → 선택적 LLM 리뷰) │
+     │ PostgreSQL (RLS = 권한 강제)          │
+     └───────┬───────────────┬────────────┘
+             │               │
+     승인 봇 (Slack/Teams)   작업자(worker)
+     승인/반려/대체 버튼       만료 처리, 주간 정리 제안, 원천 링크 점검
+             │
+     관리 UI (store 목록, 권한, 검토 대기함, 감사 로그)
+     SCIM ← IdP (Okta / Entra / Google): 사용자·그룹 동기화
+```
+
+컴포넌트는 서비스 하나(API + MCP), DB 하나, 승인 봇, worker, 작은 관리 UI로 끝난다.
+
+## 3. 핵심 개념
+
+| 개념 | 정의 | 근거 |
+|---|---|---|
+| store | 접근 경계. 종류는 org / team / project / user. 권한은 store 단위로만 준다 | Databricks "보안 경계는 store", Claude store 패턴 |
+| principal | user / group / agent. 그룹은 SCIM으로 동기화한다 | — |
+| 실효 권한 | **사용자 권한 ∩ 에이전트 권한.** 에이전트는 대리하는 사용자보다 많이 볼 수 없고, 사용자도 에이전트에게 허용된 것 이상을 시킬 수 없다 | Asana "트리거한 사용자로 범위 고정", AkasicMEM 누수 사례 |
+| memory | 레코드 하나 = 지식 하나. 종류는 fact / decision / procedure / note | 파일/레코드 수렴 |
+| 상태 | proposed → active → superseded / expired, 또는 rejected, deleted | 승격 관문(MAPLE-Guard), 무효화(Zep) |
+| source_refs | 근거 원문 링크. note를 빼면 필수. 다른 메모리를 근거로 삼을 때는 `memory://<id>` | 계보, 정정 전파 |
+| origin | internal / external. 외부 출처 표시는 정리나 요약을 거쳐도 유지한다 | memory-hopping, Misattribution |
+
+### 역할
+
+| 역할 | 읽기 | 제안 | 승인·대체·삭제 |
+|---|---|---|---|
+| reader | ● | | |
+| contributor | ● | ● | |
+| curator | ● | ● | ● |
+
+- 에이전트는 기본 contributor다. curator 권한을 받은 에이전트도 대리하는 사용자가 curator가 아니면 승인할 수 없다(교집합).
+- user store만 `auto_approve`를 허용한다(개인 노트). 공유 store에는 자동 승인이 없다.
+
+## 4. 데이터 모델
+
+전체 DDL은 `db/schema.sql`에 있다. 요약하면:
+
+- `tenant`, `principal`, `group_member`: 주체와 SCIM 동기화 결과
+- `store`, `store_grant(store, principal, role)`: 경계와 권한
+- `memory`: 본문, 메타데이터, 상태, 출처, 작성 주체(`created_by`), 대리한 사용자(`on_behalf_of`), 세션, 게이트 결과, 내용 해시, 버전(낙관적 잠금), 전문검색 인덱스
+- `memory_version`: append-only 변경 기록(감사 로그). 트리거로 수정과 삭제를 막는다. 단, 내용만 비우는 redact는 허용한다.
+- `review`: 사람 승인과 리뷰 에이전트 의견
+- `deleted_hash`: 삭제한 내용의 해시. 정리 작업이나 재제안이 지운 내용을 되살리지 못하게 막는다.
+
+DB 수준에서 거는 제약
+- deleted 상태면 body가 NULL이어야 한다(tombstone).
+- note를 빼고는 source_refs가 비면 안 된다.
+- auto_approve는 user store에만 켤 수 있다.
+
+## 5. 권한 강제 방식
+
+1. API가 요청마다 토큰을 검증한 뒤, 트랜잭션 시작 시 `SET LOCAL app.user_id`, `app.agent_id`를 설정한다. **store나 사용자를 모델이 파라미터로 고르지 않는다.** 모델은 store slug를 고를 수 있지만, 권한은 DB가 다시 판정한다.
+2. RLS 정책
+   - 읽기: 실효 권한이 reader 이상. proposed는 작성자와 curator만 본다. rejected와 deleted는 curator만 본다.
+   - INSERT: contributor 이상이고 status가 proposed일 때만.
+   - UPDATE: curator만.
+3. API는 RLS를 우회하지 않는 전용 DB 역할로 접속한다. 관리 작업(SCIM 동기화, worker)만 별도 역할을 쓴다.
+4. 원천 링크에 `inherit_acl: true`가 붙은 메모리는 조회할 때 원천 시스템에서 사용자의 접근 가능 여부를 확인한다. 결과는 짧게 캐시한다. 원천에서 권한이 사라지면 메모리도 안 보인다. v1에서는 Google Drive, SharePoint, Notion 어댑터만 만든다.
+
+### 스모크 테스트 결과 (Postgres 16, `db/tests/smoke_test.sql`)
+
+| # | 시나리오 | 결과 |
+|---|---|---|
+| T1 | 영업 Alice + 영업봇이 인사 store 조회 | 0건 ✔ |
+| T2 | 영업봇이 Alice 대리로 제안 | 성공 ✔ |
+| T3 | 영업봇이 active로 바로 쓰기 | RLS 거부 ✔ |
+| T4 | contributor Alice가 승인 | 0건 반영 ✔ |
+| T5 | curator Carol이 승인 | 1건 반영 ✔ |
+| T6 | Carol이 영업봇과 함께 승인 시도 (봇은 contributor) | 0건, 교집합 동작 ✔ |
+| T7 | 버전 기록 변조 / redact | 변조 차단, redact 허용 ✔ |
+
+## 6. API (MCP 툴 = REST 엔드포인트)
+
+| 툴 | 설명 | 필요 권한 |
+|---|---|---|
+| `memory.list_stores()` | 내가 쓸 수 있는 store와 설명, 역할 | — |
+| `memory.index(store)` | active 항목의 제목과 설명 목록 (progressive disclosure) | reader |
+| `memory.search(query, stores?, kind?)` | 전문검색. 기본은 active만 | reader |
+| `memory.get(id)` | 본문, 출처, 이력 요약 | reader |
+| `memory.propose(store, kind, title, body, source_refs, origin, supersedes?)` | 제안. 게이트 결과를 돌려준다 | contributor |
+| `memory.review(id, verdict, note)` | 승인/반려 | curator |
+| `memory.supersede(old_id, new_id)` | 대체 처리 | curator |
+| `memory.delete(id, reason)` | 삭제(tombstone + 해시 등록 + 버전 redact) | curator |
+| `memory.dependents(id)` | 이 메모리를 근거로 인용한 항목(역방향 계보) | reader |
+| `memory.history(id)` | 버전 기록 | reader |
+
+- 수정은 `expected_version`을 받는다(낙관적 잠금). 충돌하면 409를 돌려준다.
+- 에이전트용 시스템 지시(AGENTS.md나 런타임 설정)는 한 줄이면 된다: "작업 전 memory.list_stores와 memory.index를 보고 필요한 것만 get, 새로 확인한 사실은 출처와 함께 propose."
+
+## 7. 핵심 흐름
+
+### 7.1 제안 → 승인
+
+1. 에이전트가 `propose`를 호출한다.
+2. 결정적 게이트가 돈다(LLM 없음, 실패하면 거부하거나 표시한다).
+   - 출처 링크 필수
+   - 비밀값 패턴 검사(gitleaks 규칙셋) → 걸리면 거부
+   - 개인정보 패턴(주민번호, 전화번호, 계좌 등) → 걸리면 거부하고 "원문 링크로 대체하라"고 안내
+   - `deleted_hash`와 같은 내용 → 거부
+   - 같은 store의 active와 해시가 같으면 → 중복으로 거부
+   - `origin=external`이면서 지시문 패턴("항상 ~해라", "이전 지시 무시")이 있으면 → 표시
+3. 선택적 리뷰 에이전트가 기존 active와 충돌하는지, 대체 후보는 뭔지 의견을 단다. 의견만 달고 승인하지 않는다.
+4. 승인 봇이 store의 curator들에게 카드를 보낸다. 내용, 출처, 게이트 결과, 충돌 후보, [승인][반려][기존 항목 대체로 승인] 버튼이 붙는다.
+5. 승인되면 active가 되고 버전 기록이 남는다. 대체 승인이면 옛 항목은 superseded가 되고 `supersedes_id`로 연결된다.
+6. 일정 기간(기본 14일) 처리되지 않으면 자동으로 rejected 처리한다. 검토 대기함이 쌓이지 않게 하려는 것이다.
+
+### 7.2 정정 전파
+
+- 어떤 항목이 superseded, deleted, expired가 되면 worker가 `dependents`를 조회한다(source_refs의 `memory://` 역참조).
+- 하위 항목에 "근거가 바뀜" 표시를 붙이고 해당 curator에게 점검 카드를 보낸다. 자동으로 고치지는 않는다.
+
+### 7.3 삭제 요청 (개인정보 등)
+
+- `memory.delete`: body를 NULL로 만들고 status를 deleted로 바꾼다. 내용 해시는 `deleted_hash`에 등록하고, 해당 항목의 모든 `memory_version.snapshot`을 redact한다. 메타데이터(누가 언제 왜 지웠나)는 남긴다.
+- 원칙상 개인정보는 게이트에서 막혀 들어오지 않고 원문 링크로만 참조한다. 원문에서 지우면 거기서 끝난다.
+
+### 7.4 만료와 정리
+
+- `valid_to`가 지나면 worker가 expired로 바꾼다.
+- 주간 정리: worker가 store마다 중복 후보, 오래 안 쓰인 항목, 서로 충돌하는 사실을 찾아 **제안 묶음**으로 curator에게 보낸다. 원본은 직접 고치지 않는다(Claude Dreams 원칙).
+- 정리는 store 경계를 넘지 않는다. 여러 store를 묶어 요약하는 일은 하지 않는다.
+
+## 8. 조직별 적용 예
+
+| 조직 | store 구성 | curator |
+|---|---|---|
+| 개발 | org, team:platform, project:payments | 팀 리드, 테크 리드 |
+| 영업 | org, team:sales, team:sales-apac | 영업 운영 담당 |
+| 인사 | team:hr (인사팀만 reader) | 인사 매니저 |
+| 전사 | org (전원 reader, curator는 관리자) | 운영/정책 담당 |
+
+개발팀은 기존 git 기반 팀 메모리(구현 가이드 1~7장)를 써도 된다. 이 경우 Memory Core에 `project:*` store를 두고 git 쪽 decisions/skills를 링크로 참조하면 된다.
+
+## 9. 배포 형태
+
+- 회사 한 곳: 컨테이너 3개(api+mcp, worker, bot) + Postgres. tenant는 1개.
+- 여러 조직: tenant 컬럼으로 분리하고 RLS에 tenant 조건을 추가한다(v1 스키마에 컬럼은 있음). 규제가 심한 고객은 고객별 DB를 따로 둔다.
+- 백업: Postgres PITR. 감사 기록 보관 기간은 tenant 설정으로 둔다.
+
+## 10. 확장점 (필요해질 때만)
+
+| 신호 | 추가 |
+|---|---|
+| 전문검색으로 못 찾는 질문이 늘어남 | pgvector 컬럼 + 하이브리드 검색 (같은 DB, RLS 그대로) |
+| 시간에 따라 바뀌는 엔티티 관계 질의 | Graphiti를 fact 사본(projection)으로 붙임. 원본은 Postgres |
+| 원천 권한 확인이 느림 | 원천 ACL 캐시 테이블 + 웹훅으로 무효화 |
+| 승인 부담이 큼 | store별로 "저위험 kind는 리뷰 에이전트 통과 시 자동 승인" 옵션. 단, org store는 제외 |
+
+## 11. 위험과 남은 결정
+
+- **승인 피로:** curator가 제안을 쌓아두면 시스템이 죽는다. 그래서 자동 만료, 묶음 승인, store당 일일 제안 한도를 둔다. 도입 첫 달은 제안 수와 승인율을 지표로 본다.
+- **게이트 한계:** 지시문 패턴 검사는 키워드 기반이라 우회될 수 있다. 최종 방어선은 사람 승인과 external 표시 유지다.
+- **원천 권한 확인 범위:** v1 어댑터는 Drive, SharePoint, Notion 셋뿐이다. 나머지 원천은 링크만 걸고 권한 확인은 하지 않는다. 이 사실을 UI에 표시한다.
+- **아직 정해야 할 것:** 첫 적용 대상(회사 한 곳 / 여러 조직), IdP 종류, 승인 메신저(Slack / Teams), 첫 파일럿 팀.
+
+## 12. 구현 순서
+
+| 단계 | 내용 | 완료 기준 |
+|---|---|---|
+| 1 | 스키마 + RLS + API의 읽기·제안·승인 + 결정적 게이트 | 스모크 테스트 + API 통합 테스트 통과 |
+| 2 | MCP 서버 + 에이전트 1종 연결 | 에이전트가 index → get → propose 수행 |
+| 3 | 승인 봇 + SCIM 동기화 | 파일럿 팀에서 제안 → 승인이 메신저로 처리됨 |
+| 4 | worker (만료, 정정 전파, 주간 정리 제안) + 관리 UI | 2주 파일럿 지표(제안 수, 승인율, 재사용 횟수) 확보 |
+| 5 | 원천 권한 확인 어댑터 | Drive/SharePoint에서 권한 회수 시 메모리도 안 보임 |
