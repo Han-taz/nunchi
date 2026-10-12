@@ -136,3 +136,33 @@ S5a	(ok)	pass	baseline: v1.0 closure also returns alice and sales
 S5b	(ok)	fail
 S5c	(ok)	fail
 S5d	(ok)	pass	control: reactivation restores the closure on both schemas
+P3b	(ok)	pass	the vulnerable schema has no allowlist to dodge; the test only proves the lister, which is shared with P3
+N11a	(ok)	fail
+N11b	(ok)	pass	positive control: same-tenant principals stay visible
+N11c	(ok)	fail
+N11d	(ok)	pass	positive control: own membership
+N11e	(ok)	fail
+N11f	(ok)	fail
+N11g	(ok)	pass	positive control: own store
+N11h	(ok)	fail
+N11i	(ok)	fail
+N11j	(ok)	pass	positive control: grant held by my group
+N11k	(ok)	fail
+N11l	(ok)	fail
+N11m	(ok)	pass	positive control: own closure
+N11n	(ok)	pass	positive control: curator sees grants of her store
+N11o	(ok)	pass	positive control: curator sees members of a group on her store
+N11p	(ok)	fail
+N11q	(ok)	pass	positive control: agent closure
+N11r	(ok)	fail
+N11s	(ok)	fail
+N13a	(ok)	fail
+N13b	(ok)	fail
+N13c	(ok)	fail
+N13d	(ok)	fail
+N13e	(ok)	fail
+S1b	(ok)	pass	the predicate self-test is independent of the schema under test
+N13f	(ok)	fail
+N13g	(ok)	fail
+N13h	(ok)	fail
+P3c	(ok)	pass	schema.sql of the vulnerable fixture never creates schema t either; the test inspects the catalog before the helpers exist

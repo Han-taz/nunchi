@@ -97,6 +97,8 @@ DB 수준에서 거는 제약
    - UPDATE: curator만. BEFORE UPDATE 트리거가 불변 컬럼(`store_id`, `kind`, `created_by`, `on_behalf_of` 등), origin 단방향(external→internal 금지), `memory_transition` 표에 있는 상태 전이만, 본문 편집은 proposed/active에서만 허용한다. 모든 UPDATE는 version을 1 올리고, 삭제는 본문을 NULL, 제목을 `[deleted]`로 바꾼다. 위반은 `P0001`.
    - 실효 권한은 `app_sec.my_store_roles()`가 계산한다. 정책은 `store_id IN (SELECT ...)`로 쓰므로 행마다가 아니라 요청당 한 번 평가된다(10만 행 `count(*)`가 로컬에서 약 35ms. v1.0 정책은 같은 조건에서 약 3.8초).
    - 테넌트 경계는 복합 FK가 지킨다: `store(tenant_id, id)`, `principal(tenant_id, id)`를 `store_grant`와 `memory`가 (tenant_id, …)로 참조하므로 교차 테넌트 grant나 memory 행은 소유자 권한으로도 만들 수 없다.
+   - principal, group_member, store, store_grant: 모두 `FORCE ROW LEVEL SECURITY`. principal은 요청 테넌트의 행만 보인다(같은 테넌트의 표시 이름 해석에 필요해서 store 공유 여부로는 좁히지 않는다). group_member는 내 소속(사용자·에이전트)과 내가 curator인 store에 grant된 그룹의 구성원만, store는 `my_stores()`에 있는 것만, store_grant는 나와 내 그룹의 grant와 내가 curator인 store의 모든 grant만 보인다. `my_store_roles`, `app_sec.closure`, `begin_request`는 SECURITY DEFINER라 이 정책을 거치지 않는다. `principal_closure(p)`는 `p`가 요청의 사용자나 에이전트일 때만 값을 주고 남의 그룹 소속은 빈 집합이다.
+   - 테스트 헬퍼는 `smoke_test.sql`이 만드는 스키마 `t`에만 있고, P3 허용 목록 검사는 이름이 아니라 이 스키마를 통째로 제외한다.
    - memory_version, review: 부모 memory가 보일 때만 보인다(memory의 RLS 승계). 앱(`app_rw`)은 쓰지 못한다. 버전은 memory 트리거만 기록하고, 삭제 때 과거 snapshot을 전부 redact한다. review 기록은 이후 승인 함수가 맡는다.
    - deleted_hash: 해당 store의 curator만 읽는다. 쓰기는 삭제 트리거만. contributor의 재제안 검사는 `app_sec.is_deleted_content()`(SECURITY DEFINER)가 대신하고, 해시는 평문 sha256이 아니라 서버 비밀키 HMAC이라 추측 오라클이 되지 않는다.
 3. API는 RLS를 우회하지 않는 전용 DB 역할(`app_rw`: `LOGIN NOBYPASSRLS NOINHERIT`, 최소 권한)로 **직접** 접속한다. 테이블과 SECURITY DEFINER 함수의 소유자는 접속에 쓰지 않는 별도 역할(운영에서는 `NOLOGIN` 인 `app_owner`)이고, RLS 테이블에는 `FORCE ROW LEVEL SECURITY`가 걸려 있다. 관리 작업(SCIM 동기화, worker)만 별도 역할을 쓴다. 스모크 테스트의 `SET ROLE app_rw`는 테스트 전용이다. superuser로 접속해 `SET ROLE`하는 구조는 SQL 인젝션 한 번이 `RESET ROLE`로 이어지므로 쓰지 않는다.
@@ -106,7 +108,7 @@ DB 수준에서 거는 제약
    - fail-closed: `begin_request`를 부르지 않았거나 xid가 맞지 않으면 컨텍스트가 NULL이고 권한은 없다(오류도 권한도 아님). 비활성·group·agent id를 user 자리에 넣거나 user id를 agent 자리에 넣으면 `begin_request`가 `28000`으로 거부한다. 에이전트가 있으면 사용자·에이전트 중 한쪽이라도 grant가 없을 때 NULL이다(`least()`는 NULL을 무시하므로 명시 처리). 비활성 principal과 비활성 그룹은 권한을 주지 않는다.
    - append-only 트리거: memory_version은 snapshot→NULL(redact)만 허용하고, snapshot을 뺀 모든 컬럼(reason 포함)이 같아야 한다. review는 UPDATE/DELETE 모두 금지.
    - 해시 체인: 각 버전 행은 `snapshot_hash`, 직전 행의 `prev_hash`, 둘을 묶은 `row_hash`를 가진다. snapshot이 redact돼도 해시는 남아 `app_sec.verify_chain(memory_id)`가 계속 검증할 수 있고, 행의 actor나 순서를 바꾸면 `false`가 된다(앵커링은 worker가 맡는다).
-   - 검색: RLS 아래에서는 `@@`가 LEAKPROOF가 아니라 GIN 인덱스를 쓰지 못한다(10만 행에서 41ms 순차 스캔). 검색은 `app_sec.search(query, stores, statuses)`(SECURITY DEFINER)로 제공한다. 함수가 `my_store_roles()`로 `memory_read` 정책과 같은 규칙을 직접 적용하고(같은 호출자가 직접 읽는 행과 같은지는 사용자별로 테스트한다), 기본 status는 active이며, 점수 순 50건까지, 본문 없이 id·제목만 돌려준다(같은 조건에서 2.2ms).
+   - 검색: RLS 아래에서는 `@@`가 LEAKPROOF가 아니라 GIN 인덱스를 쓰지 못한다(10만 행에서 41ms 순차 스캔). 검색은 `app_sec.search(query, stores, statuses)`(SECURITY DEFINER)로 제공한다. 함수가 `my_store_roles()`로 `memory_read` 정책과 같은 규칙을 직접 적용하고(같은 호출자가 직접 읽는 행과 같은지는 사용자별로 테스트한다), 기본 status는 active이며, 점수 순 50건까지, 입력은 1000자와 tsquery 노드 64개까지이고 넘으면 `22023`으로 거부한다(`websearch_to_tsquery` 비용이 항 수에 제곱으로 늘어난다). 본문 없이 id·제목만 돌려준다(같은 조건에서 2.2ms).
 4. 원천 링크에 `inherit_acl: true`가 붙은 메모리는 조회할 때 원천 시스템에서 사용자의 접근 가능 여부를 확인한다. 결과는 짧게 캐시한다. 원천에서 권한이 사라지면 메모리도 안 보인다. v1에서는 Google Drive, SharePoint, Notion 어댑터만 만든다.
 
 ### 스모크 테스트 결과 (Postgres 16, `db/tests/smoke_test.sql`)
