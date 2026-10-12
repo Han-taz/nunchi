@@ -308,6 +308,7 @@ $$;
 -- group_member: 내 소속(사용자 또는 에이전트)과, 내가 curator 인 store 에 grant 된 그룹의 구성원.
 -- store: my_stores() 에 있는 store(role 무관). 목록 API 도 이 집합만 본다.
 -- store_grant: 내 폐쇄 집합(나와 내 그룹)의 grant 와, 내가 curator 인 store 의 모든 grant.
+-- tenant: ctx_tenant() 의 행 하나.
 ALTER TABLE principal ENABLE ROW LEVEL SECURITY;
 ALTER TABLE principal FORCE ROW LEVEL SECURITY;
 ALTER TABLE group_member ENABLE ROW LEVEL SECURITY;
@@ -316,6 +317,11 @@ ALTER TABLE store ENABLE ROW LEVEL SECURITY;
 ALTER TABLE store FORCE ROW LEVEL SECURITY;
 ALTER TABLE store_grant ENABLE ROW LEVEL SECURITY;
 ALTER TABLE store_grant FORCE ROW LEVEL SECURITY;
+ALTER TABLE tenant ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant FORCE ROW LEVEL SECURITY;
+
+-- tenant: 호출자 자신의 테넌트 한 행만 보인다. 컨텍스트가 없으면 0행이다 (다른 테넌트의 존재와 이름을 알 수 없다).
+CREATE POLICY tenant_read ON tenant FOR SELECT USING (id = app_sec.ctx_tenant());
 
 CREATE POLICY principal_read ON principal FOR SELECT USING (tenant_id = app_sec.ctx_tenant());
 

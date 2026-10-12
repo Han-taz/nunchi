@@ -280,7 +280,7 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
 
 -- A10) 앱 역할은 LOGIN NOBYPASSRLS NOINHERIT, RLS 테이블은 소유자에게도 정책을 강제한다
 SELECT t.eq('A10a app_rw login/bypassrls/inherit', $q$SELECT rolcanlogin || '/' || rolbypassrls || '/' || rolinherit FROM pg_roles WHERE rolname = 'app_rw'$q$, 'true/false/false');
-SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,group_member,memory,memory_version,principal,review,store,store_grant');
+SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,group_member,memory,memory_version,principal,review,store,store_grant,tenant');
 
 SET ROLE app_rw;
 
@@ -668,6 +668,18 @@ COMMIT;
 BEGIN; SELECT t.ctx(NULL, NULL);
 SELECT t.eq('N11r no context: principal rows', $q$SELECT count(*)::text FROM principal$q$, '0');
 SELECT t.eq('N11s no context: store_grant rows', $q$SELECT count(*)::text FROM store_grant$q$, '0');
+COMMIT;
+
+-- N16) tenant 는 호출자 자신의 행만 보인다 (다른 테넌트의 존재와 이름을 알 수 없다)
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.eq('N16a alice sees only her own tenant row', $q$SELECT string_agg(name, ',' ORDER BY name) FROM tenant$q$, 'acme');
+SELECT t.eq('N16b alice looks up the other tenant by name', $q$SELECT count(*)::text FROM tenant WHERE name = 'other'$q$, '0');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-000000000091', NULL);
+SELECT t.eq('N16c zed sees only his own tenant row', $q$SELECT string_agg(name, ',' ORDER BY name) FROM tenant$q$, 'other');
+COMMIT;
+BEGIN; SELECT t.ctx(NULL, NULL);
+SELECT t.eq('N16d no context: tenant rows', $q$SELECT count(*)::text FROM tenant$q$, '0');
 COMMIT;
 
 -- N12) 삭제된 본문(F5)을 보이지 않는 문자로 변형해 재제안해도 막힌다
