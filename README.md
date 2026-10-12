@@ -1,0 +1,53 @@
+# nunchi
+
+nunchi는 팀·조직용 에이전트 메모리다. 에이전트가 쓰고 읽는 지식은 **사람이 승인한 것만** 남고, 모든 항목에는 **출처가 필수**다. 질문하는 사람과 에이전트의 권한 교집합으로 읽을 수 있는 범위를 정하므로, 에이전트는 눈치껏(nunchi) 청중에 맞는 지식만 꺼낸다. 권한 경계는 애플리케이션 코드가 아니라 Postgres의 행 수준 보안(RLS)이 강제한다.
+
+## 상태
+
+초기 단계다. 지금 있는 것은 리서치 노트, Team Memory Core v1 설계서, Postgres 스키마와 그 보안 회귀 테스트, 그리고 CI다. 애플리케이션 코드는 아직 없다. v1.0 스키마에서 외부 보안 컨설팅이 찾은 문제 X1–X6은 고쳐졌고, 고치기 전 스키마는 테스트가 실제로 취약점을 잡는지 확인하는 fixture로 남겨 두었다. 컨설팅 2차 라운드 이후의 항목은 아직 반영되지 않았다.
+
+## 문서 지도
+
+| 경로 | 내용 |
+|---|---|
+| [docs/research/README.md](docs/research/README.md) | 리서치 허브. 읽는 순서와 출처 노트 목록 |
+| [docs/research/synthesis.md](docs/research/synthesis.md) | 수렴하는 개념 9가지, 미해결 문제, 참조 아키텍처 |
+| [docs/research/platform-comparison.md](docs/research/platform-comparison.md) | Claude / Letta / AWS / Databricks / Tencent / Asana 비교 |
+| [docs/research/implementation-guide-v1.md](docs/research/implementation-guide-v1.md) | 팀 도입용 구현 가이드 |
+| [docs/design/team-memory-core-v1.md](docs/design/team-memory-core-v1.md) | Memory Core 설계서 |
+| [docs/reviews/2026-10-12-security-consult-round1.md](docs/reviews/2026-10-12-security-consult-round1.md) | 보안 컨설팅 1차 보고서 (재현 스크립트는 [docs/reviews/exp/](docs/reviews/exp/)) |
+| [docs/reviews/2026-10-12-messenger-api-research.md](docs/reviews/2026-10-12-messenger-api-research.md) | 국내 그룹웨어·메신저 연동 API 조사 |
+| [docs/ci.md](docs/ci.md) | CI 게이트 설명, 규칙 제외 목록, 앞으로 켤 게이트 |
+| [db/schema.sql](db/schema.sql) | Postgres 16 스키마와 RLS 정책 |
+| [db/tests/smoke_test.sql](db/tests/smoke_test.sql) | RLS 스모크 테스트와 X1–X6 회귀 테스트 |
+
+## DB 테스트를 로컬에서 실행하기
+
+Docker와 `psql` 클라이언트가 필요하다.
+
+```sh
+docker run -d --rm --name nunchi-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
+export PG_URL=postgres://postgres:postgres@localhost:5432/postgres
+
+scripts/db-test.sh --url "$PG_URL"                       # 현재 스키마: 모든 테스트 통과해야 함
+scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # 취약 스키마: X 테스트가 실패해야 함
+
+docker stop nunchi-pg
+```
+
+스크립트는 실행할 때마다 새 데이터베이스를 만들고 끝나면 지운다. 새 테스트를 추가하면 `db/tests/expectations.tsv`에도 등록해야 한다. 등록되지 않았거나 출력되지 않은 테스트는 실패로 처리된다.
+
+## CI
+
+PR마다 DB 테스트(2회), 뮤테이션 게이트, SQL·Markdown·셸·워크플로 린트, 비밀값 검사, 위생 검사, 커밋 형식 검사, PR 크기 제한, CodeQL이 돌고, `ci-gate`가 전부 성공했는지 판정한다. 브랜치 보호는 `ci-gate`와, 별도 검증 에이전트가 게시하는 `independent-verify` 상태를 요구한다. 각 게이트의 의미와 규칙 제외 이유는 [docs/ci.md](docs/ci.md)에 있다.
+
+## 기여 흐름
+
+1. `develop`에서 브랜치를 만든다. `develop`과 `main`에는 직접 push하지 않는다.
+2. 작은 단위로 conventional commit 형식(`feat(db): ...`, `docs: ...`)으로 커밋한다. 병합 커밋 없이 선형 히스토리를 유지한다.
+3. `develop`을 대상으로 PR을 연다.
+4. `ci-gate`가 초록이 되고 리뷰를 받으면 병합한다. 브랜치가 `develop`보다 뒤처지면 먼저 갱신한다.
+
+## 라이선스
+
+[MIT](LICENSE)
