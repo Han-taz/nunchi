@@ -127,36 +127,55 @@ CREATE TABLE review (
   at          timestamptz NOT NULL DEFAULT now()
 );
 
--- 버전/리뷰 테이블은 수정·삭제 금지 (redact는 snapshot만 NULL로 하는 전용 함수로)
+-- 버전/리뷰 테이블은 수정·삭제 금지. 예외: memory_version.snapshot 을 NULL 로 만드는 redact 만 허용
+-- (snapshot 을 뺀 모든 컬럼이 동일해야 함. 컬럼이 추가돼도 자동으로 비교 대상에 포함)
 CREATE FUNCTION forbid_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END IF;
-  IF TG_OP = 'UPDATE' AND NOT (OLD.snapshot IS NOT NULL AND NEW.snapshot IS NULL
-                               AND row(OLD.id, OLD.memory_id, OLD.version, OLD.op, OLD.actor_id, OLD.at)
-                                 = row(NEW.id, NEW.memory_id, NEW.version, NEW.op, NEW.actor_id, NEW.at)) THEN
+  IF TG_TABLE_NAME <> 'memory_version' THEN
+    RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
+  END IF;
+  IF NOT (OLD.snapshot IS NOT NULL AND NEW.snapshot IS NULL
+          AND to_jsonb(OLD) - 'snapshot' = to_jsonb(NEW) - 'snapshot') THEN
     RAISE EXCEPTION 'memory_version: only redaction (snapshot -> NULL) allowed';
   END IF;
   RETURN NEW;
 END $$;
 CREATE TRIGGER memory_version_append_only BEFORE UPDATE OR DELETE ON memory_version
   FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+CREATE TRIGGER review_append_only BEFORE UPDATE OR DELETE ON review
+  FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
 
 -- ── 권한: 실효 권한 = 사용자 권한 ∩ 에이전트 권한 ──────────
 -- 앱이 트랜잭션마다 SET LOCAL app.user_id / app.agent_id 를 인증 토큰에서 설정. 모델은 관여 불가.
+-- fail-closed: 미설정·빈 문자열은 NULL (오류도, 권한도 아님)
+CREATE FUNCTION app_user()  RETURNS uuid LANGUAGE sql STABLE AS $$
+  SELECT nullif(current_setting('app.user_id', true), '')::uuid
+$$;
+CREATE FUNCTION app_agent() RETURNS uuid LANGUAGE sql STABLE AS $$
+  SELECT nullif(current_setting('app.agent_id', true), '')::uuid
+$$;
+
+-- 비활성 principal(사용자/에이전트)과 비활성 그룹은 아무 권한도 주지 않는다
 CREATE FUNCTION principal_closure(p uuid) RETURNS SETOF uuid LANGUAGE sql STABLE AS $$
-  SELECT p UNION SELECT group_id FROM group_member WHERE member_id = p
+  SELECT id FROM principal WHERE id = p AND active
+  UNION
+  SELECT gm.group_id FROM group_member gm
+    JOIN principal g ON g.id = gm.group_id AND g.active
+   WHERE gm.member_id = p
+     AND EXISTS (SELECT 1 FROM principal u WHERE u.id = p AND u.active)
 $$;
 
 CREATE FUNCTION store_role_of(p uuid, s uuid) RETURNS store_role LANGUAGE sql STABLE AS $$
   SELECT max(role) FROM store_grant WHERE store_id = s AND principal_id IN (SELECT principal_closure(p))
 $$;
 
+-- least() 는 NULL 을 무시하므로 한쪽이 무권한이면 반대쪽이 이겨버린다 → 명시적으로 NULL 처리
 CREATE FUNCTION effective_role(s uuid) RETURNS store_role LANGUAGE sql STABLE AS $$
   SELECT CASE
-    WHEN nullif(current_setting('app.agent_id', true), '') IS NULL
-      THEN store_role_of(current_setting('app.user_id')::uuid, s)
-    ELSE least(store_role_of(current_setting('app.user_id')::uuid, s),
-               store_role_of(current_setting('app.agent_id')::uuid, s))
+    WHEN app_agent() IS NULL THEN store_role_of(app_user(), s)
+    WHEN store_role_of(app_user(), s) IS NULL OR store_role_of(app_agent(), s) IS NULL THEN NULL
+    ELSE least(store_role_of(app_user(), s), store_role_of(app_agent(), s))
   END
 $$;
 
@@ -173,9 +192,55 @@ CREATE POLICY memory_read ON memory FOR SELECT USING (
 );
 
 -- 제안: contributor 이상, 반드시 proposed 로만 생성 (user store auto_approve 는 서비스 계층에서 승격)
+-- 작성자 바인딩: 에이전트면 created_by=에이전트, on_behalf_of=사용자 / 아니면 created_by=사용자, on_behalf_of=NULL
 CREATE POLICY memory_propose ON memory FOR INSERT WITH CHECK (
   effective_role(store_id) >= 'contributor' AND status = 'proposed'
+  AND created_by = coalesce(app_agent(), app_user())
+  AND on_behalf_of IS NOT DISTINCT FROM (CASE WHEN app_agent() IS NOT NULL THEN app_user() END)
+  AND tenant_id = (SELECT tenant_id FROM store WHERE id = store_id)
 );
 
 -- 상태 변경(승인/대체/삭제): curator 만
 CREATE POLICY memory_curate ON memory FOR UPDATE USING (effective_role(store_id) = 'curator');
+
+
+-- ── 버전/리뷰: 부모 memory 가 보일 때만 보인다 (EXISTS 안에서 memory 의 RLS 가 그대로 적용됨) ──
+ALTER TABLE memory_version ENABLE ROW LEVEL SECURITY;
+ALTER TABLE review         ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY memory_version_read ON memory_version FOR SELECT USING (
+  EXISTS (SELECT 1 FROM memory m WHERE m.id = memory_id)
+);
+-- 기록: 부모 memory 에 contributor 이상, actor 는 호출 주체 본인
+CREATE POLICY memory_version_write ON memory_version FOR INSERT WITH CHECK (
+  actor_id = coalesce(app_agent(), app_user())
+  AND EXISTS (SELECT 1 FROM memory m WHERE m.id = memory_id AND effective_role(m.store_id) >= 'contributor')
+);
+-- redact(snapshot -> NULL): curator 만 (컬럼 권한 + 트리거가 snapshot 외 변경을 막음)
+CREATE POLICY memory_version_redact ON memory_version FOR UPDATE USING (
+  EXISTS (SELECT 1 FROM memory m WHERE m.id = memory_id AND effective_role(m.store_id) = 'curator')
+);
+
+CREATE POLICY review_read ON review FOR SELECT USING (
+  EXISTS (SELECT 1 FROM memory m WHERE m.id = memory_id)
+);
+-- comment: contributor 이상 / approve·reject: curator
+CREATE POLICY review_write ON review FOR INSERT WITH CHECK (
+  reviewer_id = coalesce(app_agent(), app_user())
+  AND EXISTS (SELECT 1 FROM memory m WHERE m.id = memory_id
+                AND effective_role(m.store_id) >= CASE WHEN verdict = 'comment' THEN 'contributor'::store_role
+                                                       ELSE 'curator'::store_role END)
+);
+
+-- ── 앱 접속 역할: 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──────
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_rw') THEN CREATE ROLE app_rw NOLOGIN; END IF;
+END $$;
+GRANT USAGE ON SCHEMA public TO app_rw;
+-- 주체/권한 테이블은 읽기 전용 (SCIM 동기화·관리 작업은 별도 역할)
+GRANT SELECT ON tenant, principal, group_member, store, store_grant TO app_rw;
+GRANT SELECT, INSERT, UPDATE ON memory TO app_rw;
+GRANT SELECT, INSERT ON memory_version TO app_rw;
+GRANT UPDATE (snapshot) ON memory_version TO app_rw;   -- redact 전용
+GRANT SELECT, INSERT ON review, deleted_hash TO app_rw;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app_rw;
