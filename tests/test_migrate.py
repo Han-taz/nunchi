@@ -59,7 +59,7 @@ def test_load_rejects_badly_named_file(tmp_path: Path) -> None:
 def test_load_rejects_duplicate_version(tmp_path: Path) -> None:
     (tmp_path / "0001_a.sql").write_text("SELECT 1;")
     (tmp_path / "0001_b.sql").write_text("SELECT 2;")
-    with pytest.raises(m.MigrationError, match="share a version"):
+    with pytest.raises(m.MigrationError, match=r"^two migration files share a version number$"):
         m.load_migrations(tmp_path)
 
 
