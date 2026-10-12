@@ -212,6 +212,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --persona regular .github
+      - name: Self-test gate-integrity (no step runs head code; registry guard; gate-file report)
+        run: |
+          scripts/ci/gate-integrity-lint.sh
+          scripts/ci/gate-integrity-lint-selftest.sh
+          scripts/ci/gate-integrity-selftest.sh
 
   shell:
     name: shell
