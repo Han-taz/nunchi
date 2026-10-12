@@ -10,11 +10,6 @@
 #   lock files                             exempt only when the manifest it is
 #                                          generated from changed in the same PR
 #                                          (uv.lock needs pyproject.toml)
-#   db/migrations/0001_baseline.sql       exempt only when db/schema.sql changed in
-#                                          the same PR or the file is newly added.
-#                                          It is generated from schema.sql, and CI
-#                                          cmp's it with scripts/migrate-baseline.sh
-#                                          output. No other migration is exempt.
 #   png jpg gif svg pdf ico                count as BINARY_LINES each
 #   any other binary file                  fails the job
 #
@@ -30,16 +25,9 @@ limit="${3:-800}"
 empty_tree="$(git mktree </dev/null)"
 export GIT_ATTR_NOSYSTEM=1
 
-baseline=db/migrations/0001_baseline.sql
-baseline_added=0
-if [ -n "$(git -c core.attributesFile=/dev/null --attr-source="$empty_tree" \
-  diff --no-ext-diff --no-textconv --no-renames --diff-filter=A --name-only -z "$base...$head" -- ":(literal)$baseline" | tr -d '\0')" ]; then
-  baseline_added=1
-fi
-
 result=$(git -c core.attributesFile=/dev/null --attr-source="$empty_tree" \
   diff --no-ext-diff --no-textconv --no-renames --numstat -z "$base...$head" | tr '\0' '\n' |
-  awk -v binary_lines=50 -v baseline="$baseline" -v baseline_added="$baseline_added" '
+  awk -v binary_lines=50 '
     $0 !~ /^([0-9]+|-)\t([0-9]+|-)\t/ { print "BINARY malformed numstat record: " $0; bad = 1; next }
     {
       split($0, f, "\t")
@@ -58,7 +46,6 @@ result=$(git -c core.attributesFile=/dev/null --attr-source="$empty_tree" \
           name = substr(path, length(".github/tools/") + 1)
           if (name in lock && (".github/tools/" lock[name]) in changed) continue
         }
-        if (path == baseline && (baseline_added == 1 || "db/schema.sql" in changed)) continue
         if (path == "uv.lock" && "pyproject.toml" in changed) continue
         if (add[i] == "-") {
           if (path ~ /\.(png|jpg|gif|svg|pdf|ico)$/) { sum += binary_lines; continue }

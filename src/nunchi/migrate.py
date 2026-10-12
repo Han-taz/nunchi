@@ -12,6 +12,8 @@ import psycopg
 from nunchi.config import Settings
 
 _NAME = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
+_MANIFEST = "SHA256SUMS"
+_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _LOCK_KEY = 7_262_024_001
 
 
@@ -26,18 +28,44 @@ class Migration:
     checksum: str
 
 
+def read_manifest(directory: Path) -> dict[str, str]:
+    """File name -> sha256 from SHA256SUMS (sha256sum format: digest, two spaces, name)."""
+    path = directory / _MANIFEST
+    if not path.is_file():
+        msg = f"{_MANIFEST} is missing"
+        raise MigrationError(msg)
+    entries: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        digest, _, name = line.partition("  ")
+        if _DIGEST.match(digest) is None or not name or name in entries:
+            msg = f"{_MANIFEST}: malformed or duplicate line {line!r}"
+            raise MigrationError(msg)
+        entries[name] = digest
+    return entries
+
+
 def load_migrations(directory: Path) -> list[Migration]:
+    """Read the migrations and prove they are exactly the files SHA256SUMS lists, byte for byte."""
     migrations: list[Migration] = []
+    actual: dict[str, str] = {}
     for path in sorted(directory.glob("*.sql")):
         match = _NAME.match(path.name)
         if match is None:
             msg = f"{path.name}: migration files are named NNNN_slug.sql"
             raise MigrationError(msg)
         data = path.read_bytes()
-        migrations.append(Migration(match.group(1), data, hashlib.sha256(data).hexdigest()))
+        checksum = hashlib.sha256(data).hexdigest()
+        actual[path.name] = checksum
+        migrations.append(Migration(match.group(1), data, checksum))
     versions = [m.version for m in migrations]
     if len(set(versions)) != len(versions):
         msg = "two migration files share a version number"
+        raise MigrationError(msg)
+    expected = read_manifest(directory)
+    if actual != expected:
+        names = sorted(actual.keys() | expected.keys())
+        bad = ", ".join(n for n in names if actual.get(n) != expected.get(n))
+        msg = f"{_MANIFEST} does not match the migration files: {bad}"
         raise MigrationError(msg)
     return migrations
 
