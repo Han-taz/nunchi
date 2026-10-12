@@ -1,9 +1,7 @@
 name: gate-integrity
 
 on:
-  push:
-    branches: [demo/u16a-base]
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
 permissions: {}
