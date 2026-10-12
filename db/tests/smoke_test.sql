@@ -466,7 +466,7 @@ CREATE FUNCTION t.exec_list() RETURNS text LANGUAGE sql AS $$
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.my_store_roles,app_sec.my_stores,app_sec.search,app_sec.verify_chain,public.principal_closure');
+  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.my_store_roles,app_sec.my_stores,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 BEGIN;
 CREATE FUNCTION public.t_eq() RETURNS void LANGUAGE sql AS $$ SELECT $$;
@@ -573,7 +573,7 @@ COMMIT;
 
 -- S2b) 임시 principal/store_grant 에만 있는 사용자는 begin_request 를 통과하지 못한다
 BEGIN;
-CREATE TEMP TABLE principal (LIKE public.principal) ON COMMIT DROP;
+CREATE TEMP TABLE principal (id uuid, tenant_id uuid, kind principal_kind, external_id text, display_name text, active boolean) ON COMMIT DROP;
 INSERT INTO pg_temp.principal (id, tenant_id, kind, external_id, display_name, active) VALUES
  ('00000000-0000-0000-0000-0000000000a9','00000000-0000-0000-0000-000000000001','user','forged','Forged',true);
 SELECT t.err('S2b begin_request for a user that exists only in a temp principal', $q$SELECT t.ctx('00000000-0000-0000-0000-0000000000a9', NULL)$q$, '28000');
@@ -592,7 +592,7 @@ RESET ROLE;
 UPDATE principal SET active = false WHERE external_id = 'sales' AND kind = 'group';
 SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
-CREATE TEMP TABLE principal AS SELECT * FROM public.principal;
+CREATE TEMP TABLE principal AS SELECT id, tenant_id, kind, 'hidden'::text AS external_id, display_name, active FROM public.principal;
 UPDATE pg_temp.principal SET active = true;
 SELECT t.eq('S2d temp principal revives deactivated group: alice role on sales', $q$SELECT t.role('00000000-0000-0000-0000-00000000f001')$q$, 'NULL');
 COMMIT;
@@ -631,8 +631,17 @@ INSERT INTO principal (id, tenant_id, kind, external_id, display_name) VALUES
  ('00000000-0000-0000-0000-000000000091','00000000-0000-0000-0000-000000000002','user','zed','Zed(타 테넌트)');
 INSERT INTO store (id, tenant_id, kind, slug, description) VALUES ('00000000-0000-0000-0000-00000000f009','00000000-0000-0000-0000-000000000002','team','zed','타 테넌트 지식');
 INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES ('00000000-0000-0000-0000-00000000f009','00000000-0000-0000-0000-000000000091','curator','00000000-0000-0000-0000-000000000002');
+INSERT INTO principal (id, tenant_id, kind, external_id, display_name, active) VALUES
+ ('00000000-0000-0000-0000-0000000000a8','00000000-0000-0000-0000-000000000001','user','ghost','Ghost(비활성)', false);
 SET ROLE app_rw;
-
+SELECT t.err('N14a app_rw selects principal.external_id', $q$SELECT external_id FROM principal$q$, '42501');
+SELECT t.err('N14b app_rw selects * from principal', $q$SELECT * FROM principal$q$, '42501');
+SELECT t.eq('N14c app_rw selects the other principal columns', $q$SELECT count(*)::text FROM (SELECT id, tenant_id, kind, display_name, active FROM principal LIMIT 0) AS s$q$, '0');
+SELECT t.eq('N15a resolve_principal: active user', $q$SELECT app_sec.resolve_principal('00000000-0000-0000-0000-000000000001', 'user', 'alice')::text$q$, '00000000-0000-0000-0000-0000000000a1');
+SELECT t.eq('N15b resolve_principal: inactive user', $q$SELECT coalesce(app_sec.resolve_principal('00000000-0000-0000-0000-000000000001', 'user', 'ghost')::text, 'NULL')$q$, 'NULL');
+SELECT t.eq('N15c resolve_principal: wrong kind', $q$SELECT coalesce(app_sec.resolve_principal('00000000-0000-0000-0000-000000000001', 'agent', 'alice')::text, 'NULL')$q$, 'NULL');
+SELECT t.eq('N15d resolve_principal: other tenant', $q$SELECT coalesce(app_sec.resolve_principal('00000000-0000-0000-0000-000000000002', 'user', 'alice')::text, 'NULL')$q$, 'NULL');
+SELECT t.eq('N15e resolve_principal: agent kind in the right tenant', $q$SELECT app_sec.resolve_principal('00000000-0000-0000-0000-000000000001', 'agent', 'sales-bot')::text$q$, '00000000-0000-0000-0000-0000000000d1');
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.eq('N11a alice sees principals of another tenant', $q$SELECT count(*)::text FROM principal WHERE tenant_id = '00000000-0000-0000-0000-000000000002'$q$, '0');
 SELECT t.eq('N11b alice still sees same-tenant principals (display names)', $q$SELECT count(*)::text FROM principal WHERE id = '00000000-0000-0000-0000-0000000000b1'$q$, '1');

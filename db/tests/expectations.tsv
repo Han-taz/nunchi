@@ -165,4 +165,12 @@ S1b	(ok)	pass	the predicate self-test is independent of the schema under test
 N13f	(ok)	fail
 N13g	(ok)	fail
 N13h	(ok)	fail
+N14a	(ok)	fail
+N14b	(ok)	fail
+N14c	(ok)	pass	positive control: the non-secret columns stay readable
+N15a	(ok)	fail
+N15b	(ok)	fail
+N15c	(ok)	fail
+N15d	(ok)	fail
+N15e	(ok)	fail
 P3c	(ok)	pass	schema.sql of the vulnerable fixture never creates schema t either; the test inspects the catalog before the helpers exist

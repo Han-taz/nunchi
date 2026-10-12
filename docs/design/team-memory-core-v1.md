@@ -98,6 +98,7 @@ DB 수준에서 거는 제약
    - 실효 권한은 `app_sec.my_store_roles()`가 계산한다. 정책은 `store_id IN (SELECT ...)`로 쓰므로 행마다가 아니라 요청당 한 번 평가된다(10만 행 `count(*)`가 로컬에서 약 35ms. v1.0 정책은 같은 조건에서 약 3.8초).
    - 테넌트 경계는 복합 FK가 지킨다: `store(tenant_id, id)`, `principal(tenant_id, id)`를 `store_grant`와 `memory`가 (tenant_id, …)로 참조하므로 교차 테넌트 grant나 memory 행은 소유자 권한으로도 만들 수 없다.
    - principal, group_member, store, store_grant: 모두 `FORCE ROW LEVEL SECURITY`. principal은 요청 테넌트의 행만 보인다(같은 테넌트의 표시 이름 해석에 필요해서 store 공유 여부로는 좁히지 않는다). group_member는 내 소속(사용자·에이전트)과 내가 curator인 store에 grant된 그룹의 구성원만, store는 `my_stores()`에 있는 것만, store_grant는 나와 내 그룹의 grant와 내가 curator인 store의 모든 grant만 보인다. `my_store_roles`, `app_sec.closure`, `begin_request`는 SECURITY DEFINER라 이 정책을 거치지 않는다. `principal_closure(p)`는 `p`가 요청의 사용자나 에이전트일 때만 값을 주고 남의 그룹 소속은 빈 집합이다.
+   - `principal.external_id`(IdP subject, SCIM id)는 컬럼 단위 GRANT에서 빠져 있어 `app_rw`가 읽으면 `42501`이다. 토큰의 subject를 principal id로 바꾸는 길은 `app_sec.resolve_principal(발급 테넌트, 종류, external_id)`(SECURITY DEFINER) 하나이고, 테넌트와 종류가 정확히 맞는 활성 principal의 id만 돌려주고 그 밖에는 NULL이다.
    - 테스트 헬퍼는 `smoke_test.sql`이 만드는 스키마 `t`에만 있고, P3 허용 목록 검사는 이름이 아니라 이 스키마를 통째로 제외한다.
    - memory_version, review: 부모 memory가 보일 때만 보인다(memory의 RLS 승계). 앱(`app_rw`)은 쓰지 못한다. 버전은 memory 트리거만 기록하고, 삭제 때 과거 snapshot을 전부 redact한다. review 기록은 이후 승인 함수가 맡는다.
    - deleted_hash: 해당 store의 curator만 읽는다. 쓰기는 삭제 트리거만. contributor의 재제안 검사는 `app_sec.is_deleted_content()`(SECURITY DEFINER)가 대신하고, 해시는 평문 sha256이 아니라 서버 비밀키 HMAC이라 추측 오라클이 되지 않는다.
