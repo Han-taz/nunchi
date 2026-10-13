@@ -238,31 +238,60 @@ def test_main_reports_an_unreachable_database(
 @pytest.mark.parametrize(
     ("sql", "message"),
     [
-        ("BEGIN;\nSELECT 1;\nCOMMIT;\n", "top-level BEGIN"),
-        ("SELECT 1;\ncommit;\n", "top-level COMMIT"),
-        ("SELECT 1;\n  Rollback ;\n", "top-level ROLLBACK"),
-        ("SELECT 1;\nABORT;\n", "top-level ABORT"),
-        ("SELECT 1;\nSTART   TRANSACTION;\n", "top-level START TRANSACTION"),
-        ("-- note\n/* x */ BEGIN;\n", "top-level BEGIN"),
-        ("SELECT 'a'; COMMIT;", "top-level COMMIT"),
-        ("SELECT E'it\\'s'; COMMIT;", "top-level COMMIT"),
-        ("SELECT 'it''s'; COMMIT;", "top-level COMMIT"),
-        ('SELECT "x"; COMMIT;', "top-level COMMIT"),
-        ("SELECT $$x$$; COMMIT;", "top-level COMMIT"),
-        ("SELECT $t$x$t$; COMMIT;", "top-level COMMIT"),
+        ("BEGIN;\nSELECT 1;\nCOMMIT;\n", "BEGIN is not allowed"),
+        ("SELECT 1;\ncommit;\n", "COMMIT is not allowed"),
+        ("SELECT 1;\n  Rollback ;\n", "ROLLBACK is not allowed"),
+        ("SELECT 1;\nABORT;\n", "ROLLBACK is not allowed"),
+        ("SELECT 1;\nSTART   TRANSACTION;\n", "START is not allowed"),
+        ("-- note\n/* x */ BEGIN;\n", "BEGIN is not allowed"),
+        ("SELECT 'a'; COMMIT;", "COMMIT is not allowed"),
+        ("SELECT E'it\\'s'; COMMIT;", "COMMIT is not allowed"),
+        ("SELECT 'it''s'; COMMIT;", "COMMIT is not allowed"),
+        ('SELECT "x"; COMMIT;', "COMMIT is not allowed"),
+        ("SELECT $$x$$; COMMIT;", "COMMIT is not allowed"),
+        ("SELECT $t$x$t$; COMMIT;", "COMMIT is not allowed"),
         ("CREATE INDEX CONCURRENTLY i ON t (a);\n", "CONCURRENTLY cannot run"),
         ("REFRESH MATERIALIZED VIEW concurrently v;\n", "CONCURRENTLY cannot run"),
-        ("SELECT E'\\''; COMMIT; SELECT ''", "top-level COMMIT"),
-        ("END;\n", "top-level END"),
-        ("CREATE TABLE a (i int);\nend transaction;\n", "top-level END"),
-        ("SELECT 1; END WORK;", "top-level END"),
-        ("SELECT 1;\nPREPARE TRANSACTION 'x';\n", "top-level PREPARE TRANSACTION"),
-        ("SELECT 1;\nCOMMIT PREPARED 'x';\n", "top-level COMMIT PREPARED"),
-        ("SELECT 1;\nROLLBACK PREPARED 'x';\n", "top-level ROLLBACK PREPARED"),
+        ("SELECT E'\\''; COMMIT; SELECT ''", "COMMIT is not allowed"),
+        ("END;\n", "COMMIT is not allowed"),
+        ("CREATE TABLE a (i int);\nend transaction;\n", "COMMIT is not allowed"),
+        ("SELECT 1; END WORK;", "COMMIT is not allowed"),
+        ("SELECT 1;\nPREPARE TRANSACTION 'x';\n", "PREPARE is not allowed"),
+        ("SELECT 1;\nCOMMIT PREPARED 'x';\n", "COMMIT PREPARED is not allowed"),
+        ("SELECT 1;\nROLLBACK PREPARED 'x';\n", "ROLLBACK PREPARED is not allowed"),
         (
             "CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;\nEND;\n",
-            "top-level END",
+            "COMMIT is not allowed",
         ),
+        (
+            "CREATE DOMAIN atomic AS int; CREATE TABLE a(begin atomic); END; SELECT 1/0;",
+            "COMMIT is not allowed",
+        ),
+        (
+            "CREATE DOMAIN atomic AS int; CREATE TABLE a(begin atomic); COMMIT; SELECT 1/0;",
+            "COMMIT is not allowed",
+        ),
+        (
+            "CREATE DOMAIN atomic AS int; CREATE FUNCTION f(begin atomic) RETURNS int"
+            " LANGUAGE sql AS 'SELECT 1'; END; SELECT 1/0;",
+            "COMMIT is not allowed",
+        ),
+        (
+            "COMMIT; CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;",
+            "COMMIT is not allowed",
+        ),
+        ("SELECT 1; SAVEPOINT s;", "SAVEPOINT is not allowed"),
+        ("SELECT 1; RELEASE s;", "RELEASE is not allowed"),
+        ("SELECT 1; ROLLBACK TO s;", "ROLLBACK TO is not allowed"),
+        ("SELECT 1; COMMIT AND NO CHAIN;", "COMMIT is not allowed"),
+        ("VACUUM;", "VACUUM cannot run"),
+        ("VACUUM (ANALYZE) t;", "VACUUM cannot run"),
+        ("CREATE UNIQUE INDEX CONCURRENTLY i ON t (a);", "CONCURRENTLY cannot run"),
+        ("DROP INDEX CONCURRENTLY i;", "CONCURRENTLY cannot run"),
+        ("REINDEX INDEX CONCURRENTLY i;", "CONCURRENTLY cannot run"),
+        ("REINDEX (CONCURRENTLY) TABLE t;", "CONCURRENTLY cannot run"),
+        ("ALTER TABLE t DETACH PARTITION p CONCURRENTLY;", "CONCURRENTLY cannot run"),
+        ("CREATE TABLE a(", "not parseable as PostgreSQL: syntax error"),
     ],
 )
 def test_load_rejects_sql_the_runner_transaction_cannot_hold(
@@ -270,7 +299,7 @@ def test_load_rejects_sql_the_runner_transaction_cannot_hold(
 ) -> None:
     (tmp_path / "0001_a.sql").write_text(sql)
     seal(tmp_path)
-    with pytest.raises(m.MigrationError, match=rf"^0001_a\.sql: .*{message}"):
+    with pytest.raises(m.MigrationError, match=rf"^0001_a\.sql: {message}"):
         m.load_migrations(tmp_path)
 
 
@@ -294,6 +323,11 @@ def test_load_rejects_sql_the_runner_transaction_cannot_hold(
         "SELECT CASE WHEN true THEN 1 END;\n",
         "PREPARE p AS SELECT 1;\n",
         "SELECT 'x; END;'; -- END;\n",
+        "ANALYZE t;\n",
+        "REINDEX INDEX i;\n",
+        "REFRESH MATERIALIZED VIEW v;\n",
+        "CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;\n"
+        "CREATE FUNCTION h() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 2; END;\n",
     ],
 )
 def test_load_accepts_keywords_that_are_only_text(tmp_path: Path, sql: str) -> None:
@@ -310,10 +344,28 @@ def test_load_rejects_invalid_utf8(tmp_path: Path) -> None:
 
 
 @pytest.mark.db
-def test_top_level_end_is_refused_before_any_statement_runs(fresh_db: str, tmp_path: Path) -> None:
-    (tmp_path / "0001_a.sql").write_text("CREATE TABLE a (i int);\nEND;\nSELECT 1/0;\n")
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE TABLE a (i int);\nEND;\nSELECT 1/0;\n",
+        "CREATE DOMAIN atomic AS int; CREATE TABLE a(begin atomic); END; SELECT 1/0;",
+        "CREATE DOMAIN atomic AS int; CREATE TABLE a(begin atomic); COMMIT; SELECT 1/0;",
+    ],
+)
+def test_early_commit_is_refused_before_any_statement_runs(
+    fresh_db: str, tmp_path: Path, sql: str
+) -> None:
+    (tmp_path / "0001_a.sql").write_text(sql)
     seal(tmp_path)
     with psycopg.connect(fresh_db) as conn:
-        with pytest.raises(m.MigrationError, match=r"^0001_a\.sql: top-level END is not allowed"):
+        with pytest.raises(m.MigrationError, match=r"^0001_a\.sql: COMMIT is not allowed"):
             m.migrate(conn, tmp_path)
         assert conn.execute("SELECT to_regclass('a')").fetchone() == (None,)
+        assert conn.execute("SELECT to_regclass('schema_migrations')").fetchone() == (None,)
+
+
+def test_every_frozen_migration_passes_check_runnable() -> None:
+    files = sorted((REPO / "db" / "migrations").glob("*.sql"))
+    assert [f.name[:4] for f in files] == ["0001", "0002", "0003", "0004", "0005"]
+    for f in files:
+        m.check_runnable(f.name, f.read_bytes())

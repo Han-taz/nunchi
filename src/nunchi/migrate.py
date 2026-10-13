@@ -6,8 +6,14 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import psycopg
+from pglast import parse_sql
+from pglast.ast import Node, ReindexStmt, TransactionStmt, VacuumStmt
+from pglast.enums import TransactionStmtKind
+from pglast.parser import ParseError
+from pglast.visitors import Visitor
 
 from nunchi.config import Settings
 
@@ -15,29 +21,6 @@ _NAME = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 _MANIFEST = "SHA256SUMS"
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _LOCK_KEY = 7_262_024_001
-
-# Comments, quoted identifiers and every string flavour, scanned left to right so one
-# cannot hide inside another. A comment can nest in Postgres but this stops at the first
-# close, which only ever leaves more text visible as code.
-_LITERALS = re.compile(
-    r"""--[^\n]*
-    |/\*.*?\*/
-    |(?<![\w$])[Ee]'(?:[^'\\]|\\.|'')*'
-    |'(?:[^']|'')*'
-    |"(?:[^"]|"")*"
-    |(?<![\w$])\$\$.*?\$\$
-    |(?<![\w$])\$([A-Za-z_]\w*)\$.*?\$\1\$
-    """,
-    re.VERBOSE | re.DOTALL,
-)
-_TRANSACTION_CONTROL = re.compile(
-    r"(?:^|;)\s*(begin|end|commit\s+prepared|rollback\s+prepared|prepare\s+transaction"
-    r"|commit|rollback|abort|start\s+transaction)\b",
-    re.IGNORECASE,
-)
-# A SQL-standard function body ends in `; END`, which is not the COMMIT alias.
-_ATOMIC_BODY = re.compile(r"\bbegin\s+atomic\b.*?;\s*end\b", re.IGNORECASE | re.DOTALL)
-_CONCURRENTLY = re.compile(r"\bconcurrently\b", re.IGNORECASE)
 
 
 class MigrationError(Exception):
@@ -68,21 +51,47 @@ def read_manifest(directory: Path) -> dict[str, str]:
     return entries
 
 
+class _Unrunnable(Visitor):
+    """Records the first statement Postgres refuses to run inside a transaction block."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.found: str | None = None
+
+    def visit(self, ancestors: object, node: Node) -> None:
+        if self.found is not None:
+            return
+        if isinstance(node, TransactionStmt):
+            keyword = cast(TransactionStmtKind, node.kind).name.removeprefix("TRANS_STMT_")
+            self.found = (
+                f"{keyword.replace('_', ' ')} is not allowed; the runner supplies the transaction"
+            )
+        elif isinstance(node, VacuumStmt) and node.is_vacuumcmd:
+            self.found = "VACUUM cannot run inside the runner's transaction"
+        elif getattr(node, "concurrent", False) or (
+            isinstance(node, ReindexStmt)
+            and any(opt.defname == "concurrently" for opt in node.params or ())
+        ):
+            self.found = "CONCURRENTLY cannot run inside the runner's transaction"
+
+
 def check_runnable(name: str, sql: bytes) -> None:
-    """Refuse SQL that cannot run inside the runner's one transaction per migration."""
+    """Refuse SQL that cannot run inside the runner's one transaction per migration.
+
+    Postgres's own parser decides, so no string or comment trick can hide a statement.
+    """
     try:
-        text = sql.decode()
+        statements = parse_sql(sql.decode())
     except UnicodeDecodeError as err:
         msg = f"{name}: not valid UTF-8"
         raise MigrationError(msg) from err
-    code = _LITERALS.sub(" ", text)
-    control = _TRANSACTION_CONTROL.search(_ATOMIC_BODY.sub(" ", code))
-    if control is not None:
-        keyword = " ".join(control.group(1).upper().split())
-        msg = f"{name}: top-level {keyword} is not allowed; the runner supplies the transaction"
-        raise MigrationError(msg)
-    if _CONCURRENTLY.search(code) is not None:
-        msg = f"{name}: CONCURRENTLY cannot run inside the runner's transaction"
+    except ParseError as err:
+        msg = f"{name}: not parseable as PostgreSQL: {err}"
+        raise MigrationError(msg) from err
+    visitor = _Unrunnable()
+    visitor(statements)
+    if visitor.found is not None:
+        msg = f"{name}: {visitor.found}"
         raise MigrationError(msg)
 
 
