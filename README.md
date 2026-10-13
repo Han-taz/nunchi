@@ -48,7 +48,7 @@ MCP 서버는 별도 진입점이다. 읽기 도구만 있다: `list_stores`, `s
 ```bash
 NUNCHI_DATABASE_URL=postgres://... \
 NUNCHI_OIDC_ISSUERS='{"https://idp.example":{"tenant_id":"<uuid>","jwks_url":"https://idp.example/jwks"}}' \
-python -m nunchi.mcp   # http://127.0.0.1:8000/mcp (NUNCHI_MCP_HOST, NUNCHI_MCP_PORT, NUNCHI_MCP_PUBLIC_URL)
+python -m nunchi.mcp   # http://127.0.0.1:8000/mcp (NUNCHI_MCP_HOST, NUNCHI_MCP_PORT, NUNCHI_MCP_PUBLIC_URL, NUNCHI_MCP_ALLOWED_HOSTS = 허용 Host 목록, 기본 localhost)
 ```
 
 - 모든 요청에 `Authorization: Bearer <JWT>`가 필요하다. 에이전트로 일하려면 에이전트 토큰을 `X-Nunchi-Agent-Token` 헤더로 더한다.
@@ -83,7 +83,7 @@ nunchi 봇은 Mattermost 의 웹소켓으로 `:pushpin:` 반응과 `@nunchi` 멘
    - `MM_ACTION_URL`: Mattermost 가 버튼 클릭을 보낼 주소 (기본 `http://host.docker.internal:8787/actions`)
    - `MM_ACTION_SECRET`: 버튼 컨텍스트의 HMAC 비밀값. Mattermost 는 액션 호출에 서명하지 않으므로 이 값으로 위조를 막는다. 서명이 맞지 않으면 403 이고 결정은 일어나지 않는다.
    - `NUNCHI_TENANT_ID`
-3. `docker compose -f deploy/compose.yml --profile mattermost up -d mattermost-bot` 으로 올린다.
+3. `docker compose -f deploy/compose.yml --profile mattermost up -d mattermost-bot digest` 으로 올린다.
 4. 사용자는 `principal_identity` 에 `platform = 'mattermost'` 로 이어져 있어야 한다. 클릭한 사람이 그 이어진 사용자이고 큐레이터일 때만 승인된다.
 
 ## 기여 흐름

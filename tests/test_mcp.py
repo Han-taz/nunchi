@@ -207,3 +207,52 @@ def test_unknown_principal_is_refused(url: str) -> None:
             assert result.isError
 
     anyio.run(run)
+
+
+@pytest.fixture
+def docker_url(world: Pool) -> Iterator[str]:
+    app = build_server(
+        world, verifier(TENANT), allowed_hosts=("host.docker.internal",)
+    ).streamable_http_app()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    while not server.started:
+        time.sleep(0.01)
+    yield f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}/mcp"
+    server.should_exit = True
+    thread.join()
+
+
+INITIALIZE = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "t", "version": "0"},
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("host", "status"),
+    [
+        ("host.docker.internal:8000", 200),
+        ("localhost:8000", 200),
+        ("evil.example:8000", 421),
+        ("host.docker.internal.evil.example", 421),
+    ],
+)
+def test_host_header_must_be_an_allowed_host(docker_url: str, host: str, status: int) -> None:
+    response = httpx.post(
+        docker_url,
+        json=INITIALIZE,
+        headers={
+            "Host": host,
+            "Authorization": f"Bearer {mint(str(USER))}",
+            "Accept": "application/json, text/event-stream",
+        },
+    )
+    assert response.status_code == status
