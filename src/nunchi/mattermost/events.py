@@ -11,11 +11,20 @@ from uuid import UUID
 
 import httpx
 
-from nunchi.capture import CaptureContext, CaptureResult, Reconfirmed, Rejected, Skipped, capture
+from nunchi.capture import (
+    CaptureContext,
+    CaptureResult,
+    Created,
+    Reconfirmed,
+    Rejected,
+    Skipped,
+    capture,
+)
 from nunchi.db import Conn, Pool, request_tx
-from nunchi.domain.models import MemoryOrigin, SourceRef
+from nunchi.domain.models import MemoryOrigin, MemoryStatus, SourceRef
 from nunchi.embed import Embedder
-from nunchi.extract import ExtractionError, Extractor
+from nunchi.extract import ExtractionError, Extractor, ValueJudge
+from nunchi.mattermost.cards import Card, CardConfig, build_cards
 from nunchi.mattermost.client import Mattermost, room_facts
 
 PIN = "pushpin"
@@ -39,7 +48,15 @@ class Deps:
     client: Mattermost
     bot_user_id: str
     bot_username: str
+    cards: CardConfig
     embedder: Embedder | None = None
+    judge: ValueJudge | None = None
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    text: str
+    cards: tuple[Card, ...] = ()
 
 
 def resolve(deps: Deps, user_id: str) -> UUID | None:
@@ -75,16 +92,20 @@ def capture_post(deps: Deps, *, event_id: str, user_id: str, channel_id: str, po
     )
     try:
         with request_tx(deps.pool, user, None) as conn:
-            reply = _capture(conn, deps, event_id, text, ref, facts.origin)
+            outcome = _capture(conn, deps, event_id, text, ref, facts.origin)
     except ExtractionError:
-        reply = EXTRACT_FAILED
-    if reply is not None:
-        tell(channel_id, user_id, reply)
+        outcome = _Outcome(EXTRACT_FAILED)
+    if outcome is None:
+        return
+    tell(channel_id, user_id, outcome.text)
+    for card in outcome.cards:
+        dm = deps.client.direct_channel(deps.bot_user_id, card.mattermost_user)
+        deps.client.post(dm, "", {"attachments": [card.attachment]})
 
 
 def _capture(  # noqa: PLR0913, PLR0917
     conn: Conn, deps: Deps, event_id: str, text: str, ref: SourceRef, origin: MemoryOrigin
-) -> str | None:
+) -> _Outcome | None:
     """None means the event was redelivered and already handled. The claim shares the transaction
     with the capture, so a failure rolls both back and the retry runs again."""
     claimed = conn.execute("SELECT app_sec.claim_inbound_event(%s)", (event_id,)).fetchone()
@@ -97,11 +118,15 @@ def _capture(  # noqa: PLR0913, PLR0917
         (ref.workspace_id, ref.channel_id),
     ).fetchone()
     if bound is None:
-        return UNBOUND
+        return _Outcome(UNBOUND)
     context = CaptureContext(
         store_id=bound[0], origin=origin, source_refs=(ref,), today=date.today()
     )
-    return _reply(capture(conn, deps.extractor, text, context, deps.embedder))
+    result = capture(conn, deps.extractor, text, context, deps.embedder, judge=deps.judge)
+    cards: tuple[Card, ...] = ()
+    if isinstance(result, Created) and result.status is MemoryStatus.PROPOSED:
+        cards = build_cards(conn, deps.cards, result.memory_id, ref.uri)
+    return _Outcome(_reply(result), cards)
 
 
 def _reply(result: CaptureResult) -> str:

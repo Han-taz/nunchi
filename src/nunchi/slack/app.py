@@ -146,7 +146,8 @@ def _cards(conn: Conn, memory_id: UUID, link: str) -> tuple[_Dm, ...]:
     label = f"기밀 store 제안 #{memory_id}" if confidential else str(title)
     shown = label if confidential else f"*{title}*\n<{link}|원문>"
     rows = conn.execute(
-        "SELECT card_nonce, slack_user_id FROM app_sec.issue_slack_cards(%s)", (memory_id,)
+        "SELECT card_nonce, platform_user_id FROM app_sec.issue_dm_cards(%s, 'slack')",
+        (memory_id,),
     ).fetchall()
     cards: list[_Dm] = []
     for nonce, slack_user in rows:

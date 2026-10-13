@@ -1,4 +1,4 @@
-"""The capture pipeline (design v1.2 section 6), shared by Slack and MCP.
+"""The capture pipeline (design v1.2 section 6), shared by Mattermost and MCP.
 
 Every call runs on one request_tx connection, so the candidate search, the entity write and the
 proposal share a transaction: an error anywhere stores nothing."""

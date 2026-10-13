@@ -82,3 +82,6 @@ class Mattermost:
         response = self._http.post("/channels/direct", json=[user_a, user_b])
         response.raise_for_status()
         return str(response.json()["id"])
+
+    def post(self, channel_id: str, message: str, props: dict[str, Any]) -> None:
+        self._post("/posts", {"channel_id": channel_id, "message": message, "props": props})
