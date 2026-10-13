@@ -4,7 +4,7 @@ import asyncio
 import json
 import sys
 import time
-from datetime import date, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -118,7 +118,7 @@ async def story(directory: Path, url: str) -> None:
             store_id=STORE,
             subject_id=subject,
             attribute="담당자",
-            on=(date.today() - timedelta(days=1)).isoformat(),
+            on=(datetime.now(UTC).date() - timedelta(days=1)).isoformat(),
         )
         check("as_of yesterday -> 이민수", before["data"]["body"], "A사 담당자는 이민수")
         now = await call(
@@ -127,7 +127,7 @@ async def story(directory: Path, url: str) -> None:
             store_id=STORE,
             subject_id=subject,
             attribute="담당자",
-            on=date.today().isoformat(),
+            on=datetime.now(UTC).date().isoformat(),
         )
         check("as_of today -> 박민수", now["data"]["body"], "A사 담당자는 박민수")
 

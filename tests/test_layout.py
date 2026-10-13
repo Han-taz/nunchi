@@ -4,7 +4,7 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    "name", ["domain", "api", "mcp", "slack", "mattermost", "worker", "scim", "extract"]
+    "name", ["domain", "api", "mcp", "mattermost", "worker", "scim", "extract"]
 )
 def test_subpackage_is_importable(name: str) -> None:
     module = importlib.import_module(f"nunchi.{name}")
