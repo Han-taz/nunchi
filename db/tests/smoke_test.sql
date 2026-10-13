@@ -512,7 +512,7 @@ CREATE FUNCTION t.exec_list(r text DEFAULT 'app_rw') RETURNS text LANGUAGE sql A
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.issue_card,app_sec.issue_slack_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
+  'app_sec.add_entity_alias,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.entity_matches,app_sec.issue_card,app_sec.issue_slack_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
 SELECT t.eq('P3d nunchi_worker executes exactly the four worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
@@ -1299,6 +1299,14 @@ BEGIN
     '00000000-0000-0000-0000-0000000e0a01', '  담당자 ', '2026-03-01', '2026-03-01');
 END $do$;
 SELECT t.eq('N20 attribute is normalized by the trigger', $q$SELECT '[' || attribute || ']' FROM memory WHERE id = t.mid(300)$q$, '[담당자]');
+DO $do$
+BEGIN
+  IF to_regclass('entity') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_from, last_confirmed_at)
+  VALUES (t.mid(303), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f002', 'fact', 'active',
+    'hidden', 'x', '[{"uri":"https://crm/acct/A"}]', '00000000-0000-0000-0000-0000000000a1',
+    '00000000-0000-0000-0000-0000000e0a01', '비밀 속성', '2026-03-01', '2026-03-01');
+END $do$;
 SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.eq('N21a alias "A Corp" (case and spacing differ) resolves to A사', $q$SELECT app_sec.resolve_entity('a corp')::text$q$, '00000000-0000-0000-0000-0000000e0a01');
@@ -1307,6 +1315,14 @@ SELECT t.eq('N21c unknown name resolves to nothing', $q$SELECT app_sec.resolve_e
 SELECT t.eq('N21e create_entity makes a new entity', $q$SELECT (app_sec.create_entity(' New  Corp ', 'org') IS NOT NULL)::text$q$, 'true');
 SELECT t.eq('N21g it resolves by a differently spaced name', $q$SELECT (app_sec.resolve_entity('new corp') IS NOT NULL)::text$q$, 'true');
 SELECT t.eq('N21f create_entity on an existing alias returns that entity and adds no row', $q$SELECT (app_sec.create_entity('A CORP', 'org')::text) || '/' || (SELECT count(*) FROM entity WHERE canonical_name ILIKE '%corp%')$q$, '00000000-0000-0000-0000-0000000e0a01/1');
+DO $do$ BEGIN PERFORM app_sec.add_entity_alias('00000000-0000-0000-0000-0000000e0a01', '에이 사'); EXCEPTION WHEN OTHERS THEN NULL; END $do$;
+SELECT t.eq('N21h add_entity_alias makes a new spelling resolve to that entity', $q$SELECT app_sec.resolve_entity('에이  사')::text$q$, '00000000-0000-0000-0000-0000000e0a01');
+DO $do$ BEGIN PERFORM app_sec.add_entity_alias(app_sec.create_entity('Other Corp', 'org'), 'a corp'); EXCEPTION WHEN OTHERS THEN NULL; END $do$;
+SELECT t.eq('N21i add_entity_alias on a taken alias leaves it with its owner', $q$SELECT app_sec.resolve_entity('a corp')::text$q$, '00000000-0000-0000-0000-0000000e0a01');
+SELECT t.err('N21j add_entity_alias refuses an unknown entity', $q$SELECT app_sec.add_entity_alias('00000000-0000-0000-0000-00000000dead', 'x')$q$, '42501');
+SELECT t.eq('N21k entity_matches ranks the exact alias first', $q$SELECT alias_norm || '/' || sim FROM app_sec.entity_matches('A Corp', 3) LIMIT 1$q$, 'a corp/1');
+SELECT t.eq('N21l attribute_matches finds the live attribute of the subject', $q$SELECT attribute || '/' || sim FROM app_sec.attribute_matches('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', '담당자', 5)$q$, '담당자/1');
+SELECT t.eq('N21m attribute_matches shows nothing from a store the caller cannot read', $q$SELECT count(*)::text FROM app_sec.attribute_matches('00000000-0000-0000-0000-00000000f002', '00000000-0000-0000-0000-0000000e0a01', '비밀 속성', 5)$q$, '0');
 SELECT t.err('N23 same key, same value (extra whitespace): no new row', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute)
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','  이OO ','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
 SELECT t.eq('N23a rows for the key/state/last op', $q$SELECT (SELECT count(*) FROM memory WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = '담당자') || '/' || t.state(t.mid(300)) || '/' || t.lastop(t.mid(300))$q$, '1/active/v2/reconfirm');

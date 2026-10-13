@@ -15,7 +15,7 @@ from uuid import UUID
 from eval import score
 from eval.corpus import Message, Query, load_messages, load_queries
 from eval.db import CONTRIBUTOR, CURATORS, STORE, fresh_database
-from eval.oracle import OracleExtractor
+from eval.oracle import ConceptEmbedder, OracleExtractor
 from eval.score import Outcome
 from nunchi.capture import (
     CaptureContext,
@@ -28,6 +28,7 @@ from nunchi.config import Settings
 from nunchi.db import Conn, Pool, open_pool, request_tx
 from nunchi.domain import repo
 from nunchi.domain.models import MemoryOrigin, MemoryStatus, SourceRef
+from nunchi.embed import Embedder, embedder_from_settings
 from nunchi.extract import ExtractionError, Extractor, NullExtractor, build_extractor
 
 RESULTS = Path(__file__).parent / "results"
@@ -43,7 +44,9 @@ def _describe(conn: Conn, outcome_id: UUID) -> tuple[str, UUID | None, UUID | No
     return str(row[0]), row[1], row[2]  # type: ignore[return-value]
 
 
-def replay_one(pool: Pool, extractor: Extractor, msg: Message) -> Outcome:
+def replay_one(
+    pool: Pool, extractor: Extractor, msg: Message, embedder: Embedder | None = None
+) -> Outcome:
     context = CaptureContext(
         store_id=STORE,
         origin=MemoryOrigin.EXTERNAL,
@@ -52,7 +55,7 @@ def replay_one(pool: Pool, extractor: Extractor, msg: Message) -> Outcome:
     )
     try:
         with request_tx(pool, CONTRIBUTOR, None) as conn:
-            result = capture(conn, extractor, msg.filled, context)
+            result = capture(conn, extractor, msg.filled, context, embedder)
             if isinstance(result, Created | Reconfirmed):
                 db_kind, subject_id, conflict = _describe(conn, result.memory_id)
     except ExtractionError:
@@ -105,12 +108,16 @@ def run_search(pool: Pool, queries: list[Query], outcomes: list[Outcome]) -> lis
 
 
 def run_eval(
-    admin_url: str, extractor: Extractor, messages: list[Message], queries: list[Query]
+    admin_url: str,
+    extractor: Extractor,
+    messages: list[Message],
+    queries: list[Query],
+    embedder: Embedder | None = None,
 ) -> dict[str, Any]:
     with fresh_database(admin_url) as app_url:
         pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
         try:
-            outcomes = [replay_one(pool, extractor, m) for m in messages]
+            outcomes = [replay_one(pool, extractor, m, embedder) for m in messages]
             searched = run_search(pool, queries, outcomes)
             with request_tx(pool, CURATORS[0], None) as conn:
                 row = conn.execute("SELECT count(*) FROM entity").fetchone()
@@ -163,22 +170,34 @@ def table(report: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m eval.run")
     parser.add_argument("--db", required=True, help="superuser URL of a Postgres server")
-    parser.add_argument("--extractor", choices=("claude", "fake"), default="claude")
+    parser.add_argument("--extractor", choices=("claude", "fake", "noisy"), default="claude")
+    parser.add_argument(
+        "--embedder",
+        choices=("none", "concept", "env"),
+        default="none",
+        help="concept: oracle-grade wiring check; env: the NUNCHI_EMBEDDING_* endpoint",
+    )
     parser.add_argument("--limit", type=int, help="replay only the first N messages")
     parser.add_argument("--out-dir", type=Path, default=RESULTS)
     args = parser.parse_args(argv)
     messages = load_messages(args.limit)
     extractor: Extractor
-    if args.extractor == "fake":
-        extractor = OracleExtractor(load_messages())
+    if args.extractor in ("fake", "noisy"):
+        extractor = OracleExtractor(load_messages(), noisy=args.extractor == "noisy")
     else:
         extractor = build_extractor(os.environ)
         if isinstance(extractor, NullExtractor):
             sys.stderr.write("eval: ANTHROPIC_API_KEY is not set; use --extractor fake\n")
             return 2
-    report = run_eval(args.db, extractor, messages, load_queries())
+    embedder: Embedder | None = None
+    if args.embedder == "concept":
+        embedder = ConceptEmbedder()
+    elif args.embedder == "env":
+        embedder = embedder_from_settings(Settings(database_url="unused"))
+    report = run_eval(args.db, extractor, messages, load_queries(), embedder)
     report["config"] = {
         "extractor": args.extractor,
+        "embedder": args.embedder,
         "model": os.environ.get("NUNCHI_EXTRACT_MODEL", "default"),
         "base_url": os.environ.get("ANTHROPIC_BASE_URL", "default"),
     }

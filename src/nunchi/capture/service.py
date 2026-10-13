@@ -7,17 +7,17 @@ from datetime import date
 from typing import Literal
 from uuid import UUID
 
+from nunchi.capture.resolve import ResolveConfig, resolve_attribute, resolve_subject
 from nunchi.db import Conn
 from nunchi.domain import repo
 from nunchi.domain.models import Frozen, MemoryOrigin, MemoryStatus, SourceRef
 from nunchi.embed import Embedder
-from nunchi.extract import Candidate, ExtractContext, Extractor, to_propose_request
+from nunchi.extract import Candidate, ExtractContext, Extractor, ProposalDraft, to_propose_request
 from nunchi.gate import Verdict, evaluate_pair
 from nunchi.gate.rules import Action
 
 _CANDIDATES = 5
 _QUERY_CHARS = 500
-_ENTITY_KIND = "subject"
 _LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL)
 
 
@@ -84,22 +84,30 @@ def _candidates(
     )
 
 
-def _resolve_or_create(conn: Conn, name: str) -> UUID:
-    row = conn.execute("SELECT app_sec.resolve_entity(%s)", (name,)).fetchone()
-    if row is not None and row[0] is not None:
-        return row[0]  # type: ignore[return-value]
-    created = conn.execute("SELECT app_sec.create_entity(%s, %s)", (name, _ENTITY_KIND)).fetchone()
-    assert created is not None  # noqa: S101 - a SELECT of a function always returns one row
-    return created[0]  # type: ignore[return-value]
+def _resolve_key(
+    conn: Conn,
+    draft: ProposalDraft,
+    store_id: UUID,
+    embedder: Embedder | None,
+    cfg: ResolveConfig,
+) -> tuple[UUID | None, ProposalDraft]:
+    """The entity the draft is about and the draft with its attribute canonicalized."""
+    if draft.subject_name is None or draft.attribute is None:
+        return None, draft
+    subject_id = resolve_subject(conn, draft.subject_name, embedder, cfg)
+    attribute = resolve_attribute(conn, store_id, subject_id, draft.attribute, embedder, cfg)
+    return subject_id, draft.model_copy(update={"attribute": attribute})
 
 
-def capture(
+def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the two optional services
     conn: Conn,
     extractor: Extractor,
     source_text: str,
     context: CaptureContext,
     embedder: Embedder | None = None,
+    resolve: ResolveConfig | None = None,
 ) -> CaptureResult:
+    cfg = resolve or ResolveConfig()
     candidates = _candidates(conn, source_text, context.store_id, embedder)
     draft = extractor.extract(
         source_text,
@@ -118,6 +126,7 @@ def capture(
     if gate.verdict is Verdict.REJECT:
         return Rejected(reasons=tuple(f.rule_id for f in gate.flags if f.action is Action.REJECT))
 
+    subject_id, draft = _resolve_key(conn, draft, context.store_id, embedder, cfg)
     request = to_propose_request(
         draft,
         ExtractContext(
@@ -126,7 +135,7 @@ def capture(
             today=context.today,
             store_id=context.store_id,
         ),
-        lambda name: _resolve_or_create(conn, name),
+        lambda _name: subject_id,
     )
     flags = tuple(f.rule_id for f in gate.flags)
     outcome = repo.propose(conn, request.model_copy(update={"gate_flags": flags}))

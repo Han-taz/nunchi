@@ -54,7 +54,10 @@ def _is_high_entropy(m: re.Match[str]) -> bool:
     return _entropy(m["value"]) >= _ENTROPY_MIN_BITS
 
 
-_KEYWORDS = "api[_-]?key|secret|token|passw(?:or)?d|passwd|pwd|credential|비밀번호|비번|시크릿|토큰"
+_KEYWORDS = (
+    "api[_-]?key|secret|token|passw(?:or)?d|passwd|pwd|pw|credential"
+    "|비밀번호|비번|패스워드|시크릿|토큰"
+)
 
 
 RULES: tuple[Rule, ...] = (
