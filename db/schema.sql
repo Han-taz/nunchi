@@ -642,6 +642,7 @@ CREATE TABLE principal_identity (
 );
 
 -- DM 과 mpim 은 kind 에 없고 (enum), Slack 의 채널 id 는 C 로 시작하는 것만 받는다 (DM 은 D, mpim 은 G).
+-- Mattermost 채널 id 는 소문자 영숫자 26자다. 채널 종류(O/P 만 바인딩, D/G 는 불가)는 id 에 없으므로 봇이 channel.type 으로 거른다.
 CREATE TABLE room_binding (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id uuid NOT NULL,
@@ -661,7 +662,13 @@ CREATE TABLE room_binding (
   FOREIGN KEY (tenant_id, confirmed_by) REFERENCES principal (tenant_id, id),
   CONSTRAINT binding_two_people CHECK (confirmed_by IS null OR confirmed_by <> bound_by),
   CONSTRAINT binding_confirm_pair CHECK ((confirmed_by IS null) = (confirmed_at IS null)),
-  CONSTRAINT binding_slack_channel_only CHECK (platform <> 'slack' OR channel_id ~ '^C[A-Z0-9]+$')
+  CONSTRAINT binding_channel_id_by_platform CHECK (
+    CASE platform
+      WHEN 'slack' THEN channel_id ~ '^C[A-Z0-9]+$'
+      WHEN 'mattermost' THEN channel_id ~ '^[a-z0-9]{26}$'
+      ELSE true
+    END
+  )
 );
 CREATE UNIQUE INDEX room_binding_live_idx ON room_binding (platform, workspace_id, channel_id) WHERE revoked_at IS null;
 
@@ -771,8 +778,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
 $$;
 
 -- 제안의 출처에서 서버가 정하는 값. origin 은 클라이언트가 올리기만 할 수 있고 내릴 수 없다.
---  - slack 방 출처(system = 'slack' + workspace_id + channel_id): 이 store 에 활성 바인딩이 없으면 23503.
---    Slack Connect 이거나 외부 구성원이 있는 방이면 origin = external. containment 는 room_containment 의 결과다.
+--  - 방 출처(system = 'slack' 또는 'mattermost' + workspace_id + channel_id): 이 store 에 활성 바인딩이 없으면 23503.
+--    Slack Connect / Mattermost shared channel(kind = connect)이거나 외부 구성원이 있는 방이면 origin = external.
+--    containment 는 room_containment 의 결과다.
 --  - 그 밖의 출처 host: 이 테넌트에 source_system 이 등록돼 있는데 is_internal 인 패턴에 맞지 않으면 origin = external.
 --    등록이 하나도 없는 테넌트는 host 분류를 아직 설정하지 않은 것으로 보고 host 규칙을 적용하지 않는다.
 -- containment 는 방 출처가 있을 때만 'ok' / 'unverified' 를 돌려주고 없으면 NULL 이다.
@@ -789,9 +797,9 @@ BEGIN
     IF x ->> 'uri' LIKE 'memory://%' THEN
       CONTINUE;
     END IF;
-    IF x ->> 'system' = 'slack' AND x ? 'workspace_id' AND x ? 'channel_id' THEN
+    IF x ->> 'system' IN ('slack', 'mattermost') AND x ? 'workspace_id' AND x ? 'channel_id' THEN
       SELECT * INTO b FROM room_binding AS r
-      WHERE r.tenant_id = m.tenant_id AND r.platform = 'slack' AND r.workspace_id = x ->> 'workspace_id' AND r.channel_id = x ->> 'channel_id'
+      WHERE r.tenant_id = m.tenant_id AND r.platform = x ->> 'system' AND r.workspace_id = x ->> 'workspace_id' AND r.channel_id = x ->> 'channel_id'
         AND r.store_id = m.store_id AND r.confirmed_by IS NOT NULL AND r.revoked_at IS NULL;
       IF NOT FOUND THEN
         RAISE EXCEPTION 'room is not bound to this store' USING ERRCODE = '23503';
