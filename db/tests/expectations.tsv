@@ -302,6 +302,12 @@ N21d	-> 23505	fail	alias unique per tenant after normalization
 N21e	= true	fail	create_entity makes an entity
 N21g	= true	fail	create_entity then resolve_entity finds it
 N21f	= 00000000-0000-0000-0000-0000000e0a01/1	fail	create_entity is idempotent on an existing alias
+N21h	= 00000000-0000-0000-0000-0000000e0a01	fail	add_entity_alias makes a new spelling resolve
+N21i	= 00000000-0000-0000-0000-0000000e0a01	fail	add_entity_alias keeps a taken alias with its owner
+N21j	-> 42501	fail	add_entity_alias refuses an unknown entity
+N21k	= a corp/1	fail	entity_matches ranks the exact alias first
+N21l	= 담당자/1	fail	attribute_matches finds the live attribute
+N21m	= 0	fail	attribute_matches hides a store the caller cannot read
 N22	-> 23505	fail	partial unique index blocks a second live row
 N22b	(ok)	fail	same key in another store is allowed
 N23	(ok)	fail	same key and value inserts no row

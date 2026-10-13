@@ -1,11 +1,15 @@
+from datetime import date
 from uuid import UUID
 
 import pytest
 from eval import score
 from eval.corpus import Message, Query, load_messages, load_queries
-from eval.oracle import OracleExtractor
+from eval.oracle import ConceptEmbedder, OracleExtractor
 from eval.run import run_eval, table
 from eval.score import Outcome
+
+from nunchi.domain.models import MemoryOrigin
+from nunchi.extract import ExtractContext
 
 
 def test_corpus_labels_are_consistent() -> None:
@@ -70,3 +74,31 @@ def test_harness_runs_five_messages_with_the_oracle(admin_url: str) -> None:
     assert report["extraction"]["unapproved"] == 0
     assert report["search"] == {"recall@1": 1.0, "recall@5": 1.0}
     assert "extraction precision        1.0" in table(report)
+
+
+def test_noisy_oracle_restates_with_the_next_spelling() -> None:
+    messages = [m for m in load_messages() if m.subject == "A사" and m.attribute == "담당자"]
+    oracle = OracleExtractor(load_messages(), noisy=True)
+    ctx = ExtractContext(
+        origin=MemoryOrigin.EXTERNAL,
+        today=date(2026, 10, 13),
+        store_id=UUID(int=1),
+    )
+    spelled = []
+    for m in messages[:5]:
+        draft = oracle.extract(m.filled, ctx)
+        assert draft is not None
+        spelled.append((draft.subject_name, draft.attribute))
+    assert spelled == [
+        ("A사", "담당자"),
+        ("에이사", "컨택"),
+        ("A Corp", "담당 PM"),
+        ("에이 사", "컨택"),
+        ("에이사", "담당 PM"),
+    ]
+
+
+def test_concept_embedder_puts_every_spelling_on_one_axis() -> None:
+    a, b, c = ConceptEmbedder().embed(["A사", "에이사", "담당 pm"], "query")
+    assert a == b
+    assert a != c

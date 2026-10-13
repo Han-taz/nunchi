@@ -20,7 +20,7 @@ from nunchi.extract.draft import (
 )
 from nunchi.extract.null import NullExtractor
 
-MODEL = "claude-opus-5-5"
+MODEL = "claude-haiku-5-5"
 MAX_TOKENS = 4000
 
 SYSTEM_PROMPT = """\
@@ -177,7 +177,7 @@ def build_extractor(env: Mapping[str, str] | None = None) -> Extractor:
     """ClaudeExtractor when ANTHROPIC_API_KEY is set in the environment, else NullExtractor.
 
     NUNCHI_EXTRACT_MODEL overrides the model id (a LiteLLM proxy names it
-    "anthropic/claude-opus-5-5"). The SDK itself reads ANTHROPIC_BASE_URL."""
+    "anthropic/claude-haiku-5-5"). The SDK itself reads ANTHROPIC_BASE_URL."""
     source = os.environ if env is None else env
     key = source.get("ANTHROPIC_API_KEY")
     if not key:
