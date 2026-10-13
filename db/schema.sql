@@ -39,6 +39,15 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- ── 워커 접속 역할: 기본은 NOLOGIN. 로그인 비밀번호는 배포(compose seed)가 ALTER ROLE 로 건다. 표 권한은 없고 아래 두 함수의 EXECUTE 뿐이다 ──
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nunchi_worker') THEN
+    CREATE ROLE nunchi_worker NOLOGIN NOBYPASSRLS NOINHERIT;
+  ELSE
+    ALTER ROLE nunchi_worker NOBYPASSRLS NOINHERIT;
+  END IF;
+END $$;
+
 -- 임시 테이블로 관계 조회를 가로채는 길을 닫는다. 기본 권한은 PUBLIC 에 있어서 app_rw 한 명만 회수해서는 효과가 없다.
 -- 이 데이터베이스의 모든 역할에서 회수한다. 임시 테이블이 필요한 관리 작업은 소유자(superuser)로 하거나 따로 GRANT 한다.
 DO $$ BEGIN
@@ -1373,6 +1382,9 @@ REVOKE ALL ON FUNCTION app_sec.freshness_days(uuid, memory_kind) FROM public, ap
 REVOKE ALL ON FUNCTION app_sec.is_stale(memory_status, uuid, memory_kind, timestamptz) FROM public, app_rw;
 REVOKE ALL ON FUNCTION app_sec.mark_expired() FROM public, app_rw;
 REVOKE ALL ON FUNCTION app_sec.stale_memories(integer) FROM public, app_rw;
+GRANT USAGE ON SCHEMA app_sec TO nunchi_worker;
+GRANT EXECUTE ON FUNCTION app_sec.mark_expired() TO nunchi_worker;
+GRANT EXECUTE ON FUNCTION app_sec.stale_memories(integer) TO nunchi_worker;
 
 -- ── 검색: pg_trgm (v1.2 §5) ──
 -- 한국어는 조사가 붙고 띄어쓰기가 흔들려서 simple FTS 가 '담당자' 로 '담당자는' 을 못 찾는다. trigram 은 부분 문자열로 맞는다.
