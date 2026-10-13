@@ -350,7 +350,8 @@ jobs:
       - name: mypy --strict
         run: uv run mypy --strict src tests
       - name: deptry
-        run: uv run deptry .
+        # gate-integrity-lint.py imports PyYAML from .github/tools/requirements.txt, not from the app
+        run: uv run deptry . --extend-exclude 'scripts/ci/gate-integrity-lint\.py'
 
   app-tests:
     name: app-tests

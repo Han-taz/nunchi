@@ -91,7 +91,7 @@ case_ "yaml tag" 'persist-credentials: false' 'persist-credentials: !!bool false
 case_ "merge key" "$ENVLINE" "$ENVLINE${ENVK}<<: {PATH: /x}" 'merge keys (<<) are not allowed'
 case_ "complex key" "$ENVLINE" "$ENVLINE${ENVK}? [PATH, x]${ENVK}: /x" 'complex (non-scalar) mapping keys are not allowed'
 case_ "second yaml document" 'permissions: {}' $'permissions: {}\n---\nname: second' 'multi-document YAML is not allowed'
-case_ "unparseable yaml" "$ENVLINE" "$ENVLINE${ENVK}: : :" 'cannot parse the workflow'
+case_ "unparsable yaml" "$ENVLINE" "$ENVLINE${ENVK}: : :" 'cannot parse the workflow'
 printf 'name: \xff\xfe\n' >"$tmp/w.yml"
 raw_ "invalid utf-8" 'cannot check the workflow: UnicodeDecodeError'
 : >"$tmp/w.yml"
