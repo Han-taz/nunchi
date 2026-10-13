@@ -131,6 +131,8 @@ class MemorySummary(Frozen):
 
 class SearchHit(MemorySummary):
     score: float
+    stale: bool
+    last_confirmed_at: datetime
 
 
 class Memory(MemorySummary):
