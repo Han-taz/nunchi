@@ -153,7 +153,7 @@ def world(fresh_db: str, pool: Pool) -> World:
         )
         bind(conn, ROOM, "public", True)
         bind(conn, OFF, "private", False)
-        bind(conn, DM, "private", True)  # a mis-bound DM id must still never be read
+        bind(conn, DM, "private", True)  # a DM id bound by mistake must still never be read
     fake = FakeMattermost()
     client = Mattermost("http://mm", "tok", "https://mm.example", httpx.MockTransport(fake))
     extractor = WindowExtractor()
