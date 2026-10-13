@@ -174,8 +174,14 @@ def _parse_reply(text: str) -> _Reply:
 
 
 def build_extractor(env: Mapping[str, str] | None = None) -> Extractor:
-    """ClaudeExtractor when ANTHROPIC_API_KEY is set in the environment, else NullExtractor."""
-    key = (os.environ if env is None else env).get("ANTHROPIC_API_KEY")
+    """ClaudeExtractor when ANTHROPIC_API_KEY is set in the environment, else NullExtractor.
+
+    NUNCHI_EXTRACT_MODEL overrides the model id (a LiteLLM proxy names it
+    "anthropic/claude-opus-5-5"). The SDK itself reads ANTHROPIC_BASE_URL."""
+    source = os.environ if env is None else env
+    key = source.get("ANTHROPIC_API_KEY")
     if not key:
         return NullExtractor()
-    return ClaudeExtractor(anthropic.Anthropic(api_key=key))
+    return ClaudeExtractor(
+        anthropic.Anthropic(api_key=key), source.get("NUNCHI_EXTRACT_MODEL") or MODEL
+    )

@@ -138,6 +138,10 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 - `pr-size`: `uv.lock`은 같은 PR에서 `pyproject.toml`이 바뀐 경우에만 줄 수가 면제다. 다른 잠금 파일과 같은 이유(생성 파일, 리뷰어는 매니페스트를 본다)이며, 같은 잠금 파일 바이트 한도(UTF-8 텍스트, 파일당 2 MiB, 합계 4 MiB)를 따른다.
 - `app-tests`의 100% 커버리지는 스켈레톤이 작을 때의 기준이다. 코드가 늘면 `fail_under`를 낮추지 말고 diff-cover 80%를 주 게이트로 삼을지 별도 PR에서 정한다. `if __name__ == "__main__"` 줄만 커버리지에서 제외한다.
 
+## 메모리 품질 평가 (`eval/`)
+
+`python -m eval.run --db URL`은 CI에서 돌지 않는다. 실제 모델 호출이 필요하고 결과가 비결정적이라 통과/실패 기준을 둘 수 없기 때문이다. `eval/`은 앱 패키지가 아니므로 커버리지(`source = ["nunchi"]`)와 뮤테이션(`source_paths = ["src/nunchi/"]`)에서 빠진다. ruff, mypy, deptry는 그대로 적용된다. `tests/test_eval_smoke.py`가 가짜 추출기로 메시지 5개를 돌려 하네스가 썩지 않게 한다.
+
 ## 아직 적용 대상이 없는 게이트
 
 | 게이트 | 도구 | 기준 |

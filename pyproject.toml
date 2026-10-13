@@ -68,6 +68,7 @@ addopts = "-W error --strict-markers --cov=nunchi --cov-branch --cov-report=term
 markers = ["db: needs the Postgres server named by NUNCHI_TEST_ADMIN_URL"]
 
 [tool.coverage.run]
+# eval/ (memory-quality harness, needs real model calls) is not app code and stays out of coverage
 source = ["nunchi"]
 
 [tool.coverage.report]
