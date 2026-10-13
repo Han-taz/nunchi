@@ -17,6 +17,7 @@ dependencies = [
   "anyio>=4.15.1",
   "starlette>=0.40",
   "uvicorn>=0.54.0",
+  "slack-bolt>=1.30.0",
 ]
 
 [dependency-groups]
