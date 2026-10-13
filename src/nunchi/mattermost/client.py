@@ -1,6 +1,7 @@
 """Mattermost REST client: the few calls capture needs. Synchronous, with an injectable transport
 so tests run against a fake server and never open a socket."""
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,8 +49,8 @@ class Mattermost:
         self._site = site_url.rstrip("/")
         self._team_names: dict[str, str] = {}
 
-    def _get(self, path: str) -> dict[str, Any]:
-        response = self._http.get(path)
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        response = self._http.get(path, params=params)
         response.raise_for_status()
         return response.json()  # type: ignore[no-any-return]
 
@@ -85,3 +86,31 @@ class Mattermost:
 
     def post(self, channel_id: str, message: str, props: dict[str, Any]) -> None:
         self._post("/posts", {"channel_id": channel_id, "message": message, "props": props})
+
+    def channel_posts(
+        self, channel_id: str, since: int, per_page: int = 200
+    ) -> Iterator[dict[str, Any]]:
+        """Posts changed since `since` (ms), paged, as the server returns them. Stops when a page
+        adds no post it has not shown, so a server that ignores `page` cannot loop forever."""
+        seen: set[str] = set()
+        page = 0
+        while True:
+            body = self._get(
+                f"/channels/{channel_id}/posts",
+                {"since": since, "page": page, "per_page": per_page},
+            )
+            fresh = [i for i in body["order"] if i not in seen]
+            seen.update(fresh)
+            yield from (body["posts"][i] for i in fresh)
+            if len(body["order"]) < per_page or not fresh:
+                return
+            page += 1
+
+    def thread(self, root_id: str) -> list[dict[str, Any]]:
+        body = self._get(f"/posts/{root_id}/thread")
+        return list(body["posts"].values())
+
+    def usernames(self, user_ids: list[str]) -> dict[str, str]:
+        response = self._http.post("/users/ids", json=user_ids)
+        response.raise_for_status()
+        return {u["id"]: u["username"] for u in response.json()}
