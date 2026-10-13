@@ -653,16 +653,30 @@ BEGIN
 END $$;
 
 -- 정족수: 이 전이를 뒷받침하는 review(verdict = 전이의 op)의 서로 다른 비저자 reviewer 수와 필요한 수.
--- 활성화(to = active)는 등급의 approvals_needed, 반려/회수는 1. 호출자 권한으로 돌아 RLS 가 그대로 적용된다.
+-- 결정 시점에 reviewer(와 via_agent)가 지금도 그 store 의 curator 인 review 만 센다: 역할을 잃은 curator 의 이전 승인은 세지 않는다.
+-- 다른 사람의 grant 를 읽어야 해서 SECURITY DEFINER 이고, 호출자가 그 store 의 curator 일 때만 0 이상을 돌려준다(그 외는 0).
+-- 활성화(to = active)는 등급의 approvals_needed, 반려/회수는 1.
 CREATE FUNCTION app_sec.quorum(p_mem memory, p_to memory_status) RETURNS TABLE (have integer, needed integer)
-LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT
     (
-      SELECT count(DISTINCT v.reviewer_id)::integer FROM review AS v
+      SELECT count(DISTINCT v.reviewer_id)::integer FROM review AS v, memory AS m
       WHERE
-        v.memory_id = p_mem.id
-        AND v.verdict = (SELECT t.op::text FROM memory_transition AS t WHERE t.from_status = p_mem.status AND t.to_status = p_to)
-        AND v.reviewer_id NOT IN (p_mem.created_by, coalesce(p_mem.on_behalf_of, p_mem.created_by))
+        m.id = p_mem.id
+        AND m.store_id IN (SELECT app_sec.my_stores('curator'))
+        AND v.memory_id = m.id
+        AND v.verdict = (SELECT t.op::text FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = p_to)
+        AND v.reviewer_id NOT IN (m.created_by, coalesce(m.on_behalf_of, m.created_by))
+        AND EXISTS (
+          SELECT 1 FROM store_grant AS g
+          WHERE g.store_id = m.store_id AND g.tenant_id = m.tenant_id AND g.role = 'curator' AND g.principal_id IN (SELECT app_sec.closure(v.reviewer_id))
+        )
+        AND (
+          v.via_agent_id IS NULL OR EXISTS (
+            SELECT 1 FROM store_grant AS g
+            WHERE g.store_id = m.store_id AND g.tenant_id = m.tenant_id AND g.role = 'curator' AND g.principal_id IN (SELECT app_sec.closure(v.via_agent_id))
+          )
+        )
     ),
     CASE WHEN p_to = 'active' THEN (SELECT r.approvals_needed FROM approval_tier_rule AS r WHERE r.tier = p_mem.tier)::integer ELSE 1 END
 $$;

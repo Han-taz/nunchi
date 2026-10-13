@@ -41,14 +41,26 @@ ADD COLUMN via_agent_id uuid REFERENCES principal (id),
 ADD COLUMN card_nonce uuid REFERENCES approval_card (nonce);
 
 CREATE FUNCTION app_sec.quorum(p_mem memory, p_to memory_status) RETURNS TABLE (have integer, needed integer)
-LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT
     (
-      SELECT count(DISTINCT v.reviewer_id)::integer FROM review AS v
+      SELECT count(DISTINCT v.reviewer_id)::integer FROM review AS v, memory AS m
       WHERE
-        v.memory_id = p_mem.id
-        AND v.verdict = (SELECT t.op::text FROM memory_transition AS t WHERE t.from_status = p_mem.status AND t.to_status = p_to)
-        AND v.reviewer_id NOT IN (p_mem.created_by, coalesce(p_mem.on_behalf_of, p_mem.created_by))
+        m.id = p_mem.id
+        AND m.store_id IN (SELECT app_sec.my_stores('curator'))
+        AND v.memory_id = m.id
+        AND v.verdict = (SELECT t.op::text FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = p_to)
+        AND v.reviewer_id NOT IN (m.created_by, coalesce(m.on_behalf_of, m.created_by))
+        AND EXISTS (
+          SELECT 1 FROM store_grant AS g
+          WHERE g.store_id = m.store_id AND g.tenant_id = m.tenant_id AND g.role = 'curator' AND g.principal_id IN (SELECT app_sec.closure(v.reviewer_id))
+        )
+        AND (
+          v.via_agent_id IS NULL OR EXISTS (
+            SELECT 1 FROM store_grant AS g
+            WHERE g.store_id = m.store_id AND g.tenant_id = m.tenant_id AND g.role = 'curator' AND g.principal_id IN (SELECT app_sec.closure(v.via_agent_id))
+          )
+        )
     ),
     CASE WHEN p_to = 'active' THEN (SELECT r.approvals_needed FROM approval_tier_rule AS r WHERE r.tier = p_mem.tier)::integer ELSE 1 END
 $$;

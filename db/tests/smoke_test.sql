@@ -998,5 +998,45 @@ SELECT t.eq('G4d demoted human, next low-risk proposal', $q$SELECT tier || '/' |
 COMMIT;
 RESET ROLE;
 
+-- G3y, G3z) 정족수는 결정 시점의 curator 만 센다: Heidi 가 승인한 뒤 grant 를 잃으면 그 승인은 세지 않고, Ivan 이 승인해도 1/2 로 대기한다.
+-- 현재 curator 두 명(Ivan, Judy)이면 active 가 된다. 새 표가 없는 v1.0 스키마에서는 카드 INSERT 가 실패해 두 시험 모두 실패한다.
+INSERT INTO principal (id, tenant_id, kind, external_id, display_name) VALUES
+ ('00000000-0000-0000-0000-0000000000f7','00000000-0000-0000-0000-000000000001','user','heidi','Heidi(영업 큐레이터4)'),
+ ('00000000-0000-0000-0000-0000000000f8','00000000-0000-0000-0000-000000000001','user','ivan','Ivan(영업 큐레이터5)'),
+ ('00000000-0000-0000-0000-0000000000f9','00000000-0000-0000-0000-000000000001','user','judy','Judy(영업 큐레이터6)');
+INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
+ ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f7','curator','00000000-0000-0000-0000-000000000001'),
+ ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f8','curator','00000000-0000-0000-0000-000000000001'),
+ ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f9','curator','00000000-0000-0000-0000-000000000001');
+DO $do$
+BEGIN
+  IF to_regclass('approval_card') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, tier, title, body, source_refs, created_by)
+  SELECT t.mid(n), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'proposed', 'two_curators',
+    'quorum ' || n, 'body ' || n, '[{"uri":"https://crm/acct/A"}]', '00000000-0000-0000-0000-0000000000a1'
+  FROM generate_series(116, 117) AS n;
+  INSERT INTO approval_card (nonce, memory_id, version_at_issue, issued_to, platform) VALUES
+   ('00000000-0000-0000-0000-0000000dd040', t.mid(116), 1, '00000000-0000-0000-0000-0000000000f7', 'slack'),
+   ('00000000-0000-0000-0000-0000000dd041', t.mid(116), 1, '00000000-0000-0000-0000-0000000000f8', 'slack'),
+   ('00000000-0000-0000-0000-0000000dd042', t.mid(117), 1, '00000000-0000-0000-0000-0000000000f8', 'slack'),
+   ('00000000-0000-0000-0000-0000000dd043', t.mid(117), 1, '00000000-0000-0000-0000-0000000000f9', 'slack');
+END $do$;
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f7', NULL);
+SELECT t.eq('G4j heidi approves while a curator: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd040', t.mid(116), 1, 'approve')$q$, 'pending_quorum:1/2');
+COMMIT;
+RESET ROLE;
+DELETE FROM store_grant WHERE store_id = '00000000-0000-0000-0000-00000000f001' AND principal_id = '00000000-0000-0000-0000-0000000000f7';
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f8', NULL);
+SELECT t.eq('G3y heidi lost the curator role, then ivan approves: result/status', $q$SELECT d || '/' || t.state(t.mid(116)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd041', t.mid(116), 1, 'approve') AS d) AS s$q$, 'pending_quorum:1/2/proposed/v1');
+SELECT t.errm('G4k heidi lost the curator role: direct UPDATE after ivan', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(116)$q$, '%quorum not met: 1 of 2%');
+SELECT t.eq('G4l ivan approves a second memory: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd042', t.mid(117), 1, 'approve')$q$, 'pending_quorum:1/2');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f9', NULL);
+SELECT t.eq('G3z judy, a second current curator: result/status', $q$SELECT d || '/' || t.state(t.mid(117)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd043', t.mid(117), 1, 'approve') AS d) AS s$q$, 'active/active/v2');
+COMMIT;
+RESET ROLE;
+
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;
