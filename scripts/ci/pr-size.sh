@@ -14,18 +14,23 @@
 #                                          extension (.sql.md, .py.md, .s-ql.md,
 #                                          ..md) is not exempt unless it is all
 #                                          digits (gatemem-2606.18829.md).
-#   lock files                             exempt only when the manifest it is
-#                                          generated from changed in the same PR
-#                                          (uv.lock needs pyproject.toml)
+#   lock files                             exempt from the line budget only, and
+#                                          only when the manifest it is generated
+#                                          from changed in the same PR (uv.lock
+#                                          needs pyproject.toml). They must be
+#                                          UTF-8 text without NUL, at most 2 MiB
+#                                          each and 4 MiB together. They sit
+#                                          outside the 1 MiB general total so a
+#                                          real dependency bump is not blocked.
 #   png jpg gif svg pdf ico                count as 50 lines per 10 KB (min 50)
 #   any other binary file                  fails the job
 #
 # Line counts alone are bypassed by CR-only files and single huge lines, so
 # bytes are capped too, measured from the blob at HEAD:
-#   any file                               at most 512 KB (lock files that pass
-#                                          their manifest rule are exempt)
+#   any other file                         at most 512 KB
 #   all changed files together             at most 1 MiB, exempt .md included
-#                                          (exemption covers the line budget only)
+#                                          (exemption covers the line budget only);
+#                                          exempt lock files are counted separately
 #
 # There is no bypass. A PR over the limit must be split.
 set -euo pipefail
@@ -35,6 +40,8 @@ head="${2:?head ref required}"
 limit="${3:-800}"
 file_byte_cap=524288
 total_byte_cap=1048576
+lock_file_cap=2097152
+lock_total_cap=4194304
 
 # --attr-source=<empty tree> stops git reading .gitattributes from the work tree,
 # so `-diff`, `binary` and custom diff drivers cannot turn a file into "- -".
@@ -67,7 +74,7 @@ git_diff --raw -z --no-abbrev --diff-filter=d "$base...$head" |
   done >"$sizes"
 
 result=$(git_diff --numstat -z "$base...$head" | tr '\0' '\n' |
-  awk -v file_cap="$file_byte_cap" -v total_cap="$total_byte_cap" -v sizes="$sizes" '
+  awk -v file_cap="$file_byte_cap" -v total_cap="$total_byte_cap" -v lock_cap="$lock_file_cap" -v lock_total_cap="$lock_total_cap" -v sizes="$sizes" '
     BEGIN {
       while ((getline line < sizes) > 0) {
         tab = index(line, "\t")
@@ -89,11 +96,21 @@ result=$(git_diff --numstat -z "$base...$head" | tr '\0' '\n' |
       lock["requirements.txt"] = "requirements.in"
       for (i = 1; i <= NR; i++) {
         path = p[i]
+        is_lock = 0
         if (path ~ /^\.github\/tools\/[^\/]+$/) {
           name = substr(path, length(".github/tools/") + 1)
-          if (name in lock && (".github/tools/" lock[name]) in changed) continue
+          if (name in lock && (".github/tools/" lock[name]) in changed) is_lock = 1
         }
-        if (path == "uv.lock" && "pyproject.toml" in changed) continue
+        if (path == "uv.lock" && "pyproject.toml" in changed) is_lock = 1
+        if (is_lock) {
+          if (path in bytes) {
+            size = bytes[path] + 0
+            if (kind[path] != "t") { print "BYTES lock file " path " is not UTF-8 text without NUL bytes"; bad = 1; continue }
+            if (size > lock_cap) { print "BYTES lock file " path " is " size " bytes (lock file cap " lock_cap ")"; bad = 1; continue }
+            lock_bytes += size
+          }
+          continue
+        }
         size = bytes[path] + 0
         if (size > file_cap) { print "BYTES " path " is " size " bytes (file cap " file_cap ")"; bad = 1; continue }
         total_bytes += size
@@ -112,6 +129,7 @@ result=$(git_diff --numstat -z "$base...$head" | tr '\0' '\n' |
         }
         sum += add[i] + del[i]
       }
+      if (lock_bytes > lock_total_cap) { print "BYTES lock files total " lock_bytes " bytes (lock file total cap " lock_total_cap ")"; bad = 1 }
       if (total_bytes > total_cap) { print "BYTES changed files total " total_bytes " bytes (total cap " total_cap ")"; bad = 1 }
       if (!bad) print "TOTAL " sum + 0
     }')

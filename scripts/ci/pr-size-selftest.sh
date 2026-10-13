@@ -148,6 +148,49 @@ digit_ext_md() {
   mkdir -p docs/research
   seq 1 5000 > docs/research/x.1sql.md
 }
+# text of roughly N bytes, many short lines (a lock file looks like this)
+lock_text() { head -c "$1" /dev/zero | tr '\0' 'a' | fold -w 60; }
+uv_lock_53mb_scaled() {
+  lock_text 3145728 > uv.lock
+  echo ' ' >> pyproject.toml
+}
+uv_lock_binary() {
+  { printf '\0'; head -c 300000 /dev/zero; } > uv.lock
+  echo ' ' >> pyproject.toml
+}
+uv_lock_invalid_utf8() {
+  { lock_text 100000; printf '\377\376\n'; } > uv.lock
+  echo ' ' >> pyproject.toml
+}
+npm_lock_40mb_scaled() {
+  mkdir -p .github/tools
+  lock_text 3145728 > .github/tools/package-lock.json
+  echo ' ' >> .github/tools/package.json
+}
+requirements_5mb_scaled() {
+  mkdir -p .github/tools
+  lock_text 3145728 > .github/tools/requirements.txt
+  echo ' ' >> .github/tools/requirements.in
+}
+three_locks_over_lock_total() {
+  mkdir -p .github/tools
+  lock_text 1572864 > uv.lock
+  lock_text 1572864 > .github/tools/package-lock.json
+  lock_text 1572864 > .github/tools/requirements.txt
+  echo ' ' >> pyproject.toml
+  echo ' ' >> .github/tools/package.json
+  echo ' ' >> .github/tools/requirements.in
+}
+uv_lock_300kb_bump() {
+  lock_text 307200 > uv.lock
+  echo '[project]' > pyproject.toml
+}
+lock_bump_beside_900kb_files() {
+  lock_text 1572864 > uv.lock
+  echo ' ' >> pyproject.toml
+  head -c 400000 /dev/zero | tr '\0' 'a' > a.txt
+  head -c 400000 /dev/zero | tr '\0' 'a' > b.txt
+}
 big_png() { { printf '\211PNG\0\0'; head -c 102400 /dev/zero; } > big.png; }
 big_png_ok() { { printf '\211PNG\0\0'; head -c 30000 /dev/zero; } > mid.png; }
 many_big_pngs() {
@@ -189,4 +232,12 @@ case_ "two 400 KB .md files fit the total cap" 0 two_big_md_ok
 case_ "5000-line x.sql..md" 1 double_dot_md "Split the PR"
 case_ "5000-line x.s-ql.md" 1 hyphen_ext_md "Split the PR"
 case_ "5000-line x.1sql.md" 1 digit_ext_md "Split the PR"
+case_ "3 MiB uv.lock with pyproject.toml (file cap)" 1 uv_lock_53mb_scaled "lock file cap"
+case_ "binary uv.lock with pyproject.toml" 1 uv_lock_binary "not UTF-8 text"
+case_ "invalid UTF-8 uv.lock with pyproject.toml" 1 uv_lock_invalid_utf8 "not UTF-8 text"
+case_ "3 MiB package-lock.json with package.json" 1 npm_lock_40mb_scaled "lock file cap"
+case_ "3 MiB requirements.txt with requirements.in" 1 requirements_5mb_scaled "lock file cap"
+case_ "three 1.5 MiB lock files exceed the lock total" 1 three_locks_over_lock_total "lock file total cap"
+case_ "300 KB uv.lock bump with pyproject.toml" 0 uv_lock_300kb_bump "lines after exemptions: 1"
+case_ "1.5 MiB uv.lock beside two 400 KB files" 0 lock_bump_beside_900kb_files
 echo "pr-size self-test ok"
