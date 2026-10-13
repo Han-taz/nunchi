@@ -55,6 +55,17 @@ class Role(StrEnum):
     CURATOR = "curator"
 
 
+class RoomKind(StrEnum):
+    PUBLIC = "public"
+    PRIVATE = "private"
+    CONNECT = "connect"
+
+
+class LinkQuality(StrEnum):
+    SCIM = "scim"
+    EMAIL = "email"
+
+
 class Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 

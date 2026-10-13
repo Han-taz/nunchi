@@ -259,3 +259,37 @@ G5j	= 0/proposed/v2	fail	stale click leaves no review
 G5k	= 2	fail	review version comes from the memory, not the client
 N17a	(ok)	fail
 N17b	(ok)	fail
+G7a	= true/0/0	fail	every human reader of the store is a member of the public room
+G7b	= false/4/0	fail	private room where one of five readers is a member
+G7c	= true/0/1	fail	Slack Connect room: contained, one outside member counted
+G7d	= false/0/true	fail	a snapshot older than 90 minutes is not ok
+G7e	= 1	fail	a reader added to the store but not to the room counts as missing
+G7q	= 0	fail	the added reader is gone after rollback
+G7f	-> 23514	fail	confirmer must differ from binder
+G7g	-> 23514	fail	DM channel ids are not bindable
+G7h	-> 22P02	fail	dm is not a room_kind
+G7i	-> 23505	fail	one live binding per channel
+G7j	-> ok	fail	a pending binding is allowed
+G7k	-> 42501	fail	only a curator of the store confirms
+G7l	-> 23514	fail	no membership snapshot, no binding
+G7m	-> P0001	fail	a confirmed binding keeps its confirmer
+G7n	-> P0001	fail	kind only goes up to connect
+G7o	= ok/auto_labeled/internal	fail	control: a contained public room is not raised
+G7p	= unverified/9	fail	client containment is replaced and other gate keys are kept
+G6a	= true	fail	scim link resolves
+G6b	= NULL	fail	email-quality link resolves to nothing
+G6c	= NULL	fail	unknown Slack id
+G6d	= NULL	fail	other tenant
+G6e	-> 23505	fail	a Slack id links to one principal
+G6f	= NULL	fail	deactivated principal
+G6g	-> 42501	fail	app_rw has no SELECT on principal_identity
+G6h	= false	fail	store.confidential defaults to false
+G1c	= one_curator/proposed/external	fail	host outside the internal source_system set
+G1t	= auto_labeled/provisional/internal	fail	control: a registered internal host stays internal
+G1e	= auto_labeled/internal	fail	wildcard host pattern
+G1w	= one_curator/external	fail	userinfo cannot impersonate an internal host
+G1u	= one_curator/proposed/external	fail	client claims internal on a Slack Connect source
+G1v	= unverified/one_curator	fail	client claims containment ok on a private room with missing readers
+G1x	-> 23503	fail	room without a live binding for the store
+G1y	= external/one_curator	fail	client may raise origin to external
+G1z	= external/one_curator	fail	public room with an outside member
