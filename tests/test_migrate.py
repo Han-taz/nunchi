@@ -253,6 +253,16 @@ def test_main_reports_an_unreachable_database(
         ("CREATE INDEX CONCURRENTLY i ON t (a);\n", "CONCURRENTLY cannot run"),
         ("REFRESH MATERIALIZED VIEW concurrently v;\n", "CONCURRENTLY cannot run"),
         ("SELECT E'\\''; COMMIT; SELECT ''", "top-level COMMIT"),
+        ("END;\n", "top-level END"),
+        ("CREATE TABLE a (i int);\nend transaction;\n", "top-level END"),
+        ("SELECT 1; END WORK;", "top-level END"),
+        ("SELECT 1;\nPREPARE TRANSACTION 'x';\n", "top-level PREPARE TRANSACTION"),
+        ("SELECT 1;\nCOMMIT PREPARED 'x';\n", "top-level COMMIT PREPARED"),
+        ("SELECT 1;\nROLLBACK PREPARED 'x';\n", "top-level ROLLBACK PREPARED"),
+        (
+            "CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;\nEND;\n",
+            "top-level END",
+        ),
     ],
 )
 def test_load_rejects_sql_the_runner_transaction_cannot_hold(
@@ -278,6 +288,12 @@ def test_load_rejects_sql_the_runner_transaction_cannot_hold(
         "SELECT 1 AS begin_at, 2 AS committed;\n",
         "COMMENT ON TABLE t IS 'ROLLBACK is fine here';\n",
         "CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;\n",
+        "CREATE FUNCTION g(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC\n"
+        "  SELECT CASE WHEN x > 0 THEN 1 ELSE 2 END;\n  SELECT 3;\nEND;\n",
+        "DO $$ BEGIN IF true THEN PERFORM 1; END IF; LOOP EXIT; END LOOP; END $$;\n",
+        "SELECT CASE WHEN true THEN 1 END;\n",
+        "PREPARE p AS SELECT 1;\n",
+        "SELECT 'x; END;'; -- END;\n",
     ],
 )
 def test_load_accepts_keywords_that_are_only_text(tmp_path: Path, sql: str) -> None:
@@ -291,3 +307,13 @@ def test_load_rejects_invalid_utf8(tmp_path: Path) -> None:
     seal(tmp_path)
     with pytest.raises(m.MigrationError, match=r"^0001_a\.sql: not valid UTF-8$"):
         m.load_migrations(tmp_path)
+
+
+@pytest.mark.db
+def test_top_level_end_is_refused_before_any_statement_runs(fresh_db: str, tmp_path: Path) -> None:
+    (tmp_path / "0001_a.sql").write_text("CREATE TABLE a (i int);\nEND;\nSELECT 1/0;\n")
+    seal(tmp_path)
+    with psycopg.connect(fresh_db) as conn:
+        with pytest.raises(m.MigrationError, match=r"^0001_a\.sql: top-level END is not allowed"):
+            m.migrate(conn, tmp_path)
+        assert conn.execute("SELECT to_regclass('a')").fetchone() == (None,)

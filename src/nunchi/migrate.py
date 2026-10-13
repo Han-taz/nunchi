@@ -31,8 +31,12 @@ _LITERALS = re.compile(
     re.VERBOSE | re.DOTALL,
 )
 _TRANSACTION_CONTROL = re.compile(
-    r"(?:^|;)\s*(begin|commit|rollback|abort|start\s+transaction)\b", re.IGNORECASE
+    r"(?:^|;)\s*(begin|end|commit\s+prepared|rollback\s+prepared|prepare\s+transaction"
+    r"|commit|rollback|abort|start\s+transaction)\b",
+    re.IGNORECASE,
 )
+# A SQL-standard function body ends in `; END`, which is not the COMMIT alias.
+_ATOMIC_BODY = re.compile(r"\bbegin\s+atomic\b.*?;\s*end\b", re.IGNORECASE | re.DOTALL)
 _CONCURRENTLY = re.compile(r"\bconcurrently\b", re.IGNORECASE)
 
 
@@ -72,7 +76,7 @@ def check_runnable(name: str, sql: bytes) -> None:
         msg = f"{name}: not valid UTF-8"
         raise MigrationError(msg) from err
     code = _LITERALS.sub(" ", text)
-    control = _TRANSACTION_CONTROL.search(code)
+    control = _TRANSACTION_CONTROL.search(_ATOMIC_BODY.sub(" ", code))
     if control is not None:
         keyword = " ".join(control.group(1).upper().split())
         msg = f"{name}: top-level {keyword} is not allowed; the runner supplies the transaction"
