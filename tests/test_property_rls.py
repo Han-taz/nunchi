@@ -5,7 +5,6 @@ import os
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from typing import Literal
 
 import psycopg
 import pytest
@@ -31,7 +30,6 @@ TENANT_B = uuid.UUID("00000000-0000-0000-0000-0000000000c2")
 ROLES = ("reader", "contributor", "curator")
 STATUSES = ("proposed", "provisional", "active", "superseded", "rejected", "expired", "deleted")
 READABLE = ("active", "provisional", "superseded", "expired")
-Role = Literal["reader", "contributor", "curator"]
 
 
 @dataclass(frozen=True)
@@ -47,18 +45,11 @@ class World:
     grants: frozenset[tuple[int, int, int]]  # (store, principal, role index)
     memories: tuple[tuple[int, str, int, int | None], ...]  # (store, status, creator, delegate)
 
-    def user(self, i: int) -> int:
-        return i
-
     def agent(self, i: int) -> int:
         return self.users + i
 
     def group(self, i: int) -> int:
         return self.users + self.agents + i
-
-    @property
-    def total(self) -> int:
-        return self.users + self.agents + self.groups
 
 
 @st.composite
