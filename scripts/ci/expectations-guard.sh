@@ -7,7 +7,7 @@
 # itself: no non-comment line of a db/tests/*.sql file opens a string literal whose first
 # token is exactly its id (the way db-test.sh reads a test's output line). A row whose
 # on_vulnerable is `fail` in BASE may not become anything else in HEAD. HEAD's registry
-# must exist, name only well-formed ids (T1, X3a, F11 ...), and list each id once.
+# must exist, name only well-formed ids (one capital letter, digits, an optional lowercase letter: T1, X3a, G3n), and list each id once.
 # Reads git objects only.
 set -euo pipefail
 
@@ -19,7 +19,8 @@ rows() {
   git show "$1:$registry" 2>/dev/null | awk -F '\t' '$0 !~ /^#/ && $0 !~ /^[[:space:]]*$/ { print $1 "\t" $3 }' || true
 }
 
-id_shape='^(T[0-9]+[a-z]?|[XFNASP][0-9]+[a-z]?)$'
+id_token='[A-Z][0-9]+[a-z]?'
+id_shape="^${id_token}\$"
 fail=0
 
 git cat-file -e "$head:$registry" 2>/dev/null || { echo "::error::$registry is missing in the head"; exit 1; }
@@ -43,11 +44,11 @@ fi
 emitted=$(
   git ls-tree --name-only -z "$head" db/tests/ | tr '\0' '\n' | grep '\.sql$' |
     while IFS= read -r file; do git show "$head:$file"; done |
-    awk -v q="'" '
+    awk -v q="'" -v tok="$id_token" '
       /^[[:space:]]*--/ { next }
       {
         line = $0
-        while (match(line, q "(T[0-9]+[a-z]?|[XFNASP][0-9]+[a-z]?)([^A-Za-z0-9_]|$)")) {
+        while (match(line, q tok "([^A-Za-z0-9_]|$)")) {
           token = substr(line, RSTART + 1, RLENGTH - 1)
           sub(/[^A-Za-z0-9_]$/, "", token)
           print token
