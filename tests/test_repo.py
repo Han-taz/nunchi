@@ -114,19 +114,22 @@ def test_get_returns_none_for_unreadable_and_unknown(world: Pool) -> None:
 
 
 @pytest.mark.db
-def test_propose_binds_the_author_and_ignores_the_client(world: Pool) -> None:
+def test_propose_binds_the_author_and_ignores_the_client(fresh_db: str, world: Pool) -> None:
     req = ProposeRequest(store_id=STORE, kind=MemoryKind.NOTE, title="new", body="b")
     with request_tx(world, USER, AGENT_NO_GRANT) as conn, pytest.raises(psycopg.Error):
         repo.propose(conn, req)
     with request_tx(world, USER, None) as conn:
         direct = repo.propose(conn, req)
     assert (direct.status, direct.origin, direct.created_by, direct.on_behalf_of) == (
-        MemoryStatus.PROPOSED,
+        MemoryStatus.PROVISIONAL,
         MemoryOrigin.INTERNAL,
         USER,
         None,
     )
     assert direct.version == 1
+    with psycopg.connect(fresh_db) as conn:
+        tier = conn.execute("SELECT tier::text FROM memory WHERE id = %s", (direct.id,)).fetchone()
+    assert tier == ("auto_labeled",)
 
 
 @pytest.mark.db
@@ -139,6 +142,7 @@ def test_propose_as_agent_records_the_delegate(fresh_db: str, world: Pool) -> No
     with request_tx(world, USER, AGENT) as conn:
         mem = repo.propose(conn, req)
     assert (mem.created_by, mem.on_behalf_of) == (AGENT, USER)
+    assert mem.status == MemoryStatus.PROPOSED
 
 
 @pytest.mark.db
@@ -164,8 +168,12 @@ def test_history_and_dependents(world: Pool) -> None:
         deps = repo.dependents(conn, ACTIVE)
         none_for_child = repo.dependents(conn, child.id)
     with request_tx(world, OTHER, None) as conn:
-        outsider_hist = repo.history(conn, child.id)
-    assert [(v.version, v.op, v.actor_id) for v in versions] == [(1, MemoryOp.PROPOSE, USER)]
+        reader_hist = repo.history(conn, child.id)
+    with request_tx(world, USER, None) as conn:
+        unreviewed_hist = repo.history(conn, PROPOSED_BY_OTHER)
+    expected = [(1, MemoryOp.PROPOSE, USER), (1, MemoryOp.AUTO_ACTIVATE, USER)]
+    assert [(v.version, v.op, v.actor_id) for v in versions] == expected
     assert [d.id for d in deps] == [child.id]
     assert none_for_child == []
-    assert outsider_hist == []
+    assert [(v.version, v.op, v.actor_id) for v in reader_hist] == expected
+    assert unreviewed_hist == []

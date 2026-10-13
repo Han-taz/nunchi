@@ -56,7 +56,8 @@ files: db/schema.sql, db/tests/smoke_test.sql
 | principal | user / group / agent. 그룹은 SCIM으로 동기화한다 | — |
 | 실효 권한 | **사용자 권한 ∩ 에이전트 권한.** 에이전트는 대리하는 사용자보다 많이 볼 수 없고, 사용자도 에이전트에게 허용된 것 이상을 시킬 수 없다 | Asana "트리거한 사용자로 범위 고정", AkasicMEM 누수 사례 |
 | memory | 레코드 하나 = 지식 하나. 종류는 fact / decision / procedure / note | 파일/레코드 수렴 |
-| 상태 | proposed → active → superseded / expired, 또는 rejected, deleted | 승격 관문(MAPLE-Guard), 무효화(Zep) |
+| 상태 | proposed → active → superseded / expired, 또는 rejected, deleted. 검토 전에 이미 노출된 `provisional`이 proposed와 active 사이에 있다. 허용되는 전이는 `memory_transition` 표 한 장이 전부다 | 승격 관문(MAPLE-Guard), 무효화(Zep) |
+| 위험 등급 | `auto` / `auto_labeled` / `one_curator` / `two_curators`. 서버 함수 `risk_tier()`가 등급표 순서대로 정하고, `approval_tier_rule` 표가 등급마다 최초 상태와 승인 정족수를 정한다 | Fable 2라운드 §2.1 |
 | source_refs | 근거 원문 링크. note를 빼면 필수. 다른 메모리를 근거로 삼을 때는 `memory://<id>` | 계보, 정정 전파 |
 | origin | internal / external. 외부 출처 표시는 정리나 요약을 거쳐도 유지한다 | memory-hopping, Misattribution |
 
@@ -69,7 +70,7 @@ files: db/schema.sql, db/tests/smoke_test.sql
 | curator | ● | ● | ● |
 
 - 에이전트는 기본 contributor다. curator 권한을 받은 에이전트도 대리하는 사용자가 curator가 아니면 승인할 수 없다(교집합).
-- user store만 `auto_approve`를 허용한다(개인 노트). 공유 store에는 자동 승인이 없다.
+- 승인은 위험 등급이 정한다. user store는 등급 `auto`(개인 노트)이고, 공유 store의 사람 저위험 제안은 `auto_labeled`(provisional로 시작해 표본 검토를 받는다), 나머지는 curator 1인 또는 2인이다.
 
 ## 4. 데이터 모델
 
@@ -81,20 +82,21 @@ files: db/schema.sql, db/tests/smoke_test.sql
 - `memory_version`: append-only 변경 기록(감사 로그). 트리거로 수정과 삭제를 막는다. 단, 내용만 비우는 redact는 허용한다.
 - `review`: 사람 승인과 리뷰 에이전트 의견
 - `deleted_hash`: 삭제한 내용의 해시. 정리 작업이나 재제안이 지운 내용을 되살리지 못하게 막는다.
+- `memory_transition(from_status, to_status, op, by_role)`: 상태 기계. `approval_tier_rule(tier, initial_status, approvals_needed)`: 등급 -> 최초 상태와 정족수. `proposer_trust(principal, store, points, ...)`: 제안자 신뢰 점수(20점부터 에이전트도 `auto_labeled`).
 
 DB 수준에서 거는 제약
 
 - deleted 상태면 body가 NULL이어야 한다(tombstone).
 - note를 빼고는 source_refs가 비면 안 된다.
-- auto_approve는 user store에만 켤 수 있다.
+- 상태 전이는 `memory_transition` 표에 있는 (from, to)만 가능하고, 표의 `by_role`이 curator면 요청 컨텍스트가, system이면 컨텍스트 없는 워커가 필요하다. `tier`는 INSERT 때 정해진 뒤 바뀌지 않는다.
 
 ## 5. 권한 강제 방식
 
 1. API가 요청마다 토큰을 검증한 뒤, 트랜잭션 시작 시 `app_sec.begin_request(user, agent)`를 호출한다. 함수가 principal의 종류(user/agent)·활성·테넌트를 DB에서 다시 검증하고, 값을 트랜잭션 로컬로 설정하면서 현재 xid에 묶는다. 세션 레벨 `SET`이나 풀러 연결에 남은 값은 xid가 맞지 않아 읽히지 않는다(컨텍스트 없음 = 권한 없음). **store나 사용자를 모델이 파라미터로 고르지 않는다.** 모델은 store slug를 고를 수 있지만, 권한은 DB가 다시 판정한다.
 2. RLS 정책
-   - 읽기: 실효 권한이 reader 이상이고 `tenant_id`가 요청의 테넌트와 같을 때. proposed는 대리된 사용자 본인(`coalesce(on_behalf_of, created_by)`)과 curator만 본다. 같은 에이전트를 쓰는 다른 사용자는 남의 proposed를 보지 못한다. rejected와 deleted는 curator만 본다.
-   - INSERT: contributor 이상. 작성자는 BEFORE INSERT 트리거가 요청에 묶는다: `created_by` = 에이전트(없으면 사용자), `on_behalf_of` = 에이전트일 때만 사용자, `tenant_id` = 요청의 테넌트. NULL은 채우고 다른 값은 `42501`로 거부한다. status는 `proposed`, version은 1로, `content_hash`는 서버 비밀키 HMAC으로 덮어쓴다(클라이언트가 `active`나 해시를 보내도 무시). 삭제된 내용의 재제안은 `23505`, `supersedes_id`는 같은 store의 읽을 수 있는 active 행만 허용하고 `memory://` 근거는 읽을 수 있는 행만 허용한다(없는 행과 못 읽는 행은 모두 `23503`이라 존재 여부가 새지 않는다). 근거 중 하나라도 external이면 파생 메모리도 external이다.
-   - UPDATE: curator만. BEFORE UPDATE 트리거가 불변 컬럼(`store_id`, `kind`, `created_by`, `on_behalf_of` 등), origin 단방향(external→internal 금지), `memory_transition` 표에 있는 상태 전이만, 본문 편집은 proposed/active에서만 허용한다. 모든 UPDATE는 version을 1 올리고, 삭제는 본문을 NULL, 제목을 `[deleted]`로 바꾼다. 위반은 `P0001`.
+   - 읽기: 실효 권한이 reader 이상이고 `tenant_id`가 요청의 테넌트와 같을 때. provisional은 active처럼 reader에게도 보인다. proposed는 대리된 사용자 본인(`coalesce(on_behalf_of, created_by)`)과 curator만 본다. 같은 에이전트를 쓰는 다른 사용자는 남의 proposed를 보지 못한다. rejected와 deleted는 curator만 본다.
+   - INSERT: contributor 이상. 작성자는 BEFORE INSERT 트리거가 요청에 묶는다: `created_by` = 에이전트(없으면 사용자), `on_behalf_of` = 에이전트일 때만 사용자, `tenant_id` = 요청의 테넌트. NULL은 채우고 다른 값은 `42501`로 거부한다. `tier`와 최초 status는 트리거가 `risk_tier()`와 `approval_tier_rule`로 정하고(클라이언트가 `active`나 `tier`를 보내도 덮어쓴다), version은 1로, `content_hash`는 서버 비밀키 HMAC으로 덮어쓴다(클라이언트가 `active`나 해시를 보내도 무시). 삭제된 내용의 재제안은 `23505`, `supersedes_id`는 같은 store의 읽을 수 있는 active 또는 provisional 행만 허용하고 `memory://` 근거는 읽을 수 있는 행만 허용한다(없는 행과 못 읽는 행은 모두 `23503`이라 존재 여부가 새지 않는다). 근거 중 하나라도 external이거나 provisional이거나 user store의 것이면 파생 메모리도 external이다.
+   - UPDATE: curator만. BEFORE UPDATE 트리거가 불변 컬럼(`store_id`, `kind`, `created_by`, `on_behalf_of` 등), origin 단방향(external→internal 금지), `memory_transition` 표에 있는 상태 전이만(표의 `by_role` 포함), 본문 편집은 proposed/active에서만 허용한다. 모든 UPDATE는 version을 1 올리고, 삭제는 본문을 NULL, 제목을 `[deleted]`로 바꾼다. 위반은 `P0001`.
    - 실효 권한은 `app_sec.my_store_roles()`가 계산한다. 정책은 `store_id IN (SELECT ...)`로 쓰므로 행마다가 아니라 요청당 한 번 평가된다(10만 행 `count(*)`가 로컬에서 약 35ms. v1.0 정책은 같은 조건에서 약 3.8초).
    - 테넌트 경계는 복합 FK가 지킨다: `store(tenant_id, id)`, `principal(tenant_id, id)`를 `store_grant`와 `memory`가 (tenant_id, …)로 참조하므로 교차 테넌트 grant나 memory 행은 소유자 권한으로도 만들 수 없다.
    - principal, group_member, store, store_grant: 모두 `FORCE ROW LEVEL SECURITY`. principal은 요청 테넌트의 행만 보인다(같은 테넌트의 표시 이름 해석에 필요해서 store 공유 여부로는 좁히지 않는다). group_member는 내 소속(사용자·에이전트)과 내가 curator인 store에 grant된 그룹의 구성원만, store는 `my_stores()`에 있는 것만, store_grant는 나와 내 그룹의 grant와 내가 curator인 store의 모든 grant만 보인다. `my_store_roles`, `app_sec.closure`, `begin_request`는 SECURITY DEFINER라 이 정책을 거치지 않는다. `principal_closure(p)`는 `p`가 요청의 사용자나 에이전트일 때만 값을 주고 남의 그룹 소속은 빈 집합이다.
@@ -119,7 +121,7 @@ DB 수준에서 거는 제약
 |---|---|---|
 | T1 | 영업 Alice + 영업봇이 인사 store 조회 | 0건 ✔ |
 | T2 | 영업봇이 Alice 대리로 제안 | 성공 ✔ |
-| T3 | 영업봇이 `status='active'`로 INSERT | 성공하되 저장된 status는 `proposed` ✔ |
+| T3 | 영업봇이 `status='active'`로 INSERT | 성공하되 저장된 status/tier는 `proposed/one_curator` ✔ |
 | T4 | contributor Alice가 승인 | 0건 반영 ✔ |
 | T5 | curator Carol이 승인 | 1건 반영 ✔ |
 | T6 | Carol이 영업봇과 함께 승인 시도 (봇은 contributor) | 0건, 교집합 동작 ✔ |
@@ -180,7 +182,7 @@ DB 수준에서 거는 제약
    - 같은 store의 active와 해시가 같으면 → 중복으로 거부
    - `origin=external`이면서 지시문 패턴("항상 ~해라", "이전 지시 무시")이 있으면 → 표시
 3. 선택적 리뷰 에이전트가 기존 active와 충돌하는지, 대체 후보는 뭔지 의견을 단다. 의견만 달고 승인하지 않는다.
-4. 승인 봇이 store의 curator들에게 카드를 보낸다. 내용, 출처, 게이트 결과, 충돌 후보, `[승인][반려][기존 항목 대체로 승인]` 버튼이 붙는다.
+4. 위험 등급(`risk_tier()`, 등급표 위에서부터 첫 일치)이 `auto`/`auto_labeled`면 바로 active/provisional로 들어가고(provisional은 표본 검토 대상), `one_curator`/`two_curators`면 proposed로 남는다. 승인 봇이 store의 curator들에게 카드를 보낸다. 내용, 출처, 게이트 결과, 충돌 후보, `[승인][반려][기존 항목 대체로 승인]` 버튼이 붙는다.
 5. 승인되면 active가 되고 버전 기록이 남는다. 대체 승인이면 옛 항목은 superseded가 되고 `supersedes_id`로 연결된다.
 6. 일정 기간(기본 14일) 처리되지 않으면 자동으로 rejected 처리한다. 검토 대기함이 쌓이지 않게 하려는 것이다.
 

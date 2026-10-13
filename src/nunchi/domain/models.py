@@ -15,6 +15,7 @@ class MemoryKind(StrEnum):
 
 class MemoryStatus(StrEnum):
     PROPOSED = "proposed"
+    PROVISIONAL = "provisional"
     ACTIVE = "active"
     SUPERSEDED = "superseded"
     REJECTED = "rejected"
@@ -29,8 +30,11 @@ class MemoryOrigin(StrEnum):
 
 class MemoryOp(StrEnum):
     PROPOSE = "propose"
+    AUTO_ACTIVATE = "auto_activate"
     APPROVE = "approve"
+    CONFIRM = "confirm"
     REJECT = "reject"
+    RETRACT = "retract"
     EDIT = "edit"
     SUPERSEDE = "supersede"
     EXPIRE = "expire"
