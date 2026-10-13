@@ -1,5 +1,5 @@
--- Forward migration 0021: memory.value and the search tuning knobs (U20).
--- value: the short canonical answer; the key trigger reconfirms when key and normalized value match, whatever the body says.
+-- Forward migration 0021: memory.value and the search tuning knobs.
+-- value: the short canonical answer. The key trigger reconfirms when key and value match, whatever the body says.
 -- search: p_floor (vector cosine similarity floor) and p_rrf_k become arguments, with the old constants as defaults.
 -- The function bodies are copied from db/schema.sql (the schema-drift job compares the two).
 
@@ -131,5 +131,9 @@ BEGIN
     LIMIT 50;
   PERFORM set_config('pg_trgm.word_similarity_threshold', v_old_threshold, true);
 END $$;
-REVOKE ALL ON FUNCTION app_sec.search(text, uuid[], memory_status[], memory_kind[], real[], text, real, integer) FROM public, app_rw;
-GRANT EXECUTE ON FUNCTION app_sec.search(text, uuid[], memory_status[], memory_kind[], real[], text, real, integer) TO app_rw;
+REVOKE ALL ON FUNCTION
+app_sec.search(text, uuid[], memory_status[], memory_kind[], real[], text, real, integer)
+FROM public, app_rw;
+GRANT EXECUTE ON FUNCTION
+app_sec.search(text, uuid[], memory_status[], memory_kind[], real[], text, real, integer)
+TO app_rw;

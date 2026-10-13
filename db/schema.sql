@@ -168,7 +168,7 @@ CREATE TABLE memory (
   subject_id uuid,                                      -- 키 = (subject_id, attribute). note 는 키가 없다
   attribute text,                                       -- app_sec.norm_text() 로 정규화 (트리거)
   last_confirmed_at timestamptz NOT NULL DEFAULT now(), -- 생성, 같은 값 재수집(reconfirm), curator 확인 때 갱신
-  value text,                                           -- 속성의 짧은 정규 답 (예: 이민수). norm_text() 로 정규화. 같은 키 + 같은 값이면 본문이 달라도 reconfirm. NULL = 옛 행
+  value text,                                           -- 짧은 정규 답 (예: 이민수), norm_text() 로 정규화. NULL = 옛 행
   CONSTRAINT memory_subject_same_tenant FOREIGN KEY (tenant_id, subject_id) REFERENCES entity (tenant_id, id),
   CONSTRAINT memory_key_by_kind CHECK (
     CASE
@@ -1650,7 +1650,9 @@ GRANT EXECUTE ON FUNCTION app_sec.issue_slack_cards(uuid) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.quorum(memory, memory_status) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_store_roles() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_stores(store_role) TO app_rw;
-GRANT EXECUTE ON FUNCTION app_sec.search(text, uuid[], memory_status[], memory_kind[], real[], text, real, integer) TO app_rw;
+GRANT EXECUTE ON FUNCTION
+app_sec.search(text, uuid[], memory_status[], memory_kind[], real[], text, real, integer)
+TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.verify_chain(uuid) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.norm_text(text) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.resolve_entity(text) TO app_rw;
