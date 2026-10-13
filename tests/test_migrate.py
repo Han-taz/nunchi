@@ -20,7 +20,7 @@ def seal(directory: Path) -> None:
 
 
 def mig(version: str, body: bytes = b"SELECT 1") -> m.Migration:
-    return m.Migration(version, body, hashlib.sha256(body).hexdigest())
+    return m.Migration(version, f"{version}_x.sql", body, hashlib.sha256(body).hexdigest())
 
 
 @given(st.integers(min_value=0, max_value=6), st.integers(min_value=0, max_value=6))
@@ -165,7 +165,7 @@ def test_failing_migration_rolls_back_everything(fresh_db: str, migrations: Path
     (migrations / "0002_bad.sql").write_text("INSERT INTO t VALUES (2);\nSELECT nope();\n")
     seal(migrations)
     with psycopg.connect(fresh_db) as conn:
-        with pytest.raises(psycopg.errors.UndefinedFunction):
+        with pytest.raises(m.MigrationError, match=r"^0002_bad\.sql: .*nope\(\)"):
             m.migrate(conn, migrations)
         assert conn.execute("SELECT to_regclass('t')").fetchone() == (None,)
 
@@ -199,3 +199,95 @@ def test_main_exits_nonzero_on_tamper(
     seal(migrations)
     assert m.main() == 1
     assert "0001 was edited" in capsys.readouterr().err
+
+
+@pytest.mark.db
+def test_setup_failure_names_the_setup_step(fresh_db: str, migrations: Path) -> None:
+    with psycopg.connect(fresh_db, autocommit=True) as conn:
+        conn.execute("SET default_transaction_read_only = on")
+        with pytest.raises(m.MigrationError, match=r"^schema_migrations setup: .*read-only"):
+            m.migrate(conn, migrations)
+
+
+@pytest.mark.db
+def test_main_names_the_failing_file_and_exits_one(
+    fresh_db: str,
+    migrations: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (migrations / "0002_bad.sql").write_text("SELECT nope();\n")
+    seal(migrations)
+    monkeypatch.setenv("NUNCHI_DATABASE_URL", fresh_db)
+    monkeypatch.setenv("NUNCHI_MIGRATIONS_DIR", str(migrations))
+    assert m.main() == 1
+    err = capsys.readouterr().err
+    assert err.startswith("migrate: 0002_bad.sql: ")
+    assert "nope" in err
+
+
+def test_main_reports_an_unreachable_database(
+    migrations: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("NUNCHI_DATABASE_URL", "postgres://u:p@127.0.0.1:1/db?connect_timeout=2")
+    monkeypatch.setenv("NUNCHI_MIGRATIONS_DIR", str(migrations))
+    assert m.main() == 1
+    assert capsys.readouterr().err.startswith("migrate: database error: ")
+
+
+@pytest.mark.parametrize(
+    ("sql", "message"),
+    [
+        ("BEGIN;\nSELECT 1;\nCOMMIT;\n", "top-level BEGIN"),
+        ("SELECT 1;\ncommit;\n", "top-level COMMIT"),
+        ("SELECT 1;\n  Rollback ;\n", "top-level ROLLBACK"),
+        ("SELECT 1;\nABORT;\n", "top-level ABORT"),
+        ("SELECT 1;\nSTART   TRANSACTION;\n", "top-level START TRANSACTION"),
+        ("-- note\n/* x */ BEGIN;\n", "top-level BEGIN"),
+        ("SELECT 'a'; COMMIT;", "top-level COMMIT"),
+        ("SELECT E'it\\'s'; COMMIT;", "top-level COMMIT"),
+        ("SELECT 'it''s'; COMMIT;", "top-level COMMIT"),
+        ('SELECT "x"; COMMIT;', "top-level COMMIT"),
+        ("SELECT $$x$$; COMMIT;", "top-level COMMIT"),
+        ("SELECT $t$x$t$; COMMIT;", "top-level COMMIT"),
+        ("CREATE INDEX CONCURRENTLY i ON t (a);\n", "CONCURRENTLY cannot run"),
+        ("REFRESH MATERIALIZED VIEW concurrently v;\n", "CONCURRENTLY cannot run"),
+        ("SELECT E'\\''; COMMIT; SELECT ''", "top-level COMMIT"),
+    ],
+)
+def test_load_rejects_sql_the_runner_transaction_cannot_hold(
+    tmp_path: Path, sql: str, message: str
+) -> None:
+    (tmp_path / "0001_a.sql").write_text(sql)
+    seal(tmp_path)
+    with pytest.raises(m.MigrationError, match=rf"^0001_a\.sql: .*{message}"):
+        m.load_migrations(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1;\n",
+        "DO $$\nBEGIN\n  PERFORM 1;\nEND $$;\n",
+        "CREATE FUNCTION f() RETURNS int LANGUAGE plpgsql AS $b$\nBEGIN RETURN 1; END; $b$;\n",
+        "-- BEGIN; COMMIT; CONCURRENTLY\nSELECT 1;\n",
+        "/* COMMIT; */ SELECT 1;\n",
+        "SELECT 'COMMIT; CONCURRENTLY';\n",
+        "SELECT E'\\'; COMMIT; --';\n",
+        'SELECT 1 AS "commit";\n',
+        "SELECT 1 AS begin_at, 2 AS committed;\n",
+        "COMMENT ON TABLE t IS 'ROLLBACK is fine here';\n",
+        "CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;\n",
+    ],
+)
+def test_load_accepts_keywords_that_are_only_text(tmp_path: Path, sql: str) -> None:
+    (tmp_path / "0001_a.sql").write_text(sql)
+    seal(tmp_path)
+    assert [x.version for x in m.load_migrations(tmp_path)] == ["0001"]
+
+
+def test_load_rejects_invalid_utf8(tmp_path: Path) -> None:
+    (tmp_path / "0001_a.sql").write_bytes(b"SELECT '\xff';")
+    seal(tmp_path)
+    with pytest.raises(m.MigrationError, match=r"^0001_a\.sql: not valid UTF-8$"):
+        m.load_migrations(tmp_path)

@@ -16,6 +16,25 @@ _MANIFEST = "SHA256SUMS"
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _LOCK_KEY = 7_262_024_001
 
+# Comments, quoted identifiers and every string flavour, scanned left to right so one
+# cannot hide inside another. A comment can nest in Postgres but this stops at the first
+# close, which only ever leaves more text visible as code.
+_LITERALS = re.compile(
+    r"""--[^\n]*
+    |/\*.*?\*/
+    |(?<![\w$])[Ee]'(?:[^'\\]|\\.|'')*'
+    |'(?:[^']|'')*'
+    |"(?:[^"]|"")*"
+    |(?<![\w$])\$\$.*?\$\$
+    |(?<![\w$])\$([A-Za-z_]\w*)\$.*?\$\1\$
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+_TRANSACTION_CONTROL = re.compile(
+    r"(?:^|;)\s*(begin|commit|rollback|abort|start\s+transaction)\b", re.IGNORECASE
+)
+_CONCURRENTLY = re.compile(r"\bconcurrently\b", re.IGNORECASE)
+
 
 class MigrationError(Exception):
     pass
@@ -24,6 +43,7 @@ class MigrationError(Exception):
 @dataclass(frozen=True)
 class Migration:
     version: str
+    name: str
     sql: bytes
     checksum: str
 
@@ -44,6 +64,24 @@ def read_manifest(directory: Path) -> dict[str, str]:
     return entries
 
 
+def check_runnable(name: str, sql: bytes) -> None:
+    """Refuse SQL that cannot run inside the runner's one transaction per migration."""
+    try:
+        text = sql.decode()
+    except UnicodeDecodeError as err:
+        msg = f"{name}: not valid UTF-8"
+        raise MigrationError(msg) from err
+    code = _LITERALS.sub(" ", text)
+    control = _TRANSACTION_CONTROL.search(code)
+    if control is not None:
+        keyword = " ".join(control.group(1).upper().split())
+        msg = f"{name}: top-level {keyword} is not allowed; the runner supplies the transaction"
+        raise MigrationError(msg)
+    if _CONCURRENTLY.search(code) is not None:
+        msg = f"{name}: CONCURRENTLY cannot run inside the runner's transaction"
+        raise MigrationError(msg)
+
+
 def load_migrations(directory: Path) -> list[Migration]:
     """Read the migrations and prove they are exactly the files SHA256SUMS lists, byte for byte."""
     migrations: list[Migration] = []
@@ -54,9 +92,10 @@ def load_migrations(directory: Path) -> list[Migration]:
             msg = f"{path.name}: migration files are named NNNN_slug.sql"
             raise MigrationError(msg)
         data = path.read_bytes()
+        check_runnable(path.name, data)
         checksum = hashlib.sha256(data).hexdigest()
         actual[path.name] = checksum
-        migrations.append(Migration(match.group(1), data, checksum))
+        migrations.append(Migration(match.group(1), path.name, data, checksum))
     versions = [m.version for m in migrations]
     if len(set(versions)) != len(versions):
         msg = "two migration files share a version number"
@@ -90,32 +129,41 @@ def pending(disk: Sequence[Migration], applied: Mapping[str, str]) -> list[Migra
 def migrate(conn: psycopg.Connection[tuple[object, ...]], directory: Path) -> list[str]:
     """Apply pending migrations in order and return their versions. Re-running applies nothing."""
     disk = load_migrations(directory)
-    with conn.transaction():
-        conn.execute("SELECT pg_advisory_xact_lock(%s)", (_LOCK_KEY,))
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "version text PRIMARY KEY, checksum text NOT NULL,"
-            " applied_at timestamptz NOT NULL DEFAULT now())"
-        )
-        rows = conn.execute("SELECT version, checksum FROM schema_migrations").fetchall()
-        todo = pending(disk, {str(v): str(c) for v, c in rows})
-        for migration in todo:
-            conn.execute(migration.sql)
+    step = "schema_migrations setup"
+    try:
+        with conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_LOCK_KEY,))
             conn.execute(
-                "INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s)",
-                (migration.version, migration.checksum),
+                "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                "version text PRIMARY KEY, checksum text NOT NULL,"
+                " applied_at timestamptz NOT NULL DEFAULT now())"
             )
+            rows = conn.execute("SELECT version, checksum FROM schema_migrations").fetchall()
+            todo = pending(disk, {str(v): str(c) for v, c in rows})
+            for migration in todo:
+                step = migration.name
+                conn.execute(migration.sql)
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s)",
+                    (migration.version, migration.checksum),
+                )
+    except psycopg.Error as err:
+        msg = f"{step}: {err}"
+        raise MigrationError(msg) from err
     return [m.version for m in todo]
 
 
 def main() -> int:
     settings = Settings()
-    with psycopg.connect(settings.database_url.get_secret_value()) as conn:
-        try:
+    try:
+        with psycopg.connect(settings.database_url.get_secret_value()) as conn:
             applied = migrate(conn, settings.migrations_dir)
-        except MigrationError as err:
-            sys.stderr.write(f"migrate: {err}\n")
-            return 1
+    except MigrationError as err:
+        sys.stderr.write(f"migrate: {err}\n")
+        return 1
+    except psycopg.Error as err:
+        sys.stderr.write(f"migrate: database error: {err}\n")
+        return 1
     sys.stdout.write(f"migrate: applied {applied or 'nothing'}\n")
     return 0
 
