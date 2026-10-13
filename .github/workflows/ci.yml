@@ -124,6 +124,8 @@ jobs:
           PY
       - name: The generated Unicode class in db/schema.sql is current
         run: python3 scripts/gen-unicode-ignorables.py --check db/schema.sql
+      - name: Self-test the Unicode check (offline, stale table, unpinned upstream file)
+        run: scripts/ci/gen-unicode-selftest.sh
       - name: squawk
         run: .github/tools/node_modules/.bin/squawk --config .squawk.toml db/schema.sql
 
@@ -167,6 +169,23 @@ jobs:
         with:
           lycheeVersion: v0.24.2
           args: --no-progress --max-retries 3 --retry-wait-time 5 --accept '200..=299,429' './README.md' './docs/**/*.md'
+
+  unicode-upstream:
+    name: unicode-upstream (nightly)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Re-download the pinned UCD files, verify their sha256 and re-derive the table
+        run: python3 scripts/gen-unicode-ignorables.py --verify-upstream
 
   secrets:
     name: secrets
