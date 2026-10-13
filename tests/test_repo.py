@@ -254,6 +254,41 @@ def test_propose_same_key_same_value_reconfirms(fresh_db: str, world: Pool) -> N
     assert count == 1
 
 
+def _valued(body: str, value: str | None) -> ProposeRequest:
+    return _fact(body).model_copy(update={"value": value})
+
+
+@pytest.mark.db
+def test_propose_same_key_same_value_in_other_words_reconfirms(fresh_db: str, world: Pool) -> None:
+    with request_tx(world, USER, None) as conn:
+        first = repo.propose(conn, _valued("Owner is Kim.", " KIM "))
+    with request_tx(world, USER, None) as conn:
+        again = repo.propose(conn, _valued("Kim owns it these days", "kim"))
+        other = repo.propose(conn, _valued("Owner is Lee.", "Lee"))
+    stored = _scalar(fresh_db, "SELECT value FROM memory WHERE id = %s", first.memory_id)
+    conflict = _scalar(fresh_db, "SELECT conflict_with FROM memory WHERE id = %s", other.memory_id)
+    assert again == ProposeOutcome(kind="reconfirmed", memory_id=first.memory_id)
+    assert stored == "kim"
+    assert other.kind == "created"
+    assert conflict == first.memory_id
+
+
+@pytest.mark.db
+def test_a_row_without_a_value_falls_back_to_the_body_hash_and_gets_the_value(
+    fresh_db: str, world: Pool
+) -> None:
+    with request_tx(world, USER, None) as conn:
+        old = repo.propose(conn, _valued("Kim", None))
+    with request_tx(world, USER, None) as conn:
+        reworded = repo.propose(conn, _valued("Kim, as of today", "Kim"))
+    with request_tx(world, USER, None) as conn:
+        same = repo.propose(conn, _valued("Kim", "Kim"))
+    stored = _scalar(fresh_db, "SELECT value FROM memory WHERE id = %s", old.memory_id)
+    assert reworded.kind == "created"
+    assert same == ProposeOutcome(kind="reconfirmed", memory_id=old.memory_id)
+    assert stored == "kim"
+
+
 @pytest.mark.db
 def test_propose_same_key_other_value_is_created_with_conflict(fresh_db: str, world: Pool) -> None:
     with request_tx(world, USER, None) as conn:

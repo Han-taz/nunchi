@@ -39,6 +39,7 @@ class Candidate(Frozen):
     body_excerpt: Annotated[str, Field(max_length=300)] = ""
     subject_name: str | None = None
     attribute: str | None = None
+    value: str | None = None
 
 
 class EntityContext(Frozen):
@@ -59,6 +60,7 @@ class ProposalDraft(Frozen):
     subject_name: str | None = None
     subject_entity_id: UUID | None = None
     attribute: str | None = None
+    value: Annotated[str, Field(min_length=1, max_length=200)] | None = None
     source_refs: tuple[SourceRef, ...] = ()
     valid_from: date | None = None
     origin: MemoryOrigin

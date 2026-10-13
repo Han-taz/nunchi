@@ -16,9 +16,12 @@ from tests.test_repo import world as world  # noqa: PLC0414 - fixture re-export
 LIVE = (MemoryStatus.ACTIVE,)
 
 
-def titles(pool: Pool, query: str, embedder: FakeEmbedder | DownEmbedder | None) -> list[str]:
+def titles(
+    pool: Pool, query: str, embedder: FakeEmbedder | DownEmbedder | None, floor: float = 0.4
+) -> list[str]:
     with request_tx(pool, USER, None) as conn:
-        return [h.title for h in repo.search(conn, query, None, None, LIVE, embedder=embedder)]
+        hits = repo.search(conn, query, None, None, LIVE, embedder=embedder, vector_floor=floor)
+        return [h.title for h in hits]
 
 
 @pytest.mark.db
@@ -27,6 +30,15 @@ def test_a_variant_spelling_finds_the_memory_only_when_vectors_are_on(
 ) -> None:
     assert titles(world, "에이사", None) == []
     assert titles(world, "에이사", embedded) == ["A사 담당자는 이OO"]
+
+
+@pytest.mark.db
+def test_the_vector_floor_decides_how_close_a_vector_match_must_be(
+    world: Pool, embedded: FakeEmbedder
+) -> None:
+    """ "에이사" and the A사 memory share one of two concepts: cosine similarity 0.707."""
+    assert titles(world, "에이사", embedded, floor=0.7) == ["A사 담당자는 이OO"]
+    assert titles(world, "에이사", embedded, floor=0.8) == []
 
 
 @pytest.mark.db

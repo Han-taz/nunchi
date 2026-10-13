@@ -26,7 +26,7 @@ from nunchi.extract import (
     build_extractor,
     to_propose_request,
 )
-from nunchi.extract.claude import MODEL, SYSTEM_PROMPT, render_user_content
+from nunchi.extract.claude import MODEL, REPLY_SCHEMA, SYSTEM_PROMPT, render_user_content
 
 REF = SourceRef(uri="https://example.slack.com/archives/C1/p1", system="slack")
 STORE = UUID("00000000-0000-0000-0000-0000000000aa")
@@ -60,6 +60,7 @@ def reply(**over: str | bool | None) -> dict[str, Any]:
         "body": "Decided on 2026-10-12: rollbacks use the deploy bot because it logs approvals.",
         "subject_name": "deploy pipeline",
         "attribute": "rollback method",
+        "value": None,
         "valid_from": "2026-10-12",
     }
     return base | over
@@ -105,6 +106,34 @@ def test_remembered_message_becomes_draft_with_caller_owned_fields() -> None:
         valid_from=date(2026, 10, 12),
         origin=MemoryOrigin.EXTERNAL,
     )
+
+
+def test_value_reaches_the_draft_and_the_propose_request_but_never_a_note() -> None:
+    kept = reply(value="김철수")
+    draft = replying(message(json.dumps(kept))).extract("x", CTX)
+    assert draft is not None
+    assert draft.value == "김철수"
+    request = to_propose_request(draft, CTX, lambda _name: UUID(int=7))
+    assert request.value == "김철수"
+    note = reply(kind="note", subject_name=None, attribute=None, value="김철수")
+    noted = replying(message(json.dumps(note))).extract("x", CTX)
+    assert noted is not None
+    assert noted.value is None
+
+
+def test_a_reply_without_a_value_parses_and_the_schema_demands_one() -> None:
+    bare = reply()
+    draft = replying(message(json.dumps(bare))).extract("x", CTX)
+    assert draft is not None
+    assert draft.value is None
+    assert "value" in REPLY_SCHEMA["required"]
+    assert REPLY_SCHEMA["properties"]["value"] == {"type": ["string", "null"]}
+
+
+def test_a_candidate_shows_its_value_to_the_model() -> None:
+    withvalue = CAND.model_copy(update={"value": "이민수"})
+    content = render_user_content("x", CTX.model_copy(update={"candidates": (withvalue,)}))
+    assert '"value": "이민수"' in content
 
 
 def test_nothing_worth_remembering_returns_none() -> None:

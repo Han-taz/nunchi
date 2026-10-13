@@ -72,8 +72,8 @@ def _candidates(
         return (), ()
     rows = conn.execute(
         "SELECT m.id, m.kind, m.title, left(coalesce(m.body, ''), 300), e.canonical_name,"
-        " m.attribute, m.subject_id FROM memory AS m LEFT JOIN entity AS e ON e.id = m.subject_id"
-        " WHERE m.id = ANY(%s)",
+        " m.attribute, m.subject_id, m.value FROM memory AS m"
+        " LEFT JOIN entity AS e ON e.id = m.subject_id WHERE m.id = ANY(%s)",
         ([h.id for h in hits],),
     ).fetchall()
     by_id = {r[0]: r for r in rows}
@@ -86,6 +86,7 @@ def _candidates(
             body_excerpt=by_id[h.id][3],
             subject_name=by_id[h.id][4],
             attribute=by_id[h.id][5],
+            value=by_id[h.id][7],
         )
         for h in hits
         if h.id in by_id

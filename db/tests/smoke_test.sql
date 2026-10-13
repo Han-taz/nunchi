@@ -1356,6 +1356,36 @@ COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-0000000000d1');
 SELECT t.err('N29c an agent context cannot open a card', $q$SELECT app_sec.issue_card(t.mid(302))$q$, '42501');
 COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.err('N40 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
+  VALUES (t.mid(310),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 연락처','A사 연락처는 이민수님입니다','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','연락처',' 이민수 ')$q$, 'ok');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N40a carol approves the first value; value stored normalized', $q$SELECT t.approve(t.mid(310)) || '/' || (SELECT value FROM memory WHERE id = t.mid(310))$q$, 'active/이민수');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.err('N41 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
+  VALUES (t.mid(311),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','에이사 컨택','에이사 컨택은 이민수님으로 알고 있어요','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','연락처','이민수')$q$, 'ok');
+SELECT t.eq('N41a same key and value in other words: no new row, one reconfirm', $q$SELECT (SELECT count(*) FROM memory WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = '연락처') || '/' || t.lastop(t.mid(310))$q$, '1/reconfirm');
+SELECT t.err('N42 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
+  VALUES (t.mid(312),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 연락처','A사 연락처가 박민수님으로 바뀌었어요','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','연락처','박민수')$q$, 'ok');
+SELECT t.eq('N42a same key, other value: a conflicting proposal', $q$SELECT (conflict_with = t.mid(310))::text || '/' || status FROM memory WHERE id = t.mid(312)$q$, 'true/proposed');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.err('N43 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
+  VALUES (t.mid(313),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 레거시','레거시 본문','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','레거시',NULL)$q$, 'ok');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N43a carol approves the value-less legacy row', $q$SELECT t.approve(t.mid(313))$q$, 'active');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.err('N44 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
+  VALUES (t.mid(314),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 레거시','레거시 본문','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','레거시','아무 값')$q$, 'ok');
+SELECT t.eq('N44a legacy row falls back to the body hash: reconfirm, value backfilled', $q$SELECT (SELECT count(*) FROM memory WHERE attribute = '레거시') || '/' || t.lastop(t.mid(313)) || '/' || (SELECT value FROM memory WHERE id = t.mid(313))$q$, '1/reconfirm/아무 값');
+SELECT t.err('N45 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
+  VALUES (t.mid(315),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 레거시','다른 본문','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','레거시','다른 값')$q$, 'ok');
+SELECT t.eq('N45a legacy row, other body: conflict as before', $q$SELECT (conflict_with = t.mid(313))::text FROM memory WHERE id = t.mid(315)$q$, 'true');
+COMMIT;
 RESET ROLE;
 SELECT t.err('N22 a second live row for the same key is blocked by the partial unique index', $q$INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute)
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','dup','최OO','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, '23505');

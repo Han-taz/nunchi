@@ -8,6 +8,7 @@ from psycopg import sql
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
+from nunchi.config import SEARCH_RRF_K, SEARCH_VECTOR_FLOOR
 from nunchi.db import Conn
 from nunchi.domain.models import (
     Memory,
@@ -25,7 +26,7 @@ from nunchi.embed import Embedder, embed_query
 _MEMORY_COLUMNS = sql.SQL(
     "id, store_id, kind, status, title, body, source_refs, origin, supersedes_id,"
     " created_by, on_behalf_of, valid_from, valid_to, version, created_at, updated_at,"
-    " subject_id, attribute, last_confirmed_at"
+    " subject_id, attribute, last_confirmed_at, value"
 )
 
 
@@ -55,6 +56,8 @@ def search(  # noqa: PLR0913 - the filters are the search
     statuses: Sequence[MemoryStatus],
     *,
     embedder: Embedder | None = None,
+    vector_floor: float = SEARCH_VECTOR_FLOOR,
+    rrf_k: int = SEARCH_RRF_K,
 ) -> list[SearchHit]:
     """Trigram search, fused with vector search when an embedder is given and answers."""
     vector = embed_query(embedder, query)
@@ -62,7 +65,7 @@ def search(  # noqa: PLR0913 - the filters are the search
         return cur.execute(
             "SELECT id, store_id, kind, title, status, score, stale, last_confirmed_at"
             " FROM app_sec.search(%s, %s::uuid[], %s::memory_status[], %s::memory_kind[],"
-            " %s::real[], %s)",
+            " %s::real[], %s, %s::real, %s::integer)",
             (
                 query,
                 list(stores) if stores is not None else None,
@@ -70,6 +73,8 @@ def search(  # noqa: PLR0913 - the filters are the search
                 [k.value for k in kinds] if kinds is not None else None,
                 vector,
                 embedder.model if embedder is not None and vector is not None else None,
+                vector_floor,
+                rrf_k,
             ),
         ).fetchall()
 
@@ -93,8 +98,8 @@ def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
             sql.SQL(
                 "INSERT INTO memory"
                 " (store_id, kind, title, body, source_refs, supersedes_id,"
-                " subject_id, attribute, gate_result, on_behalf_of)"
-                " VALUES (%s, %s::memory_kind, %s, %s, %s, %s, %s, %s, %s,"
+                " subject_id, attribute, value, gate_result, on_behalf_of)"
+                " VALUES (%s, %s::memory_kind, %s, %s, %s, %s, %s, %s, %s, %s,"
                 " CASE WHEN app_sec.ctx_agent() IS NOT NULL THEN app_sec.ctx_user() END)"
                 " RETURNING id"
             ),
@@ -107,6 +112,7 @@ def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
                 req.supersedes_id,
                 req.subject_id,
                 req.attribute,
+                req.value,
                 Jsonb({"flags": list(req.gate_flags)}),
             ),
         ).fetchall()

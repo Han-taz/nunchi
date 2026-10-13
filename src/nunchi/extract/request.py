@@ -32,4 +32,5 @@ def to_propose_request(
         source_refs=draft.source_refs,
         subject_id=subject_id,
         attribute=draft.attribute,
+        value=draft.value,
     )

@@ -12,9 +12,12 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import psycopg
+
 from eval import score
 from eval.corpus import Message, Query, load_messages, load_queries
-from eval.db import CONTRIBUTOR, CURATORS, STORE, fresh_database
+from eval.db import CONTRIBUTOR, CURATORS, STORE, fresh_database, superuser_url
+from eval.embedding import embed_documents
 from eval.oracle import ConceptEmbedder, OracleExtractor
 from eval.score import Outcome
 from nunchi.capture import (
@@ -24,7 +27,7 @@ from nunchi.capture import (
     Rejected,
     capture,
 )
-from nunchi.config import Settings
+from nunchi.config import SEARCH_RRF_K, SEARCH_VECTOR_FLOOR, Settings
 from nunchi.db import Conn, Pool, open_pool, request_tx
 from nunchi.domain import repo
 from nunchi.domain.models import MemoryOrigin, MemoryStatus, SourceRef
@@ -96,12 +99,28 @@ def _approve(pool: Pool, created: Created) -> str:
     return verdict
 
 
-def run_search(pool: Pool, queries: list[Query], outcomes: list[Outcome]) -> list[dict[str, Any]]:
+def run_search(  # noqa: PLR0913, PLR0917 - the knobs a sweep varies
+    pool: Pool,
+    queries: list[Query],
+    outcomes: list[Outcome],
+    embedder: Embedder | None = None,
+    vector_floor: float = SEARCH_VECTOR_FLOOR,
+    rrf_k: int = SEARCH_RRF_K,
+) -> list[dict[str, Any]]:
     mapping = score.gold_by_db_id(outcomes)
     rows = []
     for q in queries:
         with request_tx(pool, CONTRIBUTOR, None) as conn:
-            hits = repo.search(conn, q.query, [STORE], None, LIVE)[:SEARCH_DEPTH]
+            hits = repo.search(
+                conn,
+                q.query,
+                [STORE],
+                None,
+                LIVE,
+                embedder=embedder,
+                vector_floor=vector_floor,
+                rrf_k=rrf_k,
+            )[:SEARCH_DEPTH]
         rank = score.search_ranks(q, [h.id for h in hits], mapping)
         rows.append({"id": q.id, "query": q.query, "gold": list(q.gold), "rank": rank})
     return rows
@@ -118,7 +137,10 @@ def run_eval(
         pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
         try:
             outcomes = [replay_one(pool, extractor, m, embedder) for m in messages]
-            searched = run_search(pool, queries, outcomes)
+            if embedder is not None:
+                with psycopg.connect(superuser_url(admin_url, app_url)) as admin:
+                    embed_documents(admin, embedder, "title+body")
+            searched = run_search(pool, queries, outcomes, embedder)
             with request_tx(pool, CURATORS[0], None) as conn:
                 row = conn.execute("SELECT count(*) FROM entity").fetchone()
             assert row is not None  # noqa: S101 - count(*) always returns one row
@@ -177,6 +199,11 @@ def main(argv: list[str] | None = None) -> int:
         default="none",
         help="concept: oracle-grade wiring check; env: the NUNCHI_EMBEDDING_* endpoint",
     )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="ingest once, then print search recall over vector floor x RRF k x embed text",
+    )
     parser.add_argument("--limit", type=int, help="replay only the first N messages")
     parser.add_argument("--out-dir", type=Path, default=RESULTS)
     args = parser.parse_args(argv)
@@ -194,6 +221,18 @@ def main(argv: list[str] | None = None) -> int:
         embedder = ConceptEmbedder()
     elif args.embedder == "env":
         embedder = embedder_from_settings(Settings(database_url="unused"))
+    if args.sweep:
+        if embedder is None:
+            sys.stderr.write("eval: --sweep needs --embedder concept or env\n")
+            return 2
+        from eval.sweep import run_sweep, sweep_table  # noqa: PLC0415 - sweep imports this module
+
+        rows = run_sweep(args.db, extractor, messages, load_queries(), embedder)
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        (args.out_dir / f"sweep-{stamp}.json").write_text(json.dumps(rows, indent=1))
+        sys.stdout.write(sweep_table(rows) + "\n")
+        return 0
     report = run_eval(args.db, extractor, messages, load_queries(), embedder)
     report["config"] = {
         "extractor": args.extractor,
