@@ -7,12 +7,18 @@ from datetime import date
 from typing import Literal
 from uuid import UUID
 
-from nunchi.capture.resolve import ResolveConfig, resolve_attribute, resolve_subject
+from nunchi.capture.resolve import ResolveConfig, known_entities, resolve_attribute, resolve_subject
 from nunchi.db import Conn
 from nunchi.domain import repo
 from nunchi.domain.models import Frozen, MemoryOrigin, MemoryStatus, SourceRef
 from nunchi.embed import Embedder
-from nunchi.extract import Candidate, ExtractContext, Extractor, ProposalDraft, to_propose_request
+from nunchi.extract import (
+    Candidate,
+    ExtractContext,
+    Extractor,
+    ProposalDraft,
+    to_propose_request,
+)
 from nunchi.gate import Verdict, evaluate_pair
 from nunchi.gate.rules import Action
 
@@ -58,18 +64,20 @@ CaptureResult = Skipped | Rejected | Created | Reconfirmed
 
 def _candidates(
     conn: Conn, source_text: str, store_id: UUID, embedder: Embedder | None
-) -> tuple[Candidate, ...]:
+) -> tuple[tuple[Candidate, ...], tuple[UUID, ...]]:
+    """The candidate memories and the entity ids they are about."""
     hits = repo.search(conn, source_text[:_QUERY_CHARS], [store_id], None, _LIVE, embedder=embedder)
     hits = hits[:_CANDIDATES]
     if not hits:
-        return ()
+        return (), ()
     rows = conn.execute(
         "SELECT m.id, m.kind, m.title, left(coalesce(m.body, ''), 300), e.canonical_name,"
-        " m.attribute FROM memory AS m LEFT JOIN entity AS e ON e.id = m.subject_id"
+        " m.attribute, m.subject_id FROM memory AS m LEFT JOIN entity AS e ON e.id = m.subject_id"
         " WHERE m.id = ANY(%s)",
         ([h.id for h in hits],),
     ).fetchall()
     by_id = {r[0]: r for r in rows}
+    subjects: tuple[UUID, ...] = tuple(dict.fromkeys(r[6] for r in rows if r[6] is not None))  # type: ignore[misc]
     return tuple(
         Candidate(
             id=h.id,
@@ -81,21 +89,29 @@ def _candidates(
         )
         for h in hits
         if h.id in by_id
-    )
+    ), subjects
 
 
 def _resolve_key(
     conn: Conn,
     draft: ProposalDraft,
-    store_id: UUID,
+    context: ExtractContext,
     embedder: Embedder | None,
     cfg: ResolveConfig,
 ) -> tuple[UUID | None, ProposalDraft]:
-    """The entity the draft is about and the draft with its attribute canonicalized."""
+    """The entity the draft is about and the draft with its attribute canonicalized. The model's
+    entity id counts only when this server offered it; any other id falls back to the name."""
     if draft.subject_name is None or draft.attribute is None:
         return None, draft
-    subject_id = resolve_subject(conn, draft.subject_name, embedder, cfg)
-    attribute = resolve_attribute(conn, store_id, subject_id, draft.attribute, embedder, cfg)
+    offered = {e.id for e in context.entities}
+    if draft.subject_entity_id in offered:
+        subject_id = draft.subject_entity_id
+        conn.execute("SELECT app_sec.add_entity_alias(%s, %s)", (subject_id, draft.subject_name))
+    else:
+        subject_id = resolve_subject(conn, draft.subject_name, embedder, cfg)
+    attribute = resolve_attribute(
+        conn, context.store_id, subject_id, draft.attribute, embedder, cfg
+    )
     return subject_id, draft.model_copy(update={"attribute": attribute})
 
 
@@ -108,17 +124,16 @@ def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the two option
     resolve: ResolveConfig | None = None,
 ) -> CaptureResult:
     cfg = resolve or ResolveConfig()
-    candidates = _candidates(conn, source_text, context.store_id, embedder)
-    draft = extractor.extract(
-        source_text,
-        ExtractContext(
-            origin=context.origin,
-            source_refs=context.source_refs,
-            today=context.today,
-            store_id=context.store_id,
-            candidates=candidates,
-        ),
+    candidates, subjects = _candidates(conn, source_text, context.store_id, embedder)
+    extract_context = ExtractContext(
+        origin=context.origin,
+        source_refs=context.source_refs,
+        today=context.today,
+        store_id=context.store_id,
+        candidates=candidates,
+        entities=known_entities(conn, context.store_id, source_text, subjects, cfg),
     )
+    draft = extractor.extract(source_text, extract_context)
     if draft is None:
         return Skipped()
 
@@ -126,17 +141,8 @@ def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the two option
     if gate.verdict is Verdict.REJECT:
         return Rejected(reasons=tuple(f.rule_id for f in gate.flags if f.action is Action.REJECT))
 
-    subject_id, draft = _resolve_key(conn, draft, context.store_id, embedder, cfg)
-    request = to_propose_request(
-        draft,
-        ExtractContext(
-            origin=context.origin,
-            source_refs=context.source_refs,
-            today=context.today,
-            store_id=context.store_id,
-        ),
-        lambda _name: subject_id,
-    )
+    subject_id, draft = _resolve_key(conn, draft, extract_context, embedder, cfg)
+    request = to_propose_request(draft, extract_context, lambda _name: subject_id)
     flags = tuple(f.rule_id for f in gate.flags)
     outcome = repo.propose(conn, request.model_copy(update={"gate_flags": flags}))
     if outcome.kind == "reconfirmed":

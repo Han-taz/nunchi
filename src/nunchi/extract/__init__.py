@@ -1,6 +1,7 @@
 from nunchi.extract.claude import ClaudeExtractor, build_extractor
 from nunchi.extract.draft import (
     Candidate,
+    EntityContext,
     ExtractContext,
     ExtractionError,
     Extractor,
@@ -15,6 +16,7 @@ from nunchi.extract.request import UnknownSubjectError, to_propose_request
 __all__ = [
     "Candidate",
     "ClaudeExtractor",
+    "EntityContext",
     "ExtractContext",
     "ExtractionError",
     "Extractor",

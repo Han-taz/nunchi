@@ -18,6 +18,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nunchi.db import Conn
 from nunchi.embed import Embedder, EmbedError
+from nunchi.extract import EntityContext
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class ResolveConfig(BaseSettings):
     subject_cosine_min: float = Field(0.80, ge=0, le=1)
     attribute_cosine_min: float = Field(0.88, ge=0, le=1)
     scan_limit: int = Field(200, ge=1)
+    context_entities: int = Field(10, ge=1)
+    context_min: float = Field(0.5, ge=0, le=1)
 
 
 def match_key(name: str) -> str:
@@ -125,3 +128,40 @@ def resolve_attribute(  # noqa: PLR0913, PLR0917 - the key (store, subject), the
     if same is None:
         same = _nearest(embedder, attribute, {r[0]: r[0] for r in rows}, cfg.attribute_cosine_min)
     return same or attribute
+
+
+def known_entities(
+    conn: Conn, store_id: UUID, source_text: str, extra: tuple[UUID, ...], cfg: ResolveConfig
+) -> tuple[EntityContext, ...]:
+    """Entities the extractor may reuse: those whose alias appears in the source (word
+    similarity), then the subjects of the candidate memories search already found."""
+    best: dict[UUID, float] = {}
+    for row in _rows(
+        conn,
+        "SELECT entity_id, word_sim FROM app_sec.entity_matches(%s, %s)",
+        (source_text, cfg.scan_limit),
+    ):
+        best[row[0]] = max(best.get(row[0], 0.0), row[1])
+    named = sorted((i for i, w in best.items() if w >= cfg.context_min), key=lambda i: -best[i])
+    ids = list(dict.fromkeys([*named, *extra]))[: cfg.context_entities]
+    if not ids:
+        return ()
+    found = _rows(
+        conn,
+        "SELECT e.id, e.canonical_name,"
+        " array(SELECT a.alias_norm FROM entity_alias AS a WHERE a.entity_id = e.id"
+        "  ORDER BY a.alias_norm LIMIT 6),"
+        " array(SELECT DISTINCT m.attribute FROM memory AS m WHERE m.subject_id = e.id"
+        "  AND m.store_id = %s AND m.status IN ('active', 'provisional')"
+        " AND m.attribute IS NOT NULL ORDER BY m.attribute LIMIT 8)"
+        " FROM entity AS e WHERE e.id = ANY(%s)",
+        (store_id, ids),
+    )
+    by_id = {r[0]: r for r in found}
+    return tuple(
+        EntityContext(
+            id=i, name=by_id[i][1], aliases=tuple(by_id[i][2]), attributes=tuple(by_id[i][3])
+        )
+        for i in ids
+        if i in by_id
+    )

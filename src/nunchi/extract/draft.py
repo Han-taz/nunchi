@@ -41,6 +41,15 @@ class Candidate(Frozen):
     attribute: str | None = None
 
 
+class EntityContext(Frozen):
+    """An entity the store already knows, offered to the extractor so it reuses the id."""
+
+    id: UUID
+    name: str
+    aliases: tuple[str, ...] = ()
+    attributes: tuple[str, ...] = ()
+
+
 class ProposalDraft(Frozen):
     """Extraction form from design §6. The caller, never the model, sets origin and source_refs."""
 
@@ -48,6 +57,7 @@ class ProposalDraft(Frozen):
     title: Annotated[str, Field(min_length=1, max_length=300)]
     body: Annotated[str, Field(max_length=100_000)] | None = None
     subject_name: str | None = None
+    subject_entity_id: UUID | None = None
     attribute: str | None = None
     source_refs: tuple[SourceRef, ...] = ()
     valid_from: date | None = None
@@ -73,6 +83,7 @@ class ExtractContext(Frozen):
     today: date
     store_id: UUID
     candidates: Annotated[tuple[Candidate, ...], Field(max_length=5)] = ()
+    entities: Annotated[tuple[EntityContext, ...], Field(max_length=10)] = ()
 
 
 class FailureReason(StrEnum):
