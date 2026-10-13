@@ -77,14 +77,21 @@ POSITIVES = [
     ("pii-kr-phone", "\u0660\u0661\u0660-\u0661\u0662\u0663\u0664-\u0665\u0666\u0667\u0668"),
     ("pii-kr-card", "4111 1111 1111 1111"),
     ("pii-kr-card", "카드 4111-1111-1111-1111"),
-    ("pii-kr-card", "4111111111111111"),
+    ("pii-kr-card-keyed", "카드 4111111111111111"),
+    ("pii-kr-card-keyed", "card: 5500000000000004"),
+    ("pii-kr-card-keyed", "4111111111111111 CVC 123"),
+    ("pii-kr-card-bare", "4111111111111111"),
+    ("pii-kr-card-bare", "ORD 6011111111111117"),
     ("pii-kr-card", "4111.1111.1111.1111"),
     ("pii-kr-card", "4111/1111/1111/1111"),
     ("pii-kr-phone", "010%201234%205678"),
     ("pii-kr-phone", "tel=010%2D1234%2D5678"),
-    ("pii-kr-card", "378282246310005"),
+    ("pii-kr-card", "3782 822463 10005"),
+    ("pii-kr-card-bare", "378282246310005"),
     ("pii-kr-card", "3530 1113 3330 0000"),
-    ("pii-kr-card", "4222222222222"),
+    ("pii-kr-card-bare", "4222222222222"),
+    ("pii-kr-card", "2221-0000-0000-0009"),
+    ("pii-kr-card", "3566 0020 2036 0505"),
     ("pii-kr-phone", "연락처 01712345678"),
     ("pii-kr-phone", "call +82 10 1234 5678"),
     ("pii-kr-account", "국민은행 123-456-789012"),
@@ -149,8 +156,18 @@ NEGATIVES = [
     ("pii-kr-rrn-bare", "010203312345"),
     ("pii-kr-rrn-bare", "01020331234567"),
     ("pii-kr-card", "1234567890123456"),
+    ("pii-kr-card", "4111111111111111"),
     ("pii-kr-card", "411111111111"),
     ("pii-kr-card", "41111111111111111111"),
+    ("pii-kr-card", "9111 1111 1111 1116"),
+    ("pii-kr-card", "4111 1111 1111 111"),
+    ("pii-kr-card-keyed", "4111111111111111"),
+    ("pii-kr-card-keyed", "카드 " + "x" * 21 + " 4111111111111111"),
+    ("pii-kr-card-keyed", "카드 4111111111111112"),
+    ("pii-kr-card-keyed", "카드 9111111111111116"),
+    ("pii-kr-card-bare", "카드 4111111111111111"),
+    ("pii-kr-card-bare", "4111111111111112"),
+    ("pii-kr-card-bare", "ORD-2406151234567"),
     ("pii-kr-phone", "010-123-45"),
     ("pii-kr-phone", "02-1234-5678"),
     ("pii-kr-phone", "9010-1234-5678"),
@@ -193,7 +210,7 @@ def test_rule_stays_quiet(rule_id: str, text: str) -> None:
 
 def test_every_rule_has_positive_and_negative_cases() -> None:
     ids = {r.id for r in RULES}
-    assert len(ids) == len(RULES) == 19
+    assert len(ids) == len(RULES) == 21
     assert {i for i, _ in POSITIVES} == ids
     assert {i for i, _ in NEGATIVES} == ids
 
@@ -214,7 +231,7 @@ def test_pii_is_rejected_with_link_message() -> None:
 
 def test_every_pii_rule_rejects_with_link_message() -> None:
     pii = [r for r in RULES if r.kind is Kind.PII and r.action is Action.REJECT]
-    assert len(pii) == 6
+    assert len(pii) == 7
     assert {(r.action, r.message) for r in pii} == {(Action.REJECT, "원문 링크로 대체하세요")}
 
 
@@ -366,7 +383,7 @@ ANY_TEXT = st.text(
         ),
     )
 )
-REJECTING = [t for r, t in POSITIVES if r.startswith(("secret", "pii")) and r != "pii-kr-rrn-bare"]
+REJECTING = [t for r, t in POSITIVES if r.startswith(("secret", "pii")) and not r.endswith("-bare")]
 
 
 @given(ANY_TEXT)
@@ -426,3 +443,42 @@ def test_rrn_reject_rate_on_timestamp_order_ids() -> None:
         f"whole_gate_reject={all_rejects / len(ids):.4%}"
     )
     assert rrn_rejects == 0
+    assert all_rejects == 0
+
+
+def _luhn_complete(prefix: str, length: int, rng: random.Random) -> str:
+    body = prefix + "".join(str(rng.randrange(10)) for _ in range(length - len(prefix) - 1))
+    total = 0
+    for i, ch in enumerate(reversed(body)):
+        d = int(ch)
+        if i % 2 == 0:
+            d = sum(divmod(d * 2, 10))
+        total += d
+    return body + str((10 - total % 10) % 10)
+
+
+def _group(number: str) -> str:
+    if len(number) == 15:
+        return f"{number[:4]}-{number[4:10]}-{number[10:]}"
+    return "-".join(number[i : i + 4] for i in range(0, len(number), 4))
+
+
+def test_grouped_card_recall_per_scheme_and_order_id_precision() -> None:
+    """1000 valid grouped test cards per scheme must all reject. Run with -s for the numbers."""
+    rng = random.Random(20260101)  # noqa: S311
+    schemes = {
+        "visa": (lambda: "4", 16),
+        "mastercard-5": (lambda: str(rng.randrange(51, 56)), 16),
+        "mastercard-2": (lambda: str(rng.randrange(2221, 2721)), 16),
+        "amex": (lambda: rng.choice(["34", "37"]), 15),
+        "jcb": (lambda: str(rng.randrange(3528, 3590)), 16),
+        "discover-unionpay": (lambda: "6", 16),
+    }
+    for name, (prefix, length) in schemes.items():
+        rejected = sum(
+            evaluate(f"x {_group(_luhn_complete(prefix(), length, rng))} y").verdict
+            is Verdict.REJECT
+            for _ in range(1000)
+        )
+        print(f"recall {name}={rejected / 1000:.1%}")
+        assert rejected == 1000
