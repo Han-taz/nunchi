@@ -39,6 +39,21 @@ drop_row_and_test() {
 }
 flip_to_pass() { sed -i.bak 's/^X1b\tok\tfail/X1b\tok\tpass/' db/tests/expectations.tsv && rm db/tests/expectations.tsv.bak; }
 add_row() { printf 'T2\t= 1\tpass\n' >>db/tests/expectations.tsv; echo "SELECT 'T2 = 1';" >>db/tests/smoke_test.sql; }
+drop_row_test_id_before_tab() {
+  sed -i.bak '/^X1a/d' db/tests/expectations.tsv && rm db/tests/expectations.tsv.bak
+  sed -i.bak "s/'X1a ok'/'X1a'||E'\\tok'/" db/tests/smoke_test.sql && rm db/tests/smoke_test.sql.bak
+}
+drop_row_longer_id_remains() {
+  sed -i.bak '/^X1a/d' db/tests/expectations.tsv && rm db/tests/expectations.tsv.bak
+  sed -i.bak "s/'X1a ok'/'X1ab ok'/" db/tests/smoke_test.sql && rm db/tests/smoke_test.sql.bak
+}
+drop_row_comment_mentions_id() {
+  sed -i.bak '/^X1a/d' db/tests/expectations.tsv && rm db/tests/expectations.tsv.bak
+  sed -i.bak "s/^SELECT 'X1a ok';/-- SELECT 'X1a ok'; was removed/" db/tests/smoke_test.sql && rm db/tests/smoke_test.sql.bak
+}
+add_malformed_id() { printf 'T 2\t= 1\tpass\n' >>db/tests/expectations.tsv; }
+add_duplicate_id() { printf 'T1\t= 0\tpass\n' >>db/tests/expectations.tsv; }
+delete_registry() { git rm -q db/tests/expectations.tsv; }
 touch_readme() { echo more >>README.md; }
 touch_gate_files() { echo x >scripts/ci/pr-size.sh; echo x >db/tests/expectations.tsv.new; echo x >>.sqlfluff; }
 
@@ -46,5 +61,11 @@ case_ "row deleted, test kept" 1 expectations-guard.sh drop_row_keep_test "X1a w
 case_ "row and test deleted" 0 expectations-guard.sh drop_row_and_test "removed with its test: X1a"
 case_ "must-fail flipped to pass" 1 expectations-guard.sh flip_to_pass "X1b on_vulnerable changed from fail to pass"
 case_ "row added" 0 expectations-guard.sh add_row "added: T2"
+case_ "row deleted, test id now followed by a tab" 1 expectations-guard.sh drop_row_test_id_before_tab "X1a was deleted from db/tests/expectations.tsv but its test still exists"
+case_ "row deleted, only a longer id X1ab remains" 0 expectations-guard.sh drop_row_longer_id_remains "removed with its test: X1a"
+case_ "row deleted, only a comment mentions the id" 0 expectations-guard.sh drop_row_comment_mentions_id "removed with its test: X1a"
+case_ "malformed id in the registry" 1 expectations-guard.sh add_malformed_id "malformed id: 'T 2'"
+case_ "duplicate id in the registry" 1 expectations-guard.sh add_duplicate_id "more than once: T1"
+case_ "registry deleted" 1 expectations-guard.sh delete_registry "expectations.tsv is missing in the head"
 case_ "no gate file touched" 0 gate-files-report.sh touch_readme "gate files changed: none"
 case_ "gate files touched" 0 gate-files-report.sh touch_gate_files "- \`scripts/ci/pr-size.sh\`"

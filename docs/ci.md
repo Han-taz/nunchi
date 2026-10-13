@@ -58,7 +58,7 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 | 베이스 `pr-size.sh` | 베이스의 스크립트로 헤드의 크기를 센다. 헤드가 스크립트를 `exit 0`으로 바꿔도 소용없다. |
 | 베이스 `migrations-immutable.sh` | 베이스의 스크립트로 베이스의 마이그레이션이 헤드에서 그대로인지 본다. |
 | 베이스 `check-commits.sh` | 커밋 제목 규칙, 머지 커밋 금지, AI 표기 금지를 베이스의 스크립트로 검사한다. |
-| `expectations-guard.sh` | `expectations.tsv`에서 행을 지우면 실패한다. 단 같은 PR이 `db/tests/*.sql`에서 그 테스트(출력 줄이 따옴표 뒤 id와 공백으로 시작하는 SQL)도 지웠으면 허용하고 무엇이 지워졌는지 출력한다. 베이스에서 `on_vulnerable = fail`이던 행을 다른 값으로 바꾸는 것도 실패다. |
+| `expectations-guard.sh` | `expectations.tsv`에서 행을 지우면 실패한다. 단 같은 PR이 `db/tests/*.sql`에서 그 테스트(주석이 아닌 줄에서 따옴표 바로 뒤에 정확히 그 id 토큰이 오는 문자열, 즉 `db-test.sh`가 출력 줄의 첫 토큰으로 읽는 것)도 지웠으면 허용하고 무엇이 지워졌는지 출력한다. `X1a`를 지울 때 `X1ab`는 남아 있어도 무방하고, 주석에 적힌 `'X1a'`는 존재로 치지 않으며, id 뒤가 공백이 아니라 탭이어도 존재로 친다. 헤드의 레지스트리가 없거나, 형식이 틀린 id(`T1`, `X3a`, `F11` 꼴이 아닌 것)나 중복 id가 있어도 실패한다. 베이스에서 `on_vulnerable = fail`이던 행을 다른 값으로 바꾸는 것도 실패다. |
 
 ### 헤드를 실행하지 않는다는 불변식
 
@@ -66,10 +66,10 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 
 - 체크아웃은 한 번이고 베이스 SHA다. `path`, `repository`, `submodules`, `working-directory`를 쓰지 않는다.
 - 쓰는 action은 `actions/checkout` 하나다. `uv sync`, `pip install`, `npm ci`, `bash <헤드 경로>`는 없다.
-- `run:`의 모든 줄은 읽기 전용 git(`fetch`, `diff`, `ls-tree`, `cat-file`, `log`, `rev-parse`, `show`, `rev-list`, `merge-base`)이거나 베이스 체크아웃의 `scripts/ci/<이름>.sh`다. 명령 연결(`;`, `&&`, `|`), 치환(`$(…)`, 백틱), 리다이렉션은 허용하지 않는다.
+- `run:` 본문은 린트의 허용 목록에 있는 문자열과 정확히 같아야 한다. 읽기 전용 `git fetch` 한 줄과 베이스 체크아웃의 `scripts/ci/<이름>.sh` 호출뿐이고, 명령 연결, 치환, 리다이렉션, 다른 git 하위 명령이나 옵션은 목록에 없으므로 거부된다.
 - PR 번호와 SHA는 `env:`로만 넘기고 `run:` 본문에 `${{ }}`를 쓰지 않는다.
 
-`scripts/ci/gate-integrity-lint.sh`가 위 규칙을 YAML에서 기계로 검사하고, `gate-integrity-lint-selftest.sh`가 규칙마다 위반하는 변형 워크플로를 만들어 거부되는지 증명한다. 둘 다 `ci.yml`의 `workflow-lint` job에서 돈다. `expectations-guard.sh`와 `gate-files-report.sh`의 동작은 `gate-integrity-selftest.sh`가 임시 저장소에서 증명한다.
+`scripts/ci/gate-integrity-lint.sh`(실제 검사는 `gate-integrity-lint.py`)가 위 규칙을 기계로 검사한다. 텍스트 정규식이 아니라 **파싱된 문서**를 본다. YAML 키는 `key:`, `key :`, `"key":`, `? key` 등 철자가 여럿이라 텍스트 검사는 두 번 연속 뚫렸다(#33 검증자). 그래서 `python3 -I`와 PyYAML(`.github/tools/requirements.txt`에 해시 고정, `workflow-lint` job이 `pip install --require-hashes`로 설치)로 읽고, 다음을 적용한다. (1) 로더가 중복 키, 앵커·별칭, 병합 키(`<<`), 명시적 태그, 복합(스칼라가 아닌) 키, 다중 문서, 파싱 오류를 모두 거부한다(fail closed). (2) 허용 목록 스키마: 최상위·job·step 키가 정확히 허용된 집합이어야 하고, `shell`/`defaults`/`container`/`services`는 이름을 대며 거부한다. job은 `gate-integrity` 하나, 트리거는 `pull_request_target`(types 고정), 첫 step은 SHA 고정 `actions/checkout`(`with`도 정확히 일치)이어야 하며, 다른 `uses:`는 허용 목록에 없으면 거부한다. 각 `run:` 본문은 베이스 워크플로에서 가져온 문자열 목록과 정확히 같아야 하고(그래서 git 옵션 검사가 필요 없다), `env` 키와 값도 고정 목록이다. (3) 파싱된 모든 스칼라(키 포함) 안의 `${{ }}`는 `github.event.pull_request.number`, `...base.sha`, `!cancelled()` 셋만 허용한다. 워크플로를 바꾸는 PR은 같은 PR에서 린트의 허용 목록도 고쳐야 하고, 그 변경은 gate files report에 나타난다. `gate-integrity-lint-selftest.sh`는 실제 워크플로를 리터럴 치환으로 변형한 84개 입력(두 번의 FAIL 코멘트 입력인 `run : …`, `uses : …`, `shell : …`, `PATH : /x`, `? PATH`, 줄 나뉜 `${{`, `>-`/`|+` 블록, `$${{` 등 포함)이 기대한 메시지로 거부되고 실제 파일은 통과함을 증명한다. 린트와 셀프테스트는 `ci.yml`의 `workflow-lint` job에서 돈다. `expectations-guard.sh`와 `gate-files-report.sh`의 동작은 `gate-integrity-selftest.sh`가 임시 저장소에서 증명한다.
 
 zizmor의 `dangerous-triggers`는 `pull_request_target` 자체를 경고한다. 위 불변식이 그 위험을 막으므로 `.github/zizmor.yml`에서 이 워크플로 한 곳(`gate-integrity.yml:3`, `on:` 블록)만 제외한다. 다른 워크플로나 다른 규칙은 제외하지 않는다.
 
