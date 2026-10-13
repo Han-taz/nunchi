@@ -54,7 +54,7 @@ def search(
 ) -> list[SearchHit]:
     with conn.cursor(row_factory=class_row(SearchHit)) as cur:
         return cur.execute(
-            "SELECT id, store_id, kind, title, status, score"
+            "SELECT id, store_id, kind, title, status, score, stale, last_confirmed_at"
             " FROM app_sec.search(%s, %s::uuid[], %s::memory_status[], %s::memory_kind[])",
             (
                 query,

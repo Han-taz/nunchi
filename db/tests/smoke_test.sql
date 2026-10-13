@@ -1339,5 +1339,37 @@ SELECT t.err('N21d an alias is unique per tenant after normalization', $q$INSERT
 SELECT t.err('N27 a note cannot carry a key', $q$INSERT INTO memory (tenant_id, store_id, kind, title, created_by, subject_id, attribute)
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','memo','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','x')$q$, '23514');
 
+-- N30) 신선도 (v1.2 §4): kind 별 유효 기간, 스토어 덮어쓰기, valid_to 만료, search 의 stale (롤백되는 트랜잭션 안의 임시 행)
+BEGIN; RESET ROLE;
+-- 옛 스키마(mutation gate)에는 컬럼과 표가 없어서 준비 단계의 오류는 삼키고 검사가 FAIL 하게 둔다
+DO $setup$ BEGIN
+INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_to, last_confirmed_at)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','W1a','b','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','w1a',NULL,now() - interval '181 days');
+INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_to, last_confirmed_at)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','W1b','b','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','w1b',NULL,now() - interval '179 days');
+INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_to, last_confirmed_at)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','decision','active','W1d','b','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','w1d',NULL,now() - interval '5000 days');
+INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_to, last_confirmed_at)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','W1e','b','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','w1e',current_date - 1,now() - interval '1 days');
+INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_to, last_confirmed_at)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f0a1','fact','active','W1c','b','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','w1c',NULL,now() - interval '31 days');
+INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_to, last_confirmed_at)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','W1c2','b','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','w1c2',NULL,now() - interval '31 days');
+INSERT INTO store_freshness (store_id, kind, days) VALUES ('00000000-0000-0000-0000-00000000f0a1', 'fact', 30);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $setup$;
+SELECT t.eq('N30a a fact confirmed 181 days ago is stale', $q$SELECT count(*)::text FROM app_sec.stale_memories(10000) WHERE title = 'W1a'$q$, '1');
+SELECT t.eq('N30b a fact confirmed 179 days ago is not', $q$SELECT count(*)::text FROM app_sec.stale_memories(10000) WHERE title = 'W1b'$q$, '0');
+SELECT t.eq('N30c a 30-day store override makes a 31-day fact stale (the default 180 would not)', $q$SELECT (SELECT count(*) FROM app_sec.stale_memories(10000) WHERE title = 'W1c')::text || '/' || (SELECT count(*) FROM app_sec.stale_memories(10000) WHERE title = 'W1c2')::text$q$, '1/0');
+SELECT t.eq('N30d a decision never goes stale', $q$SELECT count(*)::text FROM app_sec.stale_memories(10000) WHERE title = 'W1d'$q$, '0');
+SELECT t.eq('N30e valid_to yesterday: mark_expired moves exactly the due active rows', $q$SELECT (app_sec.mark_expired() >= 1)::text$q$, 'true');
+SELECT t.eq('N30g the row is expired and a second pass moves nothing', $q$SELECT (SELECT status FROM memory WHERE title = 'W1e') || '/' || app_sec.mark_expired()::text$q$, 'expired/0');
+SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SET LOCAL ROLE app_rw;
+SELECT t.eq('N30f search exposes stale and last_confirmed_at', $q$SELECT stale::text || '/' || (last_confirmed_at < now() - interval '180 days')::text FROM app_sec.search('W1a')$q$, 'true/true');
+ROLLBACK;
+SET ROLE app_rw;
+
+RESET ROLE;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;
