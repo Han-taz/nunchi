@@ -12,6 +12,8 @@ dependencies = [
   "anthropic>=1.13.0",
   # >=2.15: PyJWKClient rate-limits forced JWKS refreshes on unknown kids (cooldown_duration)
   "pyjwt[crypto]>=2.15,<3",
+  "mcp>=1.29.0",
+  "anyio>=4.15.1",
 ]
 
 [dependency-groups]
@@ -19,6 +21,7 @@ dev = [
   "cryptography>=43",
   "deptry>=0.21",
   "diff-cover>=9.2",
+  "httpx>=0.28.1",
   "httpx2>=2.13.1",
   "hypothesis>=6.120",
   "mutmut>=3.2",
@@ -28,6 +31,7 @@ dev = [
   "pytest-cov>=6.0",
   "ruff>=0.8",
   "semgrep>=1.100",
+  "uvicorn>=0.54.0",
 ]
 
 [build-system]
