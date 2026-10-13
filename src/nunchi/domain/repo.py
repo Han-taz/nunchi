@@ -15,6 +15,7 @@ from nunchi.domain.models import (
     MemoryStatus,
     MemorySummary,
     MemoryVersion,
+    ProposeOutcome,
     ProposeRequest,
     SearchHit,
     StoreRole,
@@ -72,19 +73,22 @@ def get(conn: Conn, memory_id: UUID) -> Memory | None:
         ).fetchone()
 
 
-def propose(conn: Conn, req: ProposeRequest) -> Memory:
+def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
     """Insert a proposed memory. The trigger and the memory_propose policy bind author, tenant,
     status and version, and a lineage walk sets origin. Only the delegate is spelled out because the
-    policy requires on_behalf_of = the user exactly when an agent is present."""
-    with conn.cursor(row_factory=class_row(Memory)) as cur:
-        (row,) = cur.execute(
+    policy requires on_behalf_of = the user exactly when an agent is present.
+    A same-key same-value proposal is a reconfirm: the trigger returns NULL, RETURNING yields no
+    row, and the live row's id is looked up under the same request context."""
+    with conn.cursor() as cur:
+        rows = cur.execute(
             sql.SQL(
                 "INSERT INTO memory"
-                " (store_id, kind, title, body, source_refs, supersedes_id, on_behalf_of)"
-                " VALUES (%s, %s::memory_kind, %s, %s, %s, %s,"
+                " (store_id, kind, title, body, source_refs, supersedes_id,"
+                " subject_id, attribute, on_behalf_of)"
+                " VALUES (%s, %s::memory_kind, %s, %s, %s, %s, %s, %s,"
                 " CASE WHEN app_sec.ctx_agent() IS NOT NULL THEN app_sec.ctx_user() END)"
-                " RETURNING {}"
-            ).format(_MEMORY_COLUMNS),
+                " RETURNING id"
+            ),
             (
                 req.store_id,
                 req.kind.value,
@@ -92,9 +96,19 @@ def propose(conn: Conn, req: ProposeRequest) -> Memory:
                 req.body,
                 Jsonb([ref.model_dump(mode="json") for ref in req.source_refs]),
                 req.supersedes_id,
+                req.subject_id,
+                req.attribute,
             ),
         ).fetchall()
-    return row
+        if rows:
+            return ProposeOutcome(kind="created", memory_id=rows[0][0])
+        live = cur.execute(
+            "SELECT id FROM memory WHERE store_id = %s AND subject_id = %s"
+            " AND attribute = app_sec.norm_text(%s) AND status IN ('active', 'provisional')",
+            (req.store_id, req.subject_id, req.attribute),
+        ).fetchone()
+    assert live is not None  # noqa: S101 - the trigger returned NULL only because this row matched
+    return ProposeOutcome(kind="reconfirmed", memory_id=live[0])
 
 
 def history(conn: Conn, memory_id: UUID) -> list[MemoryVersion]:

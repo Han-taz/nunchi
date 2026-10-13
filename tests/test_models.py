@@ -49,6 +49,8 @@ def test_enum_equals_pg_enum_labels(seeded: str, pg_type: str, enum: type[StrEnu
 
 def _propose(**over: Any) -> ProposeRequest:  # noqa: ANN401
     fields: dict[str, Any] = {"store_id": uuid4(), "kind": "note", "title": "t"}
+    if over.get("kind", "note") != "note":
+        fields |= {"subject_id": uuid4(), "attribute": "owner"}
     return ProposeRequest.model_validate(fields | over)
 
 
@@ -97,3 +99,15 @@ def test_source_ref_uri_is_not_empty() -> None:
     with pytest.raises(ValidationError, match="at least 1 character"):
         SourceRef(uri="")
     assert SourceRef(uri="x").uri == "x"
+
+
+def test_key_is_required_for_non_notes_and_forbidden_for_notes() -> None:
+    sources = [{"uri": "u"}]
+    with pytest.raises(ValidationError, match="subject_id and attribute are required"):
+        ProposeRequest.model_validate(
+            {"store_id": uuid4(), "kind": "fact", "title": "t", "source_refs": sources}
+        )
+    with pytest.raises(ValidationError, match="subject_id and attribute are required"):
+        _propose(subject_id=uuid4(), attribute="owner")
+    with pytest.raises(ValidationError, match="subject_id and attribute are required"):
+        _propose(kind="fact", source_refs=sources, subject_id=None)
