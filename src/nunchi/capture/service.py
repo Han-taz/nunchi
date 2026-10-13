@@ -34,6 +34,7 @@ class CaptureContext(Frozen):
     origin: MemoryOrigin
     source_refs: tuple[SourceRef, ...] = ()
     today: date
+    window: bool = False
 
 
 class Skipped(Frozen):
@@ -136,6 +137,7 @@ def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the optional s
         store_id=context.store_id,
         candidates=candidates,
         entities=known_entities(conn, context.store_id, source_text, subjects, cfg),
+        window=context.window,
     )
     draft = extractor.extract(source_text, extract_context)
     if draft is None:

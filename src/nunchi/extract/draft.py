@@ -86,6 +86,7 @@ class ExtractContext(Frozen):
     store_id: UUID
     candidates: Annotated[tuple[Candidate, ...], Field(max_length=5)] = ()
     entities: Annotated[tuple[EntityContext, ...], Field(max_length=10)] = ()
+    window: bool = False  # the source is a conversation window, not one message
 
 
 class FailureReason(StrEnum):

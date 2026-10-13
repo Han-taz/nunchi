@@ -77,6 +77,7 @@ class SourceRef(Frozen):
     inherit_acl: bool = False
     workspace_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
     channel_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    speakers: tuple[str, ...] = Field(default=(), exclude_if=lambda v: not v)
 
 
 def check_sources(kind: MemoryKind, source_refs: tuple[SourceRef, ...]) -> None:
