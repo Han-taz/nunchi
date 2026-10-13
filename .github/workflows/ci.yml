@@ -538,6 +538,10 @@ jobs:
           persist-credentials: false
       - name: Build the image (scanning and SBOM arrive with the release pipeline)
         run: docker build --tag nunchi:ci .
+      - name: Assert the image runs as non-root
+        run: scripts/ci/assert-nonroot.sh nunchi:ci
+      - name: Self-test the non-root assertion
+        run: scripts/ci/assert-nonroot-selftest.sh
 
   ci-gate:
     name: ci-gate
