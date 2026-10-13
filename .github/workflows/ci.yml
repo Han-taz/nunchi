@@ -478,6 +478,8 @@ jobs:
           enable-cache: false
       - name: Install the locked environment
         run: uv sync --locked
+      - name: Self-test the mutation gate
+        run: scripts/ci/mutation-gate-selftest.sh
       - name: mutmut on changed modules (pull request) or every module (otherwise)
         env:
           NUNCHI_TEST_ADMIN_URL: ${{ env.PG_URL }}

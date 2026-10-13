@@ -6,27 +6,75 @@
 # With a BASE_REF only src/nunchi modules changed since the merge base are mutated.
 # With no arguments every module is mutated (the nightly run).
 # killed = killed + timeout; the ratio ignores mutants mutmut never checked.
+# A changed module may be skipped as "no mutable code" only when mutmut finds no mutants
+# ("nothing matches") AND an AST check (scripts/ci/mutation-guard.py) finds no function,
+# method, lambda or control flow in it, only constants and classes of constants. Zero mutants
+# in a module with logic fails ("zero mutants in <module> but it contains logic"), so
+# do_not_mutate or pragmas cannot turn a loud failure into a silent pass. The gate also
+# fails when the PR adds `pragma: no mutate` under src/ or changes any [tool.mutmut] key.
+# Renamed modules and __init__.py files are checked too. Any other mutmut failure fails, and
+# the killed ratio over the modules that do have mutants still applies.
 set -euo pipefail
 
 base="${1:-}"
 min="${2:-80}"
+guard="$(cd "$(dirname "$0")" && pwd)/mutation-guard.py"
 
+files=()
+modules=()
 patterns=()
 if [ -n "$base" ]; then
+  python3 "$guard" pragma "$base" || exit 1
+  python3 "$guard" config "$base" || exit 1
   while IFS= read -r file; do
     mod=${file#src/}
     mod=${mod%.py}
     mod=${mod//\//.}
-    patterns+=("${mod}*")
-  done < <(git diff --name-only --diff-filter=AM "$base...HEAD" -- 'src/nunchi/*.py' 'src/nunchi/**/*.py' |
-    grep -v '/__init__\.py$' || true)
-  if [ ${#patterns[@]} -eq 0 ]; then
-    echo "mutation-gate: no mutable module changed"
+    pattern="${mod}*"
+    case "$mod" in
+      *.__init__)
+        mod=${mod%.__init__}
+        pattern="${mod}.x*"
+        ;;
+    esac
+    files+=("$file")
+    modules+=("$mod")
+    patterns+=("$pattern")
+  done < <(git diff --name-only --diff-filter=AMR "$base...HEAD" -- 'src/nunchi/*.py' 'src/nunchi/**/*.py')
+  if [ ${#modules[@]} -eq 0 ]; then
+    echo "mutation-gate: no mutable code changed"
     exit 0
   fi
 fi
 
-uv run mutmut run ${patterns[@]+"${patterns[@]}"}
+if [ -z "$base" ]; then
+  uv run mutmut run
+else
+  run_log="$(mktemp)"
+  trap 'rm -f "$run_log"' EXIT
+  mutable=0
+  for i in "${!modules[@]}"; do
+    mod="${modules[$i]}"
+    run_rc=0
+    uv run mutmut run "${patterns[$i]}" 2>&1 | tee "$run_log" || run_rc=$?
+    if [ "$run_rc" -eq 0 ]; then
+      mutable=$((mutable + 1))
+    elif grep -q 'nothing matches' "$run_log"; then
+      if python3 "$guard" logic "${files[$i]}"; then
+        echo "mutation-gate: no mutable code in $mod"
+      else
+        echo "mutation-gate: zero mutants in $mod but it contains logic"
+        exit 1
+      fi
+    else
+      exit "$run_rc"
+    fi
+  done
+  if [ "$mutable" -eq 0 ]; then
+    echo "mutation-gate: no mutable code changed"
+    exit 0
+  fi
+fi
 uv run mutmut results --all true | awk -v min="$min" '
   /: / {
     status = $NF
