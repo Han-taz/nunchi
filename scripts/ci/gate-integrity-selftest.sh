@@ -52,6 +52,13 @@ drop_row_comment_mentions_id() {
   sed -i.bak "s/^SELECT 'X1a ok';/-- SELECT 'X1a ok'; was removed/" db/tests/smoke_test.sql && rm db/tests/smoke_test.sql.bak
 }
 add_malformed_id() { printf 'T 2\t= 1\tpass\n' >>db/tests/expectations.tsv; }
+add_id_G3n() { printf 'G3n\t= 1\tfail\nB6a\t= 1\tfail\n' >>db/tests/expectations.tsv; printf "SELECT 'G3n = 1';\nSELECT 'B6a = 1';\n" >>db/tests/smoke_test.sql; }
+add_id_lower() { printf 'g3n\t= 1\tpass\n' >>db/tests/expectations.tsv; }
+add_id_letter_only() { printf 'G\t= 1\tpass\n' >>db/tests/expectations.tsv; }
+add_id_digit_only() { printf '3n\t= 1\tpass\n' >>db/tests/expectations.tsv; }
+add_id_two_letter() { printf 'GG3n\t= 1\tpass\n' >>db/tests/expectations.tsv; }
+add_id_two_suffix() { printf 'X1ab\t= 1\tpass\n' >>db/tests/expectations.tsv; }
+drop_G3n_keep_test() { add_id_G3n; git add -A; git -c user.name=t -c user.email=t@t commit -q -m g; root_sha=$(git rev-parse HEAD); sed -i.bak '/^G3n/d' db/tests/expectations.tsv && rm db/tests/expectations.tsv.bak; }
 add_duplicate_id() { printf 'T1\t= 0\tpass\n' >>db/tests/expectations.tsv; }
 delete_registry() { git rm -q db/tests/expectations.tsv; }
 touch_readme() { echo more >>README.md; }
@@ -65,6 +72,13 @@ case_ "row deleted, test id now followed by a tab" 1 expectations-guard.sh drop_
 case_ "row deleted, only a longer id X1ab remains" 0 expectations-guard.sh drop_row_longer_id_remains "removed with its test: X1a"
 case_ "row deleted, only a comment mentions the id" 0 expectations-guard.sh drop_row_comment_mentions_id "removed with its test: X1a"
 case_ "malformed id in the registry" 1 expectations-guard.sh add_malformed_id "malformed id: 'T 2'"
+case_ "G and B prefixed ids accepted" 0 expectations-guard.sh add_id_G3n "added: B6a G3n"
+case_ "lowercase prefix g3n rejected" 1 expectations-guard.sh add_id_lower "malformed id: 'g3n'"
+case_ "bare letter G rejected" 1 expectations-guard.sh add_id_letter_only "malformed id: 'G'"
+case_ "digits and suffix only 3n rejected" 1 expectations-guard.sh add_id_digit_only "malformed id: '3n'"
+case_ "two-letter prefix GG3n rejected" 1 expectations-guard.sh add_id_two_letter "malformed id: 'GG3n'"
+case_ "two-letter suffix X1ab rejected" 1 expectations-guard.sh add_id_two_suffix "malformed id: 'X1ab'"
+case_ "G3n row deleted, test kept" 1 expectations-guard.sh drop_G3n_keep_test "G3n was deleted from db/tests/expectations.tsv but its test still exists"
 case_ "duplicate id in the registry" 1 expectations-guard.sh add_duplicate_id "more than once: T1"
 case_ "registry deleted" 1 expectations-guard.sh delete_registry "expectations.tsv is missing in the head"
 case_ "no gate file touched" 0 gate-files-report.sh touch_readme "gate files changed: none"
