@@ -151,3 +151,7 @@ scripts/db-test.sh --url "$PG_URL" --profile vulnerable  # mutation-gate와 같�
 | 성능 회귀 | 벤치마크 비교 | RLS 정책 비용(`count(*)` 등)이 기준 대비 악화되면 실패 |
 | API 호환성 | OpenAPI breaking-change 검사 | 하위 호환을 깨는 변경 시 실패 |
 | 뮤테이션 테스트(TypeScript) | Stryker | TypeScript 코드가 생기면 켠다 |
+
+## 팀 대화 시뮬레이터 (`sim/`)
+
+`python -m sim.director`/`sim.report`는 CI에서 돌지 않는다. 실제 Mattermost와 모델 호출이 필요하다. `sim/`은 앱 패키지가 아니므로 커버리지와 뮤테이션에서 빠진다. ruff, mypy, deptry는 그대로 적용되고 `tests/test_sim.py`가 가짜 Mattermost/모델로 동작을 검증한다.

@@ -19,6 +19,7 @@ dependencies = [
   "uvicorn>=0.54.0",
   "slack-bolt>=1.30.0",
   "httpx>=0.28.1",
+  "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
@@ -35,6 +36,7 @@ dev = [
   "pytest-cov>=6.0",
   "ruff>=0.8",
   "semgrep>=1.100",
+  "types-pyyaml>=6.0.12.20260906",
 ]
 
 [build-system]
@@ -68,7 +70,7 @@ addopts = "-W error --strict-markers --cov=nunchi --cov-branch --cov-report=term
 markers = ["db: needs the Postgres server named by NUNCHI_TEST_ADMIN_URL"]
 
 [tool.coverage.run]
-# eval/ (memory-quality harness, needs real model calls) is not app code and stays out of coverage
+# eval/ (memory-quality harness, needs real model calls) and sim/ (Mattermost persona simulator, talks to live services) are not app code and stay out of coverage
 source = ["nunchi"]
 
 [tool.coverage.report]
