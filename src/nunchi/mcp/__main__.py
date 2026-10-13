@@ -6,12 +6,15 @@ if __name__ == "__main__":
     from nunchi.auth.tokens import OidcSettings, TokenVerifier
     from nunchi.config import Settings
     from nunchi.db import open_pool
+    from nunchi.embed import embedder_from_settings
     from nunchi.mcp.server import build_server
 
+    settings = Settings()
     server = build_server(
-        open_pool(Settings()),
+        open_pool(settings),
         TokenVerifier(OidcSettings()),
         os.environ.get("NUNCHI_MCP_PUBLIC_URL", "http://127.0.0.1:8000"),
+        embedder=embedder_from_settings(settings),
     )
     server.settings.host = os.environ.get("NUNCHI_MCP_HOST", "127.0.0.1")
     server.settings.port = int(os.environ.get("NUNCHI_MCP_PORT", "8000"))

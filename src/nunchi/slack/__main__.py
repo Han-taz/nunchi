@@ -8,6 +8,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from nunchi.config import Settings
 from nunchi.db import open_pool
+from nunchi.embed import embedder_from_settings
 from nunchi.extract import build_extractor
 from nunchi.slack.app import Deps, build_app
 
@@ -24,7 +25,14 @@ class SlackEnv(BaseSettings):
 def main() -> int:
     env = SlackEnv()
     app = App(token=env.slack_bot_token.get_secret_value())
-    deps = Deps(open_pool(Settings()), build_extractor(), env.nunchi_tenant_id, app.client)
+    settings = Settings()
+    deps = Deps(
+        open_pool(settings),
+        build_extractor(),
+        env.nunchi_tenant_id,
+        app.client,
+        embedder_from_settings(settings),
+    )
     build_app(deps, app)
     SocketModeHandler(app, env.slack_app_token.get_secret_value()).start()  # type: ignore[no-untyped-call]
     return 0

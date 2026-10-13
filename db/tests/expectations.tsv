@@ -339,8 +339,16 @@ N30d	(ok)	fail
 N30e	(ok)	fail
 N30f	(ok)	fail
 N30g	(ok)	fail
+N31a	= Q31 fusion	fail	vector-only hit
+N31b	= 0	fail	no vector, no hit
+N31c	= b2,b1	fail	RRF lifts the double match
+N31d	= b1,b2	fail	trigram-only tie order
+N31e	= 0	fail	other model ignored
+N31f	= 0	fail	RLS: hr embedding hidden from alice
+N31g	= 0	fail	RLS: naming the store does not help
 N31h	-> 42501	fail	no table privilege
 N31i	-> 42501	fail	app_rw cannot write embeddings
+N31j	= Q31 hr only	fail	hr curator sees it
 N31k	= Q31 plain	fail	worker fill list
 N31l	= 4	fail	new model makes rows stale
 N31m	= 0	fail	filled row leaves the list
