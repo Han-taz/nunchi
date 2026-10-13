@@ -82,5 +82,5 @@ def dependents(memory_id: UUID, run: Run) -> list[MemorySummary]:
 
 @router.post("/memories/{memory_id}/decision", status_code=HTTPStatus.NOT_IMPLEMENTED)
 def decide(memory_id: UUID, run: Run) -> None:
-    """Reserved for app_sec.decide, which the database does not have yet."""
+    """Reserved for app_sec.decide, which this PR leaves unwired to stay under the size cap."""
     raise ApiError(HTTPStatus.NOT_IMPLEMENTED, "decide is not implemented")

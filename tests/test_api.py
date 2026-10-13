@@ -1,9 +1,11 @@
+import json
 import uuid
 from collections.abc import Iterator
 from typing import Any
 
 import psycopg
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -11,6 +13,7 @@ from nunchi.api import problems
 from nunchi.api.app import create_app
 from nunchi.api.deps import Runner
 from nunchi.auth.identity import Identity
+from nunchi.auth.tokens import MAX_TOKEN_CHARS, IssuerConfig, OidcSettings, TokenVerifier
 from nunchi.db import Pool
 from tests import jwt_support as j
 from tests.conftest import AGENT, AGENT_NO_GRANT, OTHER, STORE, TENANT, USER
@@ -126,14 +129,29 @@ def test_decide_is_a_typed_501(client: TestClient) -> None:
         j.auth(str(uuid.uuid4())),
         j.auth(str(AGENT)),
         j.auth(str(USER), iss=j.ISSUER_B),
+        j.auth(str(USER), alg="ES256", key=ec.generate_private_key(ec.SECP256R1())),
+        {"Authorization": f"Bearer {'x' * (MAX_TOKEN_CHARS + 1)}"},
     ],
-    ids=range(8),
+    ids=range(10),
 )
 def test_unauthenticated_is_401(client: TestClient, headers: dict[str, str]) -> None:
     res = client.get("/v1/stores", headers=headers)
     assert res.status_code == 401
     assert res.headers["www-authenticate"] == "Bearer"
     assert res.json()["detail"] == "authentication failed"
+
+
+def test_non_json_jwks_is_401(pool: Pool) -> None:
+    class NotJson(j.StaticJwks):
+        def fetch_data(self) -> object:
+            raise json.JSONDecodeError("Expecting value", "<html>", 0)
+
+    issuers = {j.ISSUER_A: IssuerConfig(tenant_id=TENANT, jwks_url="https://unused.test/a")}
+    verifier = TokenVerifier(OidcSettings(issuers=issuers), {j.ISSUER_A: NotJson()})
+    res = TestClient(create_app(pool, verifier), raise_server_exceptions=False).get(
+        "/v1/stores", headers=j.auth(str(USER))
+    )
+    assert (res.status_code, res.json()["detail"]) == (401, "authentication failed")
 
 
 @pytest.mark.parametrize(
