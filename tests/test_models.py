@@ -7,12 +7,14 @@ import pytest
 from pydantic import ValidationError
 
 from nunchi.domain.models import (
+    LinkQuality,
     MemoryKind,
     MemoryOp,
     MemoryOrigin,
     MemoryStatus,
     ProposeRequest,
     Role,
+    RoomKind,
     SourceRef,
     StoreKind,
 )
@@ -28,6 +30,8 @@ from nunchi.domain.models import (
         ("memory_op", MemoryOp),
         ("store_kind", StoreKind),
         ("store_role", Role),
+        ("room_kind", RoomKind),
+        ("link_quality", LinkQuality),
     ],
 )
 def test_enum_equals_pg_enum_labels(seeded: str, pg_type: str, enum: type[StrEnum]) -> None:

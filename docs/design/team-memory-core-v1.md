@@ -201,6 +201,15 @@ DB 수준에서 거는 제약
 - 주간 정리: worker가 store마다 중복 후보, 오래 안 쓰인 항목, 서로 충돌하는 사실을 찾아 **제안 묶음**으로 curator에게 보낸다. 원본은 직접 고치지 않는다(Claude Dreams 원칙).
 - 정리는 store 경계를 넘지 않는다. 여러 store를 묶어 요약하는 일은 하지 않는다.
 
+### 7.5 Slack 신원, 방 바인딩, 출처 분류
+
+- **신원.** `principal_identity(platform, platform_user_id)`가 Slack `user.id`를 principal에 잇는다. SCIM으로 이은 활성 사용자(`link_quality=scim`)만 `app_sec.resolve_identity`가 돌려주고, 이메일만 맞는 사용자는 NULL이라 `decide()`로 이어지지 않는다.
+- **바인딩.** `room_binding`은 방을 store에 잇는다. `bound_by`(관리자)와 `confirmed_by`(그 store의 curator)가 서로 다른 사람이어야 활성이 된다. 관리자 여부는 관리 API가 확인하고, DB는 두 사람과 curator 자격, 멤버십 스냅샷 존재를 강제한다. DM/mpim은 `room_kind`에 없고 채널 id는 `C…`만 받는다. 방 하나에 활성 바인딩은 하나다.
+- **청중 포함.** `app_sec.room_containment(binding)`은 store의 사람 reader 중 방 구성원으로 매핑되지 않은 수, 외부 구성원 수, 스냅샷 나이를 돌려준다. 스냅샷이 90분보다 오래됐거나 빠진 reader가 있으면 `ok=false`(fail-closed)다.
+- **origin은 서버가 정한다.** 제안의 출처가 Slack 방이면 활성 바인딩이 있어야 하고(없으면 거부), Slack Connect이거나 외부 구성원이 있는 방은 `origin=external`이다. 방이 아닌 출처는 `source_system(is_internal)` 밖의 host이면 external이다. 클라이언트가 보낸 origin과 `gate_result.containment`는 올리는 쪽으로만 반영된다.
+- 한계. DB가 다시 계산하는 `gate_result` 항목은 containment뿐이다. `flags`와 `authority`는 U9a 게이트(앱 서버)의 출력이라 DB가 검증하지 못하고 `app_rw`와 같은 신뢰 경계 안에 있다.
+- `store.confidential`은 승인 카드가 제목 대신 id만 싣게 하는 표시다. 카드 자체는 별도 단위에서 구현한다.
+
 ## 8. 조직별 적용 예
 
 | 조직 | store 구성 | curator |

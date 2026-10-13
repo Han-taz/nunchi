@@ -302,7 +302,7 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
 
 -- A10) 앱 역할은 LOGIN NOBYPASSRLS NOINHERIT, RLS 테이블은 소유자에게도 정책을 강제한다
 SELECT t.eq('A10a app_rw login/bypassrls/inherit', $q$SELECT rolcanlogin || '/' || rolbypassrls || '/' || rolinherit FROM pg_roles WHERE rolname = 'app_rw'$q$, 'true/false/false');
-SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,group_member,memory,memory_version,principal,review,store,store_grant,tenant');
+SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,group_member,memory,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
 
 SET ROLE app_rw;
 
@@ -488,7 +488,7 @@ CREATE FUNCTION t.exec_list() RETURNS text LANGUAGE sql AS $$
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.my_store_roles,app_sec.my_stores,app_sec.quorum,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
+  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.my_store_roles,app_sec.my_stores,app_sec.quorum,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 BEGIN;
 CREATE FUNCTION public.t_eq() RETURNS void LANGUAGE sql AS $$ SELECT $$;
@@ -1107,6 +1107,130 @@ DO $do$ BEGIN
   END IF;
 END $do$;
 SELECT t.eq('G5k a client-supplied review version is overwritten by the memory version', $q$SELECT version::text FROM review WHERE memory_id = t.mid(120)$q$, '2');
+-- ═══ Slack 신원 · 방 바인딩 · 청중 포함 · 서버 결정 origin (C1–C3, C6) ═══════════
+-- 사전 데이터(소유자 권한): 사람 reader 5명(g5-user-1..5, 2 = contributor, 5 = curator)인 store 와 방 5개.
+-- C5PUB 공개 전원 / C5PRV 비공개 1명만 / C5CON Slack Connect 전원 + 외부 1 / C5STALE 전원이지만 스냅샷 2시간 전 / C5EXT 공개 전원 + 외부 1
+CREATE FUNCTION t.g5(n int) RETURNS uuid LANGUAGE sql IMMUTABLE AS $$ SELECT ('00000000-0000-0000-0000-00000000050' || n)::uuid $$;
+CREATE FUNCTION t.g5b(ch text) RETURNS uuid LANGUAGE plpgsql STABLE AS $$ DECLARE r uuid; BEGIN SELECT id INTO r FROM room_binding WHERE channel_id = ch; RETURN r; END $$;
+CREATE FUNCTION t.propr(n int, refs jsonb, p_origin memory_origin DEFAULT 'internal', p_gate jsonb DEFAULT '{"flags":[],"containment":"ok"}') RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, origin, created_by, gate_result)
+  VALUES (t.mid(n), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000005f1', 'fact', 'g5 ' || n, 'g5 body ' || n, refs, p_origin,
+    nullif(current_setting('app.user_id', true), '')::uuid, p_gate);
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup % failed: % %', n, SQLSTATE, SQLERRM;
+END $$;
+CREATE FUNCTION t.slack_ref(ch text) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+  SELECT jsonb_build_array(jsonb_build_object('uri', 'https://acme.slack.com/archives/' || ch || '/p1', 'system', 'slack', 'workspace_id', 'T5W001', 'channel_id', ch)) $$;
+
+DO $do$
+DECLARE tn constant uuid := '00000000-0000-0000-0000-000000000001'; s constant uuid := '00000000-0000-0000-0000-0000000005f1';
+BEGIN
+  IF to_regclass('room_binding') IS NULL THEN RETURN; END IF;
+  INSERT INTO principal (id, tenant_id, kind, external_id, display_name) SELECT t.g5(n), tn, 'user', 'g5-user-' || n, 'g5 user ' || n FROM generate_series(1, 5) AS n;
+  INSERT INTO store (id, tenant_id, kind, slug, description) VALUES (s, tn, 'team', 'g5-sales', 'g5 sales');
+  INSERT INTO store_grant (store_id, principal_id, role, tenant_id)
+  SELECT s, t.g5(n), (CASE n WHEN 2 THEN 'contributor' WHEN 5 THEN 'curator' ELSE 'reader' END)::store_role, tn FROM generate_series(1, 5) AS n;
+  INSERT INTO principal_identity (platform, platform_user_id, tenant_id, principal_id, link_quality)
+  SELECT 'slack', 'U5USR' || n, tn, t.g5(n), 'scim' FROM generate_series(1, 5) AS n;
+  INSERT INTO room_binding (tenant_id, platform, workspace_id, channel_id, kind, store_id, bound_by) VALUES
+   (tn, 'slack', 'T5W001', 'C5PUB', 'public', s, t.g5(1)), (tn, 'slack', 'T5W001', 'C5PRV', 'private', s, t.g5(1)),
+   (tn, 'slack', 'T5W001', 'C5CON', 'connect', s, t.g5(1)), (tn, 'slack', 'T5W001', 'C5STALE', 'public', s, t.g5(1)),
+   (tn, 'slack', 'T5W001', 'C5EXT', 'public', s, t.g5(1));
+  INSERT INTO room_member (tenant_id, platform, workspace_id, channel_id, platform_user_id, is_external, synced_at)
+  SELECT tn, 'slack', 'T5W001', c.ch, 'U5USR' || n, false, c.ts
+  FROM (VALUES ('C5PUB', now()), ('C5CON', now()), ('C5EXT', now()), ('C5STALE', now() - interval '2 hours')) AS c (ch, ts), generate_series(1, 5) AS n;
+  INSERT INTO room_member (tenant_id, platform, workspace_id, channel_id, platform_user_id, is_external)
+  VALUES (tn, 'slack', 'T5W001', 'C5PRV', 'U5USR1', false), (tn, 'slack', 'T5W001', 'C5CON', 'U5EXT01', true), (tn, 'slack', 'T5W001', 'C5EXT', 'U5EXT02', true);
+  UPDATE room_binding SET confirmed_by = t.g5(5), confirmed_at = now() WHERE tenant_id = tn AND channel_id LIKE 'C5%';
+  INSERT INTO room_binding (tenant_id, platform, workspace_id, channel_id, kind, store_id, bound_by) VALUES (tn, 'slack', 'T5W001', 'C5NEW2', 'public', s, t.g5(5));
+  INSERT INTO room_member (tenant_id, platform, workspace_id, channel_id, platform_user_id) VALUES (tn, 'slack', 'T5W001', 'C5NEW2', 'U5USR5');
+END $do$;
+
+-- G7a–e) 청중 포함: ok / 빠진 reader / 외부 구성원 / 스냅샷 나이 / reader 추가
+SELECT t.eq('G7a public room, every reader is a member: ok/missing/external', $q$SELECT ok || '/' || missing_readers || '/' || external_members FROM app_sec.room_containment(t.g5b('C5PUB'))$q$, 'true/0/0');
+SELECT t.eq('G7b private room, one member of five readers: ok/missing/external', $q$SELECT ok || '/' || missing_readers || '/' || external_members FROM app_sec.room_containment(t.g5b('C5PRV'))$q$, 'false/4/0');
+SELECT t.eq('G7c Slack Connect room, everyone plus one outsider: ok/missing/external', $q$SELECT ok || '/' || missing_readers || '/' || external_members FROM app_sec.room_containment(t.g5b('C5CON'))$q$, 'true/0/1');
+SELECT t.eq('G7d snapshot two hours old: ok/missing/age>1h', $q$SELECT ok || '/' || missing_readers || '/' || (snapshot_age > interval '1 hour') FROM app_sec.room_containment(t.g5b('C5STALE'))$q$, 'false/0/true');
+BEGIN;
+DO $do$ BEGIN
+  IF to_regclass('room_binding') IS NULL THEN RETURN; END IF;
+  INSERT INTO principal (id, tenant_id, kind, external_id, display_name) VALUES (t.g5(6), '00000000-0000-0000-0000-000000000001', 'user', 'g5-user-6', 'g5 user 6');
+  INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES ('00000000-0000-0000-0000-0000000005f1', t.g5(6), 'reader', '00000000-0000-0000-0000-000000000001');
+END $do$;
+SELECT t.eq('G7e a reader added to the store but absent from the room: missing', $q$SELECT missing_readers::text FROM app_sec.room_containment(t.g5b('C5PUB'))$q$, '1');
+ROLLBACK;
+SELECT t.eq('G7q the added reader is gone after rollback: missing', $q$SELECT missing_readers::text FROM app_sec.room_containment(t.g5b('C5PUB'))$q$, '0');
+
+-- G7f–n) 바인딩 규칙: 두 사람, curator 확인, DM/mpim 없음, 살아있는 바인딩 하나
+SELECT t.err('G7g binding for a DM channel id', $q$INSERT INTO room_binding (tenant_id, platform, workspace_id, channel_id, kind, store_id, bound_by)
+  VALUES ('00000000-0000-0000-0000-000000000001', 'slack', 'T5W001', 'D5DM01', 'private', '00000000-0000-0000-0000-0000000005f1', t.g5(1))$q$, '23514');
+SELECT t.err('G7h binding of kind dm', $q$INSERT INTO room_binding (tenant_id, platform, workspace_id, channel_id, kind, store_id, bound_by)
+  VALUES ('00000000-0000-0000-0000-000000000001', 'slack', 'T5W001', 'C5NEW1', 'dm', '00000000-0000-0000-0000-0000000005f1', t.g5(1))$q$, '22P02');
+SELECT t.err('G7i second live binding for the same channel', $q$INSERT INTO room_binding (tenant_id, platform, workspace_id, channel_id, kind, store_id, bound_by)
+  VALUES ('00000000-0000-0000-0000-000000000001', 'slack', 'T5W001', 'C5PUB', 'public', '00000000-0000-0000-0000-0000000005f1', t.g5(1))$q$, '23505');
+SELECT t.err('G7j pending binding for a new channel', $q$INSERT INTO room_binding (id, tenant_id, platform, workspace_id, channel_id, kind, store_id, bound_by)
+  VALUES ('00000000-0000-0000-0000-0000000005b9', '00000000-0000-0000-0000-000000000001', 'slack', 'T5W001', 'C5NEW1', 'public', '00000000-0000-0000-0000-0000000005f1', t.g5(1))$q$, 'ok');
+SELECT t.err('G7f a curator who bound the room confirms it too', $q$UPDATE room_binding SET confirmed_by = bound_by, confirmed_at = now() WHERE channel_id = 'C5NEW2'$q$, '23514');
+SELECT t.err('G7k a non-curator confirms', $q$UPDATE room_binding SET confirmed_by = t.g5(3), confirmed_at = now() WHERE channel_id = 'C5NEW1'$q$, '42501');
+SELECT t.err('G7l the curator confirms a room with no membership snapshot', $q$UPDATE room_binding SET confirmed_by = t.g5(5), confirmed_at = now() WHERE channel_id = 'C5NEW1'$q$, '23514');
+SELECT t.err('G7m a confirmed binding cannot swap its confirmer', $q$UPDATE room_binding SET confirmed_by = t.g5(2) WHERE channel_id = 'C5PUB'$q$, 'P0001');
+SELECT t.err('G7n a binding cannot be lowered from connect to public', $q$UPDATE room_binding SET kind = 'public' WHERE channel_id = 'C5CON'$q$, 'P0001');
+
+-- G6a–g) 신원: SCIM 으로 이은 활성 사용자만, 같은 Slack id 를 두 번 이을 수 없고, 앱은 표를 직접 읽지 못한다
+DO $do$ BEGIN
+  IF to_regclass('principal_identity') IS NULL THEN RETURN; END IF;
+  INSERT INTO principal_identity (platform, platform_user_id, tenant_id, principal_id, link_quality)
+  VALUES ('slack', 'U5MAIL', '00000000-0000-0000-0000-000000000001', t.g5(3), 'email');
+END $do$;
+SELECT t.eq('G6a scim link resolves to the principal', $q$SELECT (app_sec.resolve_identity('00000000-0000-0000-0000-000000000001', 'slack', 'U5USR3') = t.g5(3))::text$q$, 'true');
+SELECT t.eq('G6b email-quality link resolves to nothing', $q$SELECT coalesce(app_sec.resolve_identity('00000000-0000-0000-0000-000000000001', 'slack', 'U5MAIL')::text, 'NULL')$q$, 'NULL');
+SELECT t.eq('G6c unknown Slack id resolves to nothing', $q$SELECT coalesce(app_sec.resolve_identity('00000000-0000-0000-0000-000000000001', 'slack', 'U5NOBODY')::text, 'NULL')$q$, 'NULL');
+SELECT t.eq('G6d same Slack id asked under another tenant', $q$SELECT coalesce(app_sec.resolve_identity('00000000-0000-0000-0000-000000000099', 'slack', 'U5USR3')::text, 'NULL')$q$, 'NULL');
+SELECT t.err('G6e a second principal claims an already linked Slack id', $q$INSERT INTO principal_identity (platform, platform_user_id, tenant_id, principal_id, link_quality)
+  VALUES ('slack', 'U5USR3', '00000000-0000-0000-0000-000000000001', t.g5(4), 'scim')$q$, '23505');
+BEGIN;
+UPDATE principal SET active = false WHERE id = t.g5(3);
+SELECT t.eq('G6f deactivated principal resolves to nothing', $q$SELECT coalesce(app_sec.resolve_identity('00000000-0000-0000-0000-000000000001', 'slack', 'U5USR3')::text, 'NULL')$q$, 'NULL');
+ROLLBACK;
+SELECT t.eq('G6h store.confidential defaults to false', $q$SELECT confidential::text FROM store WHERE id = '00000000-0000-0000-0000-0000000005f1'$q$, 'false');
+
+SET ROLE app_rw;
+SELECT t.err('G6g app_rw reads principal_identity directly', $q$SELECT 1 FROM principal_identity$q$, '42501');
+
+-- G1c, G1t–z) origin 과 containment 는 서버가 출처에서 정한다. 클라이언트 값은 올리기만 된다
+RESET ROLE;
+DO $do$ BEGIN
+  IF to_regclass('source_system') IS NULL THEN RETURN; END IF;
+  INSERT INTO source_system (tenant_id, system, host_pattern, authority, is_internal) VALUES
+   ('00000000-0000-0000-0000-000000000001', 'crm', 'crm', 3, true), ('00000000-0000-0000-0000-000000000001', 'wiki', '*.wiki.acme.test', 2, true);
+END $do$;
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx(t.g5(2), NULL);
+SELECT t.propr(201, '[{"uri":"https://evil.example/doc"}]');
+SELECT t.propr(202, '[{"uri":"https://crm/acct/9"}]');
+SELECT t.propr(203, '[{"uri":"https://team.wiki.acme.test/p"}]');
+SELECT t.propr(204, '[{"uri":"https://crm@evil.example/doc"}]');
+SELECT t.propr(205, t.slack_ref('C5CON'));
+SELECT t.propr(206, t.slack_ref('C5PRV'));
+SELECT t.propr(207, t.slack_ref('C5PUB'));
+SELECT t.propr(208, t.slack_ref('C5PUB'), 'external');
+SELECT t.propr(209, t.slack_ref('C5EXT'));
+SELECT t.propr(210, t.slack_ref('C5PRV'), 'internal', '{"flags":[],"containment":"ok","authority":9}');
+SELECT t.eq('G1c source host outside source_system: tier/status/origin', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(201)$q$, 'one_curator/proposed/external');
+SELECT t.eq('G1t registered internal host stays internal', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(202)$q$, 'auto_labeled/provisional/internal');
+SELECT t.eq('G1e wildcard pattern matches an internal wiki host', $q$SELECT tier || '/' || origin FROM memory WHERE id = t.mid(203)$q$, 'auto_labeled/internal');
+SELECT t.eq('G1w userinfo in the uri does not pass for the internal host', $q$SELECT tier || '/' || origin FROM memory WHERE id = t.mid(204)$q$, 'one_curator/external');
+SELECT t.eq('G1u client says internal on a Slack Connect source: tier/status/origin', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(205)$q$, 'one_curator/proposed/external');
+SELECT t.eq('G1v client says containment ok for a private room missing readers: stored containment/tier', $q$SELECT (gate_result ->> 'containment') || '/' || tier FROM memory WHERE id = t.mid(206)$q$, 'unverified/one_curator');
+SELECT t.eq('G7o fully contained public room: containment/tier/origin', $q$SELECT (gate_result ->> 'containment') || '/' || tier || '/' || origin FROM memory WHERE id = t.mid(207)$q$, 'ok/auto_labeled/internal');
+SELECT t.eq('G1y client raises origin to external on a clean room: origin/tier', $q$SELECT origin || '/' || tier FROM memory WHERE id = t.mid(208)$q$, 'external/one_curator');
+SELECT t.eq('G1z public room with an outside member: origin/tier', $q$SELECT origin || '/' || tier FROM memory WHERE id = t.mid(209)$q$, 'external/one_curator');
+SELECT t.eq('G7p client-supplied gate_result containment is replaced, the rest kept', $q$SELECT (gate_result ->> 'containment') || '/' || (gate_result ->> 'authority') FROM memory WHERE id = t.mid(210)$q$, 'unverified/9');
+SELECT t.err('G1x source room with no live binding for this store', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by)
+  VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000005f1', 'fact', 'unbound', 'unbound', t.slack_ref('C5NOPE'), t.g5(2))$q$, '23503');
+COMMIT;
+RESET ROLE;
+DO $do$ BEGIN IF to_regclass('source_system') IS NOT NULL THEN DELETE FROM source_system; END IF; END $do$;
 
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;
