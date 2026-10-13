@@ -177,3 +177,26 @@ def test_history_and_dependents(world: Pool) -> None:
     assert none_for_child == []
     assert [(v.version, v.op, v.actor_id) for v in reader_hist] == expected
     assert unreviewed_hist == []
+
+
+@pytest.mark.db
+def test_kind_filter_applies_before_the_row_limit(world: Pool, fresh_db: str) -> None:
+    with psycopg.connect(fresh_db) as conn:
+        conn.execute(
+            "INSERT INTO memory (tenant_id, store_id, kind, status, title, created_by)"
+            " SELECT %s, %s, 'note', 'active', 'kiwi', %s FROM generate_series(1, 55)",
+            (TENANT, STORE, USER),
+        )
+        conn.execute(
+            "INSERT INTO memory"
+            " (id, tenant_id, store_id, kind, status, title, source_refs, created_by)"
+            " VALUES ('ffffffff-ffff-ffff-ffff-ffffffffffff', %s, %s, 'fact', 'active', 'kiwi',"
+            ' \'[{"uri": "https://x"}]\', %s)',
+            (TENANT, STORE, USER),
+        )
+    active = (MemoryStatus.ACTIVE,)
+    with request_tx(world, USER, None) as conn:
+        unfiltered = repo.search(conn, "kiwi", None, None, active)
+        facts = repo.search(conn, "kiwi", None, [MemoryKind.FACT], active)
+    assert len(unfiltered) == 50
+    assert [h.id for h in facts] == [uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")]

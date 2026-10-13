@@ -257,3 +257,5 @@ G5h	= active/active/v2	fail	revoke then restore: earlier approval counts again
 G5i	= stale	fail	click on a card for the old version is stale
 G5j	= 0/proposed/v2	fail	stale click leaves no review
 G5k	= 2	fail	review version comes from the memory, not the client
+N17a	(ok)	fail
+N17b	(ok)	fail

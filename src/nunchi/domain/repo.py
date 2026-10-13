@@ -54,13 +54,11 @@ def search(
     with conn.cursor(row_factory=class_row(SearchHit)) as cur:
         return cur.execute(
             "SELECT id, store_id, kind, title, status, score"
-            " FROM app_sec.search(%s, %s::uuid[], %s::memory_status[])"
-            " WHERE %s::memory_kind[] IS NULL OR kind = ANY (%s::memory_kind[])",
+            " FROM app_sec.search(%s, %s::uuid[], %s::memory_status[], %s::memory_kind[])",
             (
                 query,
                 list(stores) if stores is not None else None,
                 [s.value for s in statuses],
-                [k.value for k in kinds] if kinds is not None else None,
                 [k.value for k in kinds] if kinds is not None else None,
             ),
         ).fetchall()

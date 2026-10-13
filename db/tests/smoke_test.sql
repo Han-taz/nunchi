@@ -559,6 +559,12 @@ COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', NULL);
 SELECT t.eq('N10m parity dave', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE search_tsv @@ websearch_to_tsquery('simple', 'zebra')))::text$q$, 'true');
 
+-- N17) kind 필터는 함수 안에서, 50건 제한 전에 적용된다
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N17a curator carol filters zebra by kind note', $q$SELECT count(*)::text FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status), ARRAY['note']::memory_kind[])$q$, '5');
+SELECT t.eq('N17b curator carol filters zebra by kind fact', $q$SELECT count(*)::text FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status), ARRAY['fact']::memory_kind[])$q$, '0');
+COMMIT;
+
 -- N13) 검색 입력 상한: 1000자, tsquery 노드 64개. 넘으면 22023, 한계 바로 아래는 정상 실행 (zebra 32개 = 노드 63개, 33개 = 65개)
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.err('N13a search with 1001 characters', $q$SELECT * FROM app_sec.search(repeat('a', 1001))$q$, '22023');

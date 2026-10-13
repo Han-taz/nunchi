@@ -10,10 +10,13 @@ dependencies = [
   "pydantic>=2.9",
   "pydantic-settings>=2.6",
   "anthropic>=1.13.0",
+  # >=2.15: PyJWKClient rate-limits forced JWKS refreshes on unknown kids (cooldown_duration)
+  "pyjwt[crypto]>=2.15,<3",
 ]
 
 [dependency-groups]
 dev = [
+  "cryptography>=43",
   "deptry>=0.21",
   "diff-cover>=9.2",
   "httpx2>=2.13.1",

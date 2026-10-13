@@ -940,7 +940,8 @@ $$;
 CREATE FUNCTION app_sec.search(
   p_query text,
   p_stores uuid[] DEFAULT null,
-  p_statuses memory_status[] DEFAULT ARRAY['active']::memory_status[]
+  p_statuses memory_status[] DEFAULT ARRAY['active']::memory_status[],
+  p_kinds memory_kind[] DEFAULT null
 ) RETURNS TABLE (id uuid, store_id uuid, kind memory_kind, title text, status memory_status, score real)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 #variable_conflict use_column
@@ -962,6 +963,7 @@ BEGIN
       AND m.search_tsv @@ q.tsq
       AND (p_stores IS NULL OR m.store_id = ANY (p_stores))
       AND m.status = ANY (coalesce(p_statuses, ARRAY['active']::memory_status[]))
+      AND (p_kinds IS NULL OR m.kind = ANY (p_kinds))
       AND (
         (m.status IN ('active', 'provisional', 'superseded', 'expired') AND m.store_id IN (SELECT app_sec.my_stores('reader')))
         OR m.store_id IN (SELECT app_sec.my_stores('curator'))
@@ -998,6 +1000,6 @@ GRANT EXECUTE ON FUNCTION app_sec.decide(uuid, uuid, integer, text, text) TO app
 GRANT EXECUTE ON FUNCTION app_sec.quorum(memory, memory_status) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_store_roles() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_stores(store_role) TO app_rw;
-GRANT EXECUTE ON FUNCTION app_sec.search(text, uuid[], memory_status[]) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.search(text, uuid[], memory_status[], memory_kind[]) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.verify_chain(uuid) TO app_rw;
 GRANT EXECUTE ON FUNCTION principal_closure(uuid) TO app_rw;

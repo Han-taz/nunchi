@@ -1,4 +1,5 @@
 import uuid
+from typing import Any
 
 import psycopg
 import pytest
@@ -122,3 +123,24 @@ def test_a_connection_the_server_killed_is_replaced(seeded: str, admin_url: str)
         assert count_visible(pool, USER, None) == 1
     finally:
         pool.close()
+
+
+def test_pool_and_connect_timeouts_come_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    class Spy:
+        check_connection = ConnectionPool.check_connection
+
+        def __init__(self, conninfo: str, **kwargs: Any) -> None:  # noqa: ANN401
+            seen.update(kwargs)
+
+        def wait(self, timeout: float) -> None:
+            seen["wait"] = timeout
+
+    monkeypatch.setattr("nunchi.db.ConnectionPool", Spy)
+    settings = Settings(
+        database_url="postgresql://u:p@h/db", db_pool_timeout=7.5, db_connect_timeout=3
+    )
+    open_pool(settings)
+    assert (seen["timeout"], seen["wait"], seen["kwargs"]) == (7.5, 7.5, {"connect_timeout": 3})
+    assert seen["check"] is ConnectionPool.check_connection
