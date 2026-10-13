@@ -2,15 +2,19 @@
 """Checks that keep mutation-gate.sh from turning "no mutants" into a silent pass.
 
 usage:
+  mutation-guard.py exact MODULE       read mutmut results on stdin, print only MODULE's own mutants
   mutation-guard.py logic FILE          exit 1 if FILE contains logic, 0 if it is constants only
   mutation-guard.py pragma BASE_REF     exit 1 if the diff adds `pragma: no mutate` under src/
   mutation-guard.py is-pragma TEXT      exit 0 if TEXT would count as a pragma (self-test hook)
   mutation-guard.py config BASE_REF     exit 1 if any [tool.mutmut] key differs from BASE_REF
 
-A module is constants only when every top-level statement is an import, a docstring, an
-assignment of literals, names, attributes or `auto()`, `pass`, or a class whose body is
-made of the same, or an `if TYPE_CHECKING:` block of imports only. Functions, lambdas,
-methods and control flow all count as logic.
+A module is constants only when every top-level statement is an import, a docstring, `pass`,
+an assignment to plain names of a value on a strict allowlist (literals, names, dotted names,
+tuples/lists/sets/dicts of those, a negated literal, `x[literal]` of a dotted name, a bare
+`auto()`/`enum.auto()`), a class of the same with dotted-name bases, or an
+`if TYPE_CHECKING:` block of imports only. Every other expression (calls, conditionals,
+and/or, operators, comparisons, comprehensions, lambdas, f-strings) and every function,
+method or control flow statement counts as logic.
 """
 
 import ast
@@ -24,21 +28,58 @@ PRAGMA_NO_MUTATE = re.compile(r"no\s*mutate", re.IGNORECASE)
 ARGC = 3
 
 
-def _value_is_constant(node: ast.AST | None) -> bool:
+def _is_dotted(node: ast.AST | None) -> bool:
     match node:
-        case None | ast.Constant() | ast.Name() | ast.Attribute():
+        case ast.Name():
             return True
-        case ast.UnaryOp(op=ast.USub() | ast.UAdd(), operand=operand):
-            return _value_is_constant(operand)
+        case ast.Attribute(value=value):
+            return _is_dotted(value)
+    return False
+
+
+def _is_auto_call(node: ast.Call) -> bool:
+    if node.args or node.keywords:
+        return False
+    match node.func:
+        case ast.Name(id="auto") | ast.Attribute(value=ast.Name(id="enum"), attr="auto"):
+            return True
+    return False
+
+
+def _container_is_constant(node: ast.AST) -> bool:
+    match node:
         case ast.Tuple(elts=elts) | ast.List(elts=elts) | ast.Set(elts=elts):
             return all(_value_is_constant(e) for e in elts)
         case ast.Dict(keys=keys, values=values):
-            return all(k is None or _value_is_constant(k) for k in keys) and all(
+            return all(k is not None and _value_is_constant(k) for k in keys) and all(
                 _value_is_constant(v) for v in values
             )
-        case ast.Call(func=ast.Name(id="auto"), args=[], keywords=[]):
-            return True
     return False
+
+
+def _value_is_constant(node: ast.AST | None) -> bool:
+    """Strict allowlist. Anything not named here (calls, conditionals, operators, ...) is logic."""
+    match node:
+        case None | ast.Constant() | ast.Name():
+            return True
+        case ast.Attribute():
+            return _is_dotted(node)
+        case ast.UnaryOp(op=ast.USub(), operand=ast.Constant()):
+            return True
+        case ast.Subscript(value=value, slice=ast.Constant()):
+            return _is_dotted(value)
+        case ast.Call():
+            return _is_auto_call(node)
+    return _container_is_constant(node)
+
+
+def _assign_is_constant(stmt: ast.Assign | ast.AnnAssign) -> bool:
+    targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+    if not all(isinstance(t, ast.Name) for t in targets):
+        return False
+    if isinstance(stmt, ast.AnnAssign) and not _value_is_constant(stmt.annotation):
+        return False
+    return _value_is_constant(stmt.value)
 
 
 def _body_is_constant(body: list[ast.stmt]) -> bool:
@@ -50,13 +91,13 @@ def _body_is_constant(body: list[ast.stmt]) -> bool:
                 continue
             case ast.Expr(value=ast.Constant()):
                 continue
-            case ast.Assign(value=value) | ast.AnnAssign(value=value):
-                if not _value_is_constant(value):
+            case ast.Assign() | ast.AnnAssign():
+                if not _assign_is_constant(stmt):
                     return False
             case ast.ClassDef(bases=bases, keywords=keywords, decorator_list=[]):
-                if not all(_value_is_constant(b) for b in bases):
+                if not all(_is_dotted(b) for b in bases):
                     return False
-                if not all(_value_is_constant(k.value) for k in keywords):
+                if not all(_is_dotted(k.value) for k in keywords):
                     return False
                 if not _body_is_constant(stmt.body):
                     return False
@@ -83,12 +124,22 @@ def _is_type_checking_imports(node: ast.If) -> bool:
 
 
 def has_logic(source: str) -> bool:
-    tree = ast.parse(source)
-    if any(
-        isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) for n in ast.walk(tree)
-    ):
-        return True
-    return not _body_is_constant(tree.body)
+    return not _body_is_constant(ast.parse(source).body)
+
+
+def exact_module_mutants(module: str, results: str) -> list[str]:
+    """Result lines for MODULE's own mutants.
+
+    A mutant key is `<module>.<mutant name>` and the mutant name has no dot, so a module that
+    is a prefix of another (`nunchi.d` vs `nunchi.domain`) never borrows its mutants.
+    """
+    prefix = module + "."
+    hits = []
+    for line in results.splitlines():
+        key = line.strip().split(": ", 1)[0]
+        if key.startswith(prefix) and "." not in key[len(prefix) :] and ": " in line:
+            hits.append(line)
+    return hits
 
 
 def git(*args: str) -> str:
@@ -136,13 +187,17 @@ def changed_config_keys(base: str) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != ARGC or argv[1] not in ("logic", "pragma", "config", "is-pragma"):
+    if len(argv) != ARGC or argv[1] not in ("logic", "pragma", "config", "is-pragma", "exact"):
         print(__doc__, file=sys.stderr)
         return 2
     cmd, arg = argv[1], argv[2]
     if cmd == "logic":
         with open(arg, encoding="utf-8") as f:
             return int(has_logic(f.read()))
+    if cmd == "exact":
+        for line in exact_module_mutants(arg, sys.stdin.read()):
+            print(line)
+        return 0
     if cmd == "is-pragma":
         return int(not is_pragma(arg))
     if cmd == "pragma":

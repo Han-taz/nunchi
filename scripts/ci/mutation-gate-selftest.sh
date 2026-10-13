@@ -69,11 +69,11 @@ git add -A
 commit -m logic
 git tag full
 
-results() { # KILLED SURVIVED NOT_CHECKED
-  local i
-  for ((i = 1; i <= $1; i++)); do echo "    nunchi.m.x_f__mutmut_$i: killed"; done
-  for ((i = 1; i <= $2; i++)); do echo "    nunchi.m.x_g__mutmut_$i: survived"; done
-  for ((i = 1; i <= $3; i++)); do echo "    nunchi.m.x_h__mutmut_$i: not checked"; done
+results() { # KILLED SURVIVED NOT_CHECKED [MODULE]
+  local i m="${4:-nunchi.logic}"
+  for ((i = 1; i <= $1; i++)); do echo "    $m.x_f__mutmut_$i: killed"; done
+  for ((i = 1; i <= $2; i++)); do echo "    $m.x_g__mutmut_$i: survived"; done
+  for ((i = 1; i <= $3; i++)); do echo "    $m.x_h__mutmut_$i: not checked"; done
 }
 
 # case_ NAME WANT_RC PATTERN [ARGS...]  (env SHIM_* set by the caller)
@@ -95,19 +95,19 @@ case_() {
 }
 
 git checkout -q consts_only
-SHIM_ZERO="nunchi.consts* nunchi.enums*" \
+SHIM_ZERO="nunchi.consts.* nunchi.enums.*" \
   case_ "constants-only modules with zero mutants are skipped" 0 "no mutable code in nunchi.consts" base 80
-SHIM_ZERO="nunchi.consts* nunchi.enums*" \
+SHIM_ZERO="nunchi.consts.* nunchi.enums.*" \
   case_ "...and the run ends with the summary line" 0 "no mutable code changed" base 80
 git checkout -q full
 
-SHIM_ZERO="nunchi.logic*" \
+SHIM_ZERO="nunchi.logic.*" \
   case_ "zero mutants in a module with a function fails" 1 "zero mutants in nunchi.logic but it contains logic" base 80
 
-SHIM_ZERO="nunchi.consts*" SHIM_RESULTS="$(results 9 1 0)" \
+SHIM_ZERO="nunchi.consts.*" SHIM_RESULTS="$(results 9 1 0)" \
   case_ "one zero-mutant module is skipped, the rest at 90% pass" 0 "no mutable code in nunchi.consts" base 80
 
-SHIM_ZERO="nunchi.consts*" SHIM_RESULTS="$(results 7 3 0)" \
+SHIM_ZERO="nunchi.consts.*" SHIM_RESULTS="$(results 7 3 0)" \
   case_ "one zero-mutant module is skipped, the rest at 70% fail" 1 "7 of 10 mutants killed (70.0%)" base 80
 
 SHIM_RESULTS="$(results 7 3 0)" \
@@ -132,7 +132,7 @@ printf 'def f():\n    return 1\n' >src/nunchi/logic.py
 printf '[tool.mutmut]\nsource_paths = ["src/nunchi/"]\ndo_not_mutate = ["src/nunchi/logic.py"]\n' >pyproject.toml
 git add -A
 commit -m bypass
-SHIM_ZERO="nunchi.logic*" \
+SHIM_ZERO="nunchi.logic.*" \
   case_ "do_not_mutate added with a logic change fails" 1 "\[tool.mutmut\] do_not_mutate changed" base 80
 
 newrepo "$tmp/bypass-cfg"
@@ -148,7 +148,7 @@ newrepo "$tmp/bypass-pragma"
 printf 'def f():\n    return 1  # pragma: no mutate\n' >src/nunchi/logic.py
 git add -A
 commit -m bypass
-SHIM_ZERO="nunchi.logic*" \
+SHIM_ZERO="nunchi.logic.*" \
   case_ "an added pragma: no mutate fails and names the line" 1 "src/nunchi/logic.py:2 adds a 'pragma: no mutate'" base 80
 
 # Bypass: a renamed module was dropped by --diff-filter=AM
@@ -161,9 +161,9 @@ git mv src/nunchi/old.py src/nunchi/renamed.py
 printf 'def f():\n    return 2\n' >src/nunchi/renamed.py
 git add -A
 commit -m rename
-SHIM_ZERO="nunchi.renamed*" \
+SHIM_ZERO="nunchi.renamed.*" \
   case_ "a renamed module with logic and zero mutants fails" 1 "zero mutants in nunchi.renamed but it contains logic" base2 80
-SHIM_RESULTS="$(results 7 3 0)" \
+SHIM_RESULTS="$(results 7 3 0 nunchi.renamed)" \
   case_ "a renamed module is mutated and judged by its ratio" 1 "7 of 10 mutants killed (70.0%)" base2 80
 
 # Bypass: __init__.py was excluded
@@ -172,15 +172,26 @@ mkdir src/nunchi/pkg
 printf 'def f():\n    return 1\n' >src/nunchi/pkg/__init__.py
 git add -A
 commit -m init
-SHIM_ZERO="nunchi.pkg.x*" \
+SHIM_ZERO="nunchi.pkg.*" \
   case_ "logic in __init__.py with zero mutants fails" 1 "zero mutants in nunchi.pkg but it contains logic" base 80
-SHIM_RESULTS="$(results 7 3 0)" \
+SHIM_RESULTS="$(results 7 3 0 nunchi.pkg)" \
   case_ "__init__.py with mutants is judged by its ratio" 1 "7 of 10 mutants killed (70.0%)" base 80
 printf 'from nunchi.pkg import consts as consts\n__all__ = ["consts"]\n' >src/nunchi/pkg/__init__.py
 git add -A
 commit -m init-constants
-SHIM_ZERO="nunchi.pkg.x*" \
+SHIM_ZERO="nunchi.pkg.*" \
   case_ "__init__.py of imports and constants is skipped" 0 "no mutable code in nunchi.pkg" base 80
+
+# Prefix collision: nunchi.d must not borrow the mutants of nunchi.domain or nunchi.db
+newrepo "$tmp/prefix"
+printf 'def f():\n    pass\n' >src/nunchi/d.py
+git add -A
+commit -m prefix
+borrowed="$(results 10 0 0 nunchi.domain; results 10 0 0 nunchi.db; results 10 0 0 nunchi.d.sub)"
+SHIM_RESULTS="$borrowed" \
+  case_ "a prefix-named module does not borrow other modules' mutants" 1 "zero mutants in nunchi.d but it contains logic" base 80
+SHIM_RESULTS="$(results 10 0 0 nunchi.d; results 0 10 0 nunchi.domain)" \
+  case_ "only the module's own mutants set the ratio" 0 "10 of 10 mutants killed (100.0%)" base 80
 
 # Pragma rule: mirrors mutmut (a comment with `# pragma:` and `no mutate`), any spacing or case
 for text in 'x = 1  # pragma: no mutate' 'x = 1  # pragma:  no mutate' 'x = 1  # pragma:no mutate' \
@@ -203,7 +214,7 @@ newrepo "$tmp/bypass-pragma2"
 printf 'def f():\n    return 1  # pragma:  no mutate\n' >src/nunchi/logic.py
 git add -A
 commit -m bypass
-SHIM_ZERO="nunchi.logic*" \
+SHIM_ZERO="nunchi.logic.*" \
   case_ "a double-space pragma fails and names the line" 1 "src/nunchi/logic.py:2 adds a 'pragma: no mutate'" base 80
 
 # AST rule: what counts as logic
@@ -211,7 +222,8 @@ newrepo "$tmp/ast"
 for src in 'import os' 'A = (1, -2, "x")' 'class C:\n    X = 1\n    class D:\n        Y = 2' \
   'from enum import auto, StrEnum\n\n\nclass E(StrEnum):\n    A = auto()' \
   'from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from a import B\n    import c' \
-  'import typing\nif typing.TYPE_CHECKING:\n    from a import B' '__all__ = ["a", "b"]'; do
+  'import typing\nif typing.TYPE_CHECKING:\n    from a import B' '__all__ = ["a", "b"]' \
+  'import enum\nclass E(enum.Enum):\n    A = enum.auto()' 'A = a.b.c' 'A = {"k": (1, -2)}' 'A = a.b[0]'; do
   printf '%b\n' "$src" >m.py
   "$PY" "$here/mutation-guard.py" logic m.py || {
     echo "FAIL: AST rule called constants logic: $src" >&2
@@ -220,7 +232,12 @@ for src in 'import os' 'A = (1, -2, "x")' 'class C:\n    X = 1\n    class D:\n  
 done
 for src in 'def f(): pass' 'class C:\n    def m(self): pass' 'X = lambda: 1' 'if True:\n    X = 1' \
   'if TYPE_CHECKING:\n    X = f()' 'if TYPE_CHECKING:\n    import a\nelse:\n    a = None' \
-  'if TYPE_CHECKING:\n    import a\n    X = 1' 'X = f()' 'for i in []:\n    pass' 'try:\n    import x\nexcept ImportError:\n    x = None' 'with a:\n    pass'; do
+  'if TYPE_CHECKING:\n    import a\n    X = 1' 'X = f()' 'for i in []:\n    pass' 'try:\n    import x\nexcept ImportError:\n    x = None' 'with a:\n    pass' \
+  'V = (a if b else c).__name__' 'W = (a and b or c).__name__' 'Z = b.connect(a).closed' \
+  'import os\nP = os.getpid().real' 'X = a + b' 'X = a < b' 'X = f"{a}"' 'X = [i for i in a]' \
+  'X = a[b]' 'X = enum.auto(1)' 'X = foo.auto()' 'X = -a' 'X = {**a}' 'X = (*a, 1)' \
+  'a.b = 1' 'a[0] = 1' 'X: f() = 1' 'class C(f()):\n    pass' 'class C:\n    X = g()' \
+  '@d\nclass C:\n    pass' 'X = a.b().c'; do
   printf '%b\n' "$src" >m.py
   "$PY" "$here/mutation-guard.py" logic m.py || continue
   echo "FAIL: AST rule called logic constants: $src" >&2
