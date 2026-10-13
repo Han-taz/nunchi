@@ -44,7 +44,9 @@ entry. When nothing is worth remembering, return an empty "items" list.
 Describe each entry as follows. Pick relation:
 - not_worth for something not worth keeping; prefer leaving it out of "items". Not worth \
 remembering: chit-chat or social talk; transient logistics such as meeting times or who is out \
-today; debate that has not reached a decision; a personal matter or an evaluation of a person; \
+today; progress or status reports ("X worked on Y, tests pass", "작업 현황", updates in the \
+"했습니다/통과했습니다" style, PR or branch announcements) that go stale as soon as the work moves \
+on; debate that has not reached a decision; a personal matter or an evaluation of a person; \
 something already well documented at its source, where a link is enough.
 - same_as when a candidate already states the same value for the same subject and attribute.
 - updates when the message gives a new value for the subject and attribute of a candidate.
