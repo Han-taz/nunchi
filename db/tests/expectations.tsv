@@ -317,3 +317,11 @@ N28	(ok)	fail	third value proposal
 N28a	= true	fail	conflicts with the live row
 N28b	(ok)	fail	curator edits the attribute of a proposal
 N28c	= 기술 담당자/NULL	fail	attribute normalized and conflict cleared
+N18a	(ok)	fail
+N18b	(ok)	fail
+N18c	(ok)	fail
+N18d	(ok)	fail
+N18e	(ok)	fail
+N18f	(ok)	fail
+N18g	(ok)	fail
+N18h	(ok)	fail
