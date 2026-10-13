@@ -5,6 +5,7 @@ import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 
 
@@ -36,23 +37,26 @@ MSG_CRED = "비밀 정보(시크릿)가 포함되어 있습니다. 제거한 뒤
 MSG_PII = "원문 링크로 대체하세요"
 MSG_INSTRUCTION = "지시문처럼 보입니다. 사람이 내용을 확인하세요"
 
-_RRN_WEIGHTS = (2, 3, 4, 5, 6, 7, 8, 9, 2, 3, 4, 5)
 _ENTROPY_MIN_BITS = 3.5
-
-
-def _check_digit(digits: str) -> int:
-    total = sum(w * int(d) for w, d in zip(_RRN_WEIGHTS, digits[:12], strict=True))
-    return (11 - total % 11) % 10
+_SEP = "[ ./-]?"
 
 
 def _is_rrn(m: re.Match[str]) -> bool:
-    digits = m["front"] + m["back"]
-    return _check_digit(digits) == int(digits[12])
+    """Registration numbers issued since 2020-10 carry no checksum, so a real date is the test."""
+    front = m["front"]
+    year = (2000 if m["back"][0] in "3478" else 1900) + int(front[:2])
+    try:
+        date(year, int(front[2:4]), int(front[4:]))
+    except ValueError:
+        return False
+    return True
 
 
-def _is_arn(m: re.Match[str]) -> bool:
-    digits = m["front"] + m["back"]
-    return (_check_digit(digits) + 2) % 10 == int(digits[12])
+def _is_card(m: re.Match[str]) -> bool:
+    """Luhn checksum over the digits of a 13-19 digit run, which the pattern bounds."""
+    digits = [int(c) for c in m[0] if c.isdigit()]
+    doubled = [sum(divmod(d * 2, 10)) for d in digits[-2::-2]]
+    return (sum(digits[::-2]) + sum(doubled)) % 10 == 0
 
 
 def _entropy(value: str) -> float:
@@ -127,25 +131,27 @@ RULES: tuple[Rule, ...] = (
     Rule(
         "pii-kr-rrn",
         Kind.PII,
-        re.compile(r"(?<!\d)(?P<front>\d{6})[- ]?(?P<back>[1-4]\d{6})(?!\d)"),
+        re.compile(r"(?<!\d)(?P<front>\d{6})[- ]?(?P<back>[1-8]\d{6})(?!\d)"),
         Action.REJECT,
         MSG_PII,
         _is_rrn,
     ),
     Rule(
-        "pii-kr-arn",
-        Kind.PII,
-        re.compile(r"(?<!\d)(?P<front>\d{6})[- ]?(?P<back>[5-8]\d{6})(?!\d)"),
-        Action.REJECT,
-        MSG_PII,
-        _is_arn,
-    ),
-    Rule(
         "pii-kr-phone",
         Kind.PII,
-        re.compile(r"(?<!\d)(?:\+82[-. ]?10|01[016789])[-. ]?\d{3,4}[-. ]?\d{4}(?!\d)"),
+        re.compile(
+            rf"(?<!\d)(?:\+?82{_SEP}\(?0?1[016789]\)?|\(?01[016789]\)?){_SEP}\d{{3,4}}{_SEP}\d{{4}}(?!\d)"
+        ),
         Action.REJECT,
         MSG_PII,
+    ),
+    Rule(
+        "pii-kr-card",
+        Kind.PII,
+        re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)"),
+        Action.REJECT,
+        MSG_PII,
+        _is_card,
     ),
     Rule(
         "pii-kr-account",
@@ -189,7 +195,7 @@ RULES: tuple[Rule, ...] = (
         "inject-ignore-previous-ko",
         Kind.INSTRUCTION,
         re.compile(
-            r"(?:이전|위|앞선)\s?(?:의\s?)?(?:지시|지침|명령|프롬프트)\S{0,3}\s?(?:를\s?|은\s?)?(?:모두\s?)?(?:무시|잊)"
+            r"(?:이전|위|앞선)\s?(?:의\s?)?(?:모든\s?)?(?:지시|지침|명령|프롬프트)\S{0,3}\s?(?:를\s?|은\s?)?(?:모두\s?)?(?:무시|잊)"
         ),
         Action.FLAG,
         MSG_INSTRUCTION,
@@ -198,6 +204,15 @@ RULES: tuple[Rule, ...] = (
         "inject-polite-imperative-ko",
         Kind.INSTRUCTION,
         re.compile(r"(?:하도록|해야)\s?합니다|하십시오"),
+        Action.FLAG,
+        MSG_INSTRUCTION,
+    ),
+    Rule(
+        "inject-polite-request-ko",
+        Kind.INSTRUCTION,
+        re.compile(
+            r"(?:지시|명령|규칙|프롬프트|시스템)[^.\n]{0,15}?(?:해 ?주세요|하세요|바랍니다)"
+        ),
         Action.FLAG,
         MSG_INSTRUCTION,
     ),

@@ -15,11 +15,16 @@ _FROM = (
     "\u110b\u1175"
 )
 _TO = "ABEKMHOPCTXIJSaeopcyxijshdqwol"
-_HOMOGLYPHS = str.maketrans(_FROM, _TO)
+_DASHES = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"
+_FOLD = str.maketrans(_FROM + _DASHES, _TO + "-" * len(_DASHES))
+
+
+def _ascii_digits(text: str) -> str:
+    return "".join(str(unicodedata.decimal(c)) if c.isdecimal() else c for c in text)
 
 
 def normalize(text: str) -> str:
-    """NFKC, drop invisible characters, fold homoglyphs, collapse whitespace."""
+    """NFKC, drop invisible characters, fold homoglyphs, dashes and digits, collapse whitespace."""
     without_invisible = _INVISIBLE.sub("", text)
-    folded = unicodedata.normalize("NFKC", without_invisible).translate(_HOMOGLYPHS)
-    return " ".join(folded.split())
+    folded = unicodedata.normalize("NFKC", without_invisible).translate(_FOLD)
+    return " ".join(_ascii_digits(folded).split())
