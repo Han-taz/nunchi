@@ -208,7 +208,7 @@ def test_kind_filter_applies_before_the_row_limit(world: Pool, fresh_db: str) ->
             " (id, tenant_id, store_id, kind, status, title, source_refs, created_by,"
             " subject_id, attribute)"
             " VALUES ('ffffffff-ffff-ffff-ffff-ffffffffffff', %s, %s, 'fact', 'active', 'kiwi',"
-            ' \'[{"uri": "https://x"}]\', %s, %s, \'color\')',
+            " '[{\"uri\": \"https://x\"}]', %s, %s, 'color')",
             (TENANT, STORE, USER, SUBJECT),
         )
     active = (MemoryStatus.ACTIVE,)

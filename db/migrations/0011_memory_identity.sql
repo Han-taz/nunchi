@@ -2,7 +2,8 @@
 -- entity / entity_alias, memory.subject_id / attribute / last_confirmed_at, one live row per key,
 -- the same-key decision in propose (reconfirm / conflict_with), the decide() replace path and memory_as_of().
 -- Function and trigger bodies are copied from db/schema.sql (the schema-drift job compares the two).
--- memory_set_tier keeps 0010's server-decided origin/containment (source_facts) and drops its conflict_with reset, which memory_key_decide now owns.
+-- memory_set_tier keeps 0010's server-decided origin/containment (source_facts) and drops its conflict_with reset,
+-- which memory_key_decide now owns.
 -- Existing non-note rows get a per-tenant '(legacy)' subject and a unique attribute so the key check can hold.
 
 ALTER TYPE memory_op ADD VALUE 'reconfirm';
@@ -28,17 +29,28 @@ ALTER TABLE memory ADD COLUMN last_confirmed_at timestamptz NOT NULL DEFAULT now
 
 ALTER TABLE memory DISABLE TRIGGER USER;
 INSERT INTO entity (tenant_id, kind, canonical_name)
-SELECT DISTINCT tenant_id, 'legacy', '(legacy)' FROM memory WHERE kind <> 'note';
+SELECT DISTINCT
+  tenant_id,
+  'legacy' AS kind,
+  '(legacy)' AS canonical_name
+FROM memory
+WHERE kind <> 'note';
 UPDATE memory SET
-  subject_id = (SELECT e.id FROM entity AS e WHERE e.tenant_id = memory.tenant_id AND e.kind = 'legacy'),
+  subject_id = (
+    SELECT e.id FROM entity AS e
+    WHERE e.tenant_id = memory.tenant_id AND e.kind = 'legacy'
+  ),
   attribute = 'legacy-' || memory.id
 WHERE kind <> 'note';
 ALTER TABLE memory ENABLE TRIGGER USER;
 
-ALTER TABLE memory ADD CONSTRAINT memory_subject_same_tenant FOREIGN KEY (tenant_id, subject_id) REFERENCES entity (tenant_id, id);
+ALTER TABLE memory
+ADD CONSTRAINT memory_subject_same_tenant FOREIGN KEY (tenant_id, subject_id) REFERENCES entity (tenant_id, id);
 ALTER TABLE memory ADD CONSTRAINT memory_key_by_kind CHECK (
-  CASE WHEN kind = 'note' THEN subject_id IS NULL AND attribute IS NULL
-    ELSE subject_id IS NOT NULL AND attribute IS NOT NULL END
+  CASE
+    WHEN kind = 'note' THEN subject_id IS NULL AND attribute IS NULL
+    ELSE subject_id IS NOT NULL AND attribute IS NOT NULL
+  END
 );
 CREATE UNIQUE INDEX memory_live_key_uidx ON memory (store_id, subject_id, attribute)
 WHERE status IN ('active', 'provisional');
@@ -50,17 +62,21 @@ ALTER TABLE entity_alias ENABLE ROW LEVEL SECURITY;
 ALTER TABLE entity_alias FORCE ROW LEVEL SECURITY;
 CREATE POLICY entity_alias_read ON entity_alias FOR SELECT USING (tenant_id = app_sec.ctx_tenant());
 
-CREATE FUNCTION app_sec.norm_text(t text) RETURNS text LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION app_sec.norm_text(t text) RETURNS text
+LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT lower(btrim(regexp_replace(t, '\s+', ' ', 'g')))
 $$;
-CREATE FUNCTION app_sec.alias_before_write() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION app_sec.alias_before_write() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   NEW.alias_norm := app_sec.norm_text(NEW.alias_norm);
   RETURN NEW;
 END $$;
-CREATE TRIGGER entity_alias_norm BEFORE INSERT OR UPDATE ON entity_alias FOR EACH ROW EXECUTE FUNCTION app_sec.alias_before_write();
+CREATE TRIGGER entity_alias_norm BEFORE INSERT OR UPDATE ON entity_alias
+FOR EACH ROW EXECUTE FUNCTION app_sec.alias_before_write();
 
-CREATE FUNCTION app_sec.resolve_entity(p_name text) RETURNS uuid LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION app_sec.resolve_entity(p_name text) RETURNS uuid
+LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT a.entity_id FROM entity_alias AS a WHERE a.alias_norm = app_sec.norm_text(p_name)
 $$;
 CREATE FUNCTION app_sec.memory_key_decide() RETURNS trigger
@@ -219,7 +235,7 @@ BEGIN
   RETURN NULL;
 END $$;
 CREATE OR REPLACE FUNCTION app_sec.decide(
-  p_nonce uuid, p_memory uuid, p_expected_version integer, p_verdict text, p_reason text DEFAULT null
+  p_nonce uuid, p_memory uuid, p_expected_version integer, p_verdict text, p_reason text DEFAULT NULL
 ) RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE

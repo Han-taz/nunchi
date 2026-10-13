@@ -159,8 +159,10 @@ CREATE TABLE memory (
   last_confirmed_at timestamptz NOT NULL DEFAULT now(), -- 생성, 같은 값 재수집(reconfirm), curator 확인 때 갱신
   CONSTRAINT memory_subject_same_tenant FOREIGN KEY (tenant_id, subject_id) REFERENCES entity (tenant_id, id),
   CONSTRAINT memory_key_by_kind CHECK (
-    CASE WHEN kind = 'note' THEN subject_id IS NULL AND attribute IS NULL
-      ELSE subject_id IS NOT NULL AND attribute IS NOT NULL END
+    CASE
+      WHEN kind = 'note' THEN subject_id IS null AND attribute IS null
+      ELSE subject_id IS NOT null AND attribute IS NOT null
+    END
   ),
   CONSTRAINT memory_store_same_tenant FOREIGN KEY (tenant_id, store_id) REFERENCES store (tenant_id, id),
   CHECK (status <> 'deleted' OR body IS null),
@@ -788,17 +790,21 @@ BEGIN
 END $$;
 
 -- 키 정규화: 소문자, 앞뒤 공백 제거, 연속 공백 하나로
-CREATE FUNCTION app_sec.norm_text(t text) RETURNS text LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION app_sec.norm_text(t text) RETURNS text
+LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT lower(btrim(regexp_replace(t, '\s+', ' ', 'g')))
 $$;
-CREATE FUNCTION app_sec.alias_before_write() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION app_sec.alias_before_write() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   NEW.alias_norm := app_sec.norm_text(NEW.alias_norm);
   RETURN NEW;
 END $$;
-CREATE TRIGGER entity_alias_norm BEFORE INSERT OR UPDATE ON entity_alias FOR EACH ROW EXECUTE FUNCTION app_sec.alias_before_write();
+CREATE TRIGGER entity_alias_norm BEFORE INSERT OR UPDATE ON entity_alias
+FOR EACH ROW EXECUTE FUNCTION app_sec.alias_before_write();
 -- entity 해석 1단계: 별칭 정확 일치. 호출자의 RLS 가 적용되어 자기 테넌트의 별칭만 본다 (유사도 후보는 U5 밖)
-CREATE FUNCTION app_sec.resolve_entity(p_name text) RETURNS uuid LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION app_sec.resolve_entity(p_name text) RETURNS uuid
+LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT a.entity_id FROM entity_alias AS a WHERE a.alias_norm = app_sec.norm_text(p_name)
 $$;
 
@@ -1313,7 +1319,8 @@ END $$;
 -- ── 앱 접속 역할 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──
 GRANT USAGE ON SCHEMA public TO app_rw;
 -- 주체/권한/감사 테이블은 읽기 전용이다. 버전은 memory 트리거, 삭제 해시는 삭제 트리거, 권한과 주체는 별도 관리 역할이 쓴다
-GRANT SELECT ON tenant, group_member, store, store_grant, memory_transition, approval_tier_rule, entity, entity_alias TO app_rw;
+GRANT SELECT ON tenant, group_member, store, store_grant, memory_transition, approval_tier_rule TO app_rw;
+GRANT SELECT ON entity, entity_alias TO app_rw;
 -- principal.external_id(IdP subject, SCIM id)는 숨긴다: 컬럼 단위 GRANT 에서 뺀다. SELECT * 는 42501 이다.
 -- 필요한 조회는 SECURITY DEFINER 함수(app_sec.resolve_principal)로 낸다.
 GRANT SELECT (id, tenant_id, kind, display_name, active) ON principal TO app_rw;
