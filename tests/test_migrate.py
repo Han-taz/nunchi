@@ -1,4 +1,5 @@
 import hashlib
+import secrets
 from pathlib import Path
 
 import psycopg
@@ -235,52 +236,154 @@ def test_main_reports_an_unreachable_database(
     assert capsys.readouterr().err.startswith("migrate: database error: ")
 
 
-@pytest.mark.parametrize(
-    ("sql", "message"),
-    [
-        ("BEGIN;\nSELECT 1;\nCOMMIT;\n", "top-level BEGIN"),
-        ("SELECT 1;\ncommit;\n", "top-level COMMIT"),
-        ("SELECT 1;\n  Rollback ;\n", "top-level ROLLBACK"),
-        ("SELECT 1;\nABORT;\n", "top-level ABORT"),
-        ("SELECT 1;\nSTART   TRANSACTION;\n", "top-level START TRANSACTION"),
-        ("-- note\n/* x */ BEGIN;\n", "top-level BEGIN"),
-        ("SELECT 'a'; COMMIT;", "top-level COMMIT"),
-        ("SELECT E'it\\'s'; COMMIT;", "top-level COMMIT"),
-        ("SELECT 'it''s'; COMMIT;", "top-level COMMIT"),
-        ('SELECT "x"; COMMIT;', "top-level COMMIT"),
-        ("SELECT $$x$$; COMMIT;", "top-level COMMIT"),
-        ("SELECT $t$x$t$; COMMIT;", "top-level COMMIT"),
-        ("CREATE INDEX CONCURRENTLY i ON t (a);\n", "CONCURRENTLY cannot run"),
-        ("REFRESH MATERIALIZED VIEW concurrently v;\n", "CONCURRENTLY cannot run"),
-        ("SELECT E'\\''; COMMIT; SELECT ''", "top-level COMMIT"),
-    ],
+_PREFIX = "CREATE TABLE a (i int);\n"
+_COMMITTING_PROC = (
+    "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN COMMIT; END $$;\n"
+    "CREATE TABLE a (i int);\nCALL p();\n"
 )
-def test_load_rejects_sql_the_runner_transaction_cannot_hold(
-    tmp_path: Path, sql: str, message: str
+_ATOMIC_DOMAIN = "CREATE DOMAIN atomic AS int; CREATE TABLE a (i int, begin atomic);\n"
+
+# Each entry is one migration file that creates table `a` and then tries to leave
+# or outlive the runner's transaction. The server must refuse it; nothing may stay.
+_HOSTILE = {
+    "commit": _PREFIX + "COMMIT;\nSELECT 1/0;",
+    "commit-and-chain": _PREFIX + "COMMIT AND CHAIN;\nSELECT 1/0;",
+    "commit-and-no-chain": _PREFIX + "COMMIT AND NO CHAIN;\nSELECT 1/0;",
+    "commit-work": _PREFIX + "COMMIT WORK;\nSELECT 1/0;",
+    "end": _PREFIX + "END;\nSELECT 1/0;",
+    "end-transaction": _PREFIX + "end transaction;\nSELECT 1/0;",
+    "abort": _PREFIX + "ABORT;\nSELECT 1/0;",
+    "rollback": _PREFIX + "ROLLBACK;\nSELECT 1/0;",
+    "begin": _PREFIX + "BEGIN;\nCOMMIT;\nSELECT 1/0;",
+    "start-transaction": _PREFIX + "START TRANSACTION;\nCOMMIT;\nSELECT 1/0;",
+    "savepoint": _PREFIX + "SAVEPOINT s;\nSELECT 1/0;",
+    "release": _PREFIX + "SAVEPOINT s; RELEASE s;\nSELECT 1/0;",
+    "rollback-to": _PREFIX + "SAVEPOINT s; ROLLBACK TO s;\nSELECT 1/0;",
+    "prepare-transaction": _PREFIX + "PREPARE TRANSACTION 'x';\nSELECT 1/0;",
+    "commit-prepared": _PREFIX + "COMMIT PREPARED 'x';\nSELECT 1/0;",
+    "rollback-prepared": _PREFIX + "ROLLBACK PREPARED 'x';\nSELECT 1/0;",
+    "vacuum": _PREFIX + "VACUUM;\nSELECT 1/0;",
+    "vacuum-table": _PREFIX + "VACUUM (ANALYZE) a;\nSELECT 1/0;",
+    "create-index-concurrently": _PREFIX + "CREATE INDEX CONCURRENTLY i ON a (i);",
+    "create-unique-index-concurrently": _PREFIX + "CREATE UNIQUE INDEX CONCURRENTLY i ON a (i);",
+    "drop-index-concurrently": _PREFIX + "CREATE INDEX i ON a (i); DROP INDEX CONCURRENTLY i;",
+    "reindex-concurrently": _PREFIX + "CREATE INDEX i ON a (i); REINDEX INDEX CONCURRENTLY i;",
+    "reindex-option-concurrently": _PREFIX + "REINDEX (CONCURRENTLY) TABLE a;",
+    "call-committing-procedure": _COMMITTING_PROC,
+    "do-commit": _PREFIX + "DO $$ BEGIN COMMIT; END $$;\nSELECT 1/0;",
+    "do-rollback": _PREFIX + "DO $$ BEGIN ROLLBACK; END $$;\nSELECT 1/0;",
+    "do-execute-commit": _PREFIX + "DO $$ BEGIN EXECUTE 'COMMIT'; END $$;\nSELECT 1/0;",
+    "fake-begin-atomic-end": _ATOMIC_DOMAIN + "END;\nSELECT 1/0;",
+    "fake-begin-atomic-commit": _ATOMIC_DOMAIN + "COMMIT;\nSELECT 1/0;",
+    "after-real-begin-atomic": (
+        "CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;\n"
+        + _PREFIX
+        + "END;\nSELECT 1/0;"
+    ),
+    "comment-hides-nothing": _PREFIX + "-- note\n/* x */ COMMIT;\nSELECT 1/0;",
+    "after-string": _PREFIX + "SELECT 'a'; COMMIT;\nSELECT 1/0;",
+    "after-escape-string": _PREFIX + "SELECT E'it\\'s'; COMMIT;\nSELECT 1/0;",
+    "after-doubled-quote": _PREFIX + "SELECT 'it''s'; COMMIT;\nSELECT 1/0;",
+    "after-dollar-quote": _PREFIX + "SELECT $t$x$t$; COMMIT;\nSELECT 1/0;",
+    "after-escape-quote": _PREFIX + "SELECT E'\\''; COMMIT; SELECT ''\nSELECT 1/0;",
+    "psql-gexec": _PREFIX + "SELECT 'COMMIT' \\gexec\nSELECT 1/0;",
+    "psql-semicolon": _PREFIX + "SELECT 1 \\; COMMIT;\nSELECT 1/0;",
+}
+
+
+def assert_nothing_persisted(url: str) -> None:
+    with psycopg.connect(url) as check:
+        assert check.execute("SELECT to_regclass('a')").fetchone() == (None,)
+        if check.execute("SELECT to_regclass('schema_migrations')").fetchone() != (None,):
+            assert check.execute("SELECT count(*) FROM schema_migrations").fetchone() == (0,)
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("sql", list(_HOSTILE.values()), ids=list(_HOSTILE))
+def test_server_refuses_what_the_runner_transaction_cannot_hold(
+    fresh_db: str, tmp_path: Path, sql: str
 ) -> None:
     (tmp_path / "0001_a.sql").write_text(sql)
     seal(tmp_path)
-    with pytest.raises(m.MigrationError, match=rf"^0001_a\.sql: .*{message}"):
-        m.load_migrations(tmp_path)
+    with (
+        psycopg.connect(fresh_db) as conn,
+        pytest.raises(m.MigrationError, match=r"^0001_a\.sql: "),
+    ):
+        m.migrate(conn, tmp_path)
+    assert_nothing_persisted(fresh_db)
 
 
+@pytest.mark.db
+def test_refusal_message_comes_from_the_server_and_names_the_file(
+    fresh_db: str, tmp_path: Path
+) -> None:
+    (tmp_path / "0001_ok.sql").write_text("SELECT 1;")
+    (tmp_path / "0002_end.sql").write_text(_PREFIX + "END;")
+    seal(tmp_path)
+    with psycopg.connect(fresh_db) as conn, pytest.raises(m.MigrationError) as err:
+        m.migrate(conn, tmp_path)
+    assert str(err.value).startswith(
+        "0002_end.sql: EXECUTE of transaction commands is not implemented"
+    )
+    assert_nothing_persisted(fresh_db)
+
+
+# Session settings an earlier file leaves behind must not change how a later file is read.
+# The payload is one harmless string literal when read with standard_conforming_strings = on,
+# and `'a\\'` followed by a live COMMIT when read with it off.
+_PAYLOAD = "CREATE TABLE a (i int); SELECT 'a\\'\n'; COMMIT; SELECT 1/0; --'"
+
+
+@pytest.mark.db
 @pytest.mark.parametrize(
-    "sql",
+    "setting",
     [
-        "SELECT 1;\n",
-        "DO $$\nBEGIN\n  PERFORM 1;\nEND $$;\n",
-        "CREATE FUNCTION f() RETURNS int LANGUAGE plpgsql AS $b$\nBEGIN RETURN 1; END; $b$;\n",
-        "-- BEGIN; COMMIT; CONCURRENTLY\nSELECT 1;\n",
-        "/* COMMIT; */ SELECT 1;\n",
-        "SELECT 'COMMIT; CONCURRENTLY';\n",
-        "SELECT E'\\'; COMMIT; --';\n",
-        'SELECT 1 AS "commit";\n',
-        "SELECT 1 AS begin_at, 2 AS committed;\n",
-        "COMMENT ON TABLE t IS 'ROLLBACK is fine here';\n",
-        "CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;\n",
+        "SET standard_conforming_strings = off",
+        "SET LOCAL standard_conforming_strings = off",
+        "SELECT set_config('standard_conforming_strings', 'off', true)",
+        "SELECT set_config('standard_conforming_strings', 'off', false)",
+        "SET backslash_quote = on; SET standard_conforming_strings = off",
     ],
 )
-def test_load_accepts_keywords_that_are_only_text(tmp_path: Path, sql: str) -> None:
+def test_earlier_file_cannot_change_how_a_later_file_is_lexed(
+    fresh_db: str, tmp_path: Path, setting: str
+) -> None:
+    (tmp_path / "0001_set.sql").write_text(setting + ";\n")
+    (tmp_path / "0002_payload.sql").write_text(_PAYLOAD)
+    (tmp_path / "0003_fail.sql").write_text("SELECT 1/0;\n")
+    seal(tmp_path)
+    with (
+        psycopg.connect(fresh_db) as conn,
+        pytest.raises(m.MigrationError, match=r"^0003_fail\.sql: .*division by zero"),
+    ):
+        m.migrate(conn, tmp_path)
+    assert_nothing_persisted(fresh_db)
+
+
+@pytest.mark.db
+def test_payload_is_only_a_string_when_read_the_standard_way(fresh_db: str, tmp_path: Path) -> None:
+    (tmp_path / "0001_set.sql").write_text("SET standard_conforming_strings = off;\n")
+    (tmp_path / "0002_payload.sql").write_text(_PAYLOAD)
+    seal(tmp_path)
+    with psycopg.connect(fresh_db) as conn:
+        assert m.migrate(conn, tmp_path) == ["0001", "0002"]
+        assert conn.execute("SELECT to_regclass('a')").fetchone() == ("a",)
+
+
+@pytest.mark.db
+def test_file_text_that_contains_dollar_quote_tags_runs_verbatim(
+    fresh_db: str, tmp_path: Path
+) -> None:
+    body = "CREATE TABLE a (i int);\nINSERT INTO a VALUES (1);\nSELECT $do$x$do$, $$y$$, '$';\n-- $"
+    (tmp_path / "0001_a.sql").write_text(body)
+    seal(tmp_path)
+    with psycopg.connect(fresh_db) as conn:
+        assert m.migrate(conn, tmp_path) == ["0001"]
+        assert conn.execute("SELECT count(*) FROM a").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("sql", ["SELECT 1;\n", "-- BEGIN; COMMIT; CONCURRENTLY\nSELECT 1;\n"])
+def test_load_does_not_judge_sql_text(tmp_path: Path, sql: str) -> None:
     (tmp_path / "0001_a.sql").write_text(sql)
     seal(tmp_path)
     assert [x.version for x in m.load_migrations(tmp_path)] == ["0001"]
@@ -291,3 +394,40 @@ def test_load_rejects_invalid_utf8(tmp_path: Path) -> None:
     seal(tmp_path)
     with pytest.raises(m.MigrationError, match=r"^0001_a\.sql: not valid UTF-8$"):
         m.load_migrations(tmp_path)
+
+
+@pytest.mark.db
+def test_all_frozen_migrations_apply_through_the_runner(fresh_db: str) -> None:
+    files = sorted((REPO / "db" / "migrations").glob("*.sql"))
+    with psycopg.connect(fresh_db) as conn:
+        assert m.migrate(conn, REPO / "db" / "migrations") == [f.name[:4] for f in files]
+
+
+@pytest.mark.db
+def test_refresh_concurrently_is_legal_in_a_transaction_so_it_is_allowed(
+    fresh_db: str, tmp_path: Path
+) -> None:
+    sql = (
+        "CREATE TABLE a (k int); INSERT INTO a VALUES (1);"
+        " CREATE MATERIALIZED VIEW v AS SELECT k FROM a; CREATE UNIQUE INDEX ON v (k);"
+        " REFRESH MATERIALIZED VIEW CONCURRENTLY v;"
+    )
+    (tmp_path / "0001_a.sql").write_text(sql)
+    seal(tmp_path)
+    with psycopg.connect(fresh_db) as conn:
+        assert m.migrate(conn, tmp_path) == ["0001"]
+
+
+@pytest.mark.db
+def test_a_file_that_contains_the_first_random_tag_still_runs_verbatim(
+    fresh_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    draws = iter(["aaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"])
+    monkeypatch.setattr(secrets, "token_hex", lambda _n: next(draws))
+    (tmp_path / "0001_a.sql").write_text(
+        "CREATE TABLE a (s text); INSERT INTO a VALUES ($maaaaaaaaaaaaaaaa$x$maaaaaaaaaaaaaaaa$);"
+    )
+    seal(tmp_path)
+    with psycopg.connect(fresh_db) as conn:
+        assert m.migrate(conn, tmp_path) == ["0001"]
+        assert conn.execute("SELECT s FROM a").fetchone() == ("x",)

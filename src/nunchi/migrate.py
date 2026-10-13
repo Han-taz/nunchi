@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+import secrets
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -15,25 +16,6 @@ _NAME = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 _MANIFEST = "SHA256SUMS"
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _LOCK_KEY = 7_262_024_001
-
-# Comments, quoted identifiers and every string flavour, scanned left to right so one
-# cannot hide inside another. A comment can nest in Postgres but this stops at the first
-# close, which only ever leaves more text visible as code.
-_LITERALS = re.compile(
-    r"""--[^\n]*
-    |/\*.*?\*/
-    |(?<![\w$])[Ee]'(?:[^'\\]|\\.|'')*'
-    |'(?:[^']|'')*'
-    |"(?:[^"]|"")*"
-    |(?<![\w$])\$\$.*?\$\$
-    |(?<![\w$])\$([A-Za-z_]\w*)\$.*?\$\1\$
-    """,
-    re.VERBOSE | re.DOTALL,
-)
-_TRANSACTION_CONTROL = re.compile(
-    r"(?:^|;)\s*(begin|commit|rollback|abort|start\s+transaction)\b", re.IGNORECASE
-)
-_CONCURRENTLY = re.compile(r"\bconcurrently\b", re.IGNORECASE)
 
 
 class MigrationError(Exception):
@@ -64,22 +46,24 @@ def read_manifest(directory: Path) -> dict[str, str]:
     return entries
 
 
-def check_runnable(name: str, sql: bytes) -> None:
-    """Refuse SQL that cannot run inside the runner's one transaction per migration."""
-    try:
-        text = sql.decode()
-    except UnicodeDecodeError as err:
-        msg = f"{name}: not valid UTF-8"
-        raise MigrationError(msg) from err
-    code = _LITERALS.sub(" ", text)
-    control = _TRANSACTION_CONTROL.search(code)
-    if control is not None:
-        keyword = " ".join(control.group(1).upper().split())
-        msg = f"{name}: top-level {keyword} is not allowed; the runner supplies the transaction"
-        raise MigrationError(msg)
-    if _CONCURRENTLY.search(code) is not None:
-        msg = f"{name}: CONCURRENTLY cannot run inside the runner's transaction"
-        raise MigrationError(msg)
+def _tag(taken: str) -> str:
+    """A random dollar-quote tag that appears nowhere in `taken`."""
+    while True:
+        tag = f"m{secrets.token_hex(8)}"
+        if tag not in taken:
+            return tag
+
+
+def wrap_for_server(text: str) -> str:
+    """One DO statement that makes the server run `text` itself, in the caller's transaction.
+
+    Inside DO, plpgsql EXECUTE runs in an atomic SPI context: the server refuses COMMIT, END,
+    ROLLBACK, SAVEPOINT, PREPARE TRANSACTION, CONCURRENTLY and VACUUM, and it lexes `text`
+    with its own lexer, so no client-side reading of the SQL can disagree with it.
+    """
+    outer = _tag(text)
+    inner = _tag(text + outer)
+    return f"DO ${outer}$ BEGIN EXECUTE ${inner}${text}${inner}$; END ${outer}$"
 
 
 def load_migrations(directory: Path) -> list[Migration]:
@@ -92,7 +76,11 @@ def load_migrations(directory: Path) -> list[Migration]:
             msg = f"{path.name}: migration files are named NNNN_slug.sql"
             raise MigrationError(msg)
         data = path.read_bytes()
-        check_runnable(path.name, data)
+        try:
+            data.decode()
+        except UnicodeDecodeError as err:
+            msg = f"{path.name}: not valid UTF-8"
+            raise MigrationError(msg) from err
         checksum = hashlib.sha256(data).hexdigest()
         actual[path.name] = checksum
         migrations.append(Migration(match.group(1), path.name, data, checksum))
@@ -142,7 +130,10 @@ def migrate(conn: psycopg.Connection[tuple[object, ...]], directory: Path) -> li
             todo = pending(disk, {str(v): str(c) for v, c in rows})
             for migration in todo:
                 step = migration.name
-                conn.execute(migration.sql)
+                conn.execute("SET LOCAL standard_conforming_strings = on")
+                conn.execute("SET LOCAL backslash_quote = safe_encoding")
+                conn.execute("SET LOCAL escape_string_warning = on")
+                conn.execute(wrap_for_server(migration.sql.decode()).encode())
                 conn.execute(
                     "INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s)",
                     (migration.version, migration.checksum),
