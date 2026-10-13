@@ -320,6 +320,9 @@ N28	(ok)	fail	third value proposal
 N28a	= true	fail	conflicts with the live row
 N28b	(ok)	fail	curator edits the attribute of a proposal
 N28c	= 기술 담당자/NULL	fail	attribute normalized and conflict cleared
+N29a	= true	fail	curator opens a card
+N29b	= true	fail	opening a card twice returns the same card
+N29c	-> 42501	fail	agent context cannot open a card
 N18a	(ok)	fail
 N18b	(ok)	fail
 N18c	(ok)	fail

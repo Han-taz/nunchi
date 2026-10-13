@@ -512,7 +512,7 @@ CREATE FUNCTION t.exec_list() RETURNS text LANGUAGE sql AS $$
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.begin_request,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
+  'app_sec.begin_request,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.issue_card,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 BEGIN;
 CREATE FUNCTION public.t_eq() RETURNS void LANGUAGE sql AS $$ SELECT $$;
@@ -1329,6 +1329,13 @@ COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
 SELECT t.err('N28b carol saves it separately by changing the attribute', $q$UPDATE memory SET attribute = ' 기술 담당자' WHERE id = t.mid(302)$q$, 'ok');
 SELECT t.eq('N28c attribute normalized, conflict cleared', $q$SELECT attribute || '/' || coalesce(conflict_with::text, 'NULL') FROM memory WHERE id = t.mid(302)$q$, '기술 담당자/NULL');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N29a a curator opens a card for a memory in their store', $q$SELECT (app_sec.issue_card(t.mid(302)) IS NOT NULL)::text$q$, 'true');
+SELECT t.eq('N29b asking again returns the same open card', $q$SELECT (app_sec.issue_card(t.mid(302)) = app_sec.issue_card(t.mid(302)))::text$q$, 'true');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.err('N29c an agent context cannot open a card', $q$SELECT app_sec.issue_card(t.mid(302))$q$, '42501');
 COMMIT;
 RESET ROLE;
 SELECT t.err('N22 a second live row for the same key is blocked by the partial unique index', $q$INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute)
