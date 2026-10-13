@@ -80,8 +80,9 @@ def propose(conn: Conn, req: ProposeRequest) -> Memory:
         (row,) = cur.execute(
             sql.SQL(
                 "INSERT INTO memory"
-                " (store_id, kind, title, body, source_refs, supersedes_id, on_behalf_of)"
-                " VALUES (%s, %s::memory_kind, %s, %s, %s, %s,"
+                " (store_id, kind, title, body, source_refs, supersedes_id,"
+                " subject_id, attribute, on_behalf_of)"
+                " VALUES (%s, %s::memory_kind, %s, %s, %s, %s, %s, %s,"
                 " CASE WHEN app_sec.ctx_agent() IS NOT NULL THEN app_sec.ctx_user() END)"
                 " RETURNING {}"
             ).format(_MEMORY_COLUMNS),
@@ -92,6 +93,8 @@ def propose(conn: Conn, req: ProposeRequest) -> Memory:
                 req.body,
                 Jsonb([ref.model_dump(mode="json") for ref in req.source_refs]),
                 req.supersedes_id,
+                req.subject_id,
+                req.attribute,
             ),
         ).fetchall()
     return row

@@ -102,6 +102,30 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
  ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000d1','contributor','00000000-0000-0000-0000-000000000001'),
  ('00000000-0000-0000-0000-00000000f002','00000000-0000-0000-0000-0000000000b1','curator','00000000-0000-0000-0000-000000000001');
 SET app.reason = 'original';
+-- 키 이전에 쓰인 픽스처(note 가 아닌데 키가 없는 행)는 행마다 유일한 키를 받는다: 이 테스트 전용 트리거다 (schema.sql 에는 없다).
+-- 새 표가 없는 v1.0 스키마에서는 만들지 않는다.
+CREATE FUNCTION t.legacy_key() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF NEW.kind <> 'note' AND NEW.subject_id IS NULL THEN
+    NEW.subject_id := '00000000-0000-0000-0000-0000000e0001';
+    NEW.attribute := 'legacy-' || NEW.id;
+  END IF;
+  RETURN NEW;
+END $$;
+DO $do$
+BEGIN
+  IF to_regclass('entity') IS NULL THEN RETURN; END IF;
+  INSERT INTO entity (id, tenant_id, kind, canonical_name) VALUES
+   ('00000000-0000-0000-0000-0000000e0001','00000000-0000-0000-0000-000000000001','legacy','(legacy)'),
+   ('00000000-0000-0000-0000-0000000e0a01','00000000-0000-0000-0000-000000000001','회사','A사'),
+   ('00000000-0000-0000-0000-0000000e0a02','00000000-0000-0000-0000-000000000001','회사','B사');
+  INSERT INTO entity_alias (tenant_id, entity_id, alias_norm) VALUES
+   ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000e0a01','A사'),
+   ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000e0a01','에이사'),
+   ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000e0a01','A  Corp'),
+   ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000e0a02','B사');
+  CREATE TRIGGER memory_bi9_legacy_key BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION t.legacy_key();
+END $do$;
 INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES
  ('00000000-0000-0000-0000-0000000aa001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f002',
   'fact','active','연봉 밴드 정책','비공개','[{"uri":"https://hr/x"}]','00000000-0000-0000-0000-0000000000b1');
@@ -303,6 +327,7 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
 -- A10) 앱 역할은 LOGIN NOBYPASSRLS NOINHERIT, RLS 테이블은 소유자에게도 정책을 강제한다
 SELECT t.eq('A10a app_rw login/bypassrls/inherit', $q$SELECT rolcanlogin || '/' || rolbypassrls || '/' || rolinherit FROM pg_roles WHERE rolname = 'app_rw'$q$, 'true/false/false');
 SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,group_member,memory,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
+SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,entity,entity_alias,group_member,memory,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
 
 SET ROLE app_rw;
 
@@ -359,7 +384,7 @@ ROLLBACK;
 SELECT set_config('nunchi.f11_limit_ms', :'f11_limit_ms', false);
 ALTER TABLE memory DISABLE TRIGGER USER;
 INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by)
-SELECT '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f003', 'fact', 'active', 'perf ' || g, 'body ' || g, '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000c1'
+SELECT '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f003', 'note', 'active', 'perf ' || g, 'body ' || g, '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000c1'
 FROM generate_series(1, 100000) AS g;
 ALTER TABLE memory ENABLE TRIGGER USER;
 ANALYZE memory;
@@ -488,7 +513,7 @@ CREATE FUNCTION t.exec_list() RETURNS text LANGUAGE sql AS $$
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.my_store_roles,app_sec.my_stores,app_sec.quorum,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
+  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 BEGIN;
 CREATE FUNCTION public.t_eq() RETURNS void LANGUAGE sql AS $$ SELECT $$;
@@ -1231,6 +1256,59 @@ SELECT t.err('G1x source room with no live binding for this store', $q$INSERT IN
 COMMIT;
 RESET ROLE;
 DO $do$ BEGIN IF to_regclass('source_system') IS NOT NULL THEN DELETE FROM source_system; END IF; END $do$;
+
+
+-- N20~N28) 기억의 정체성 (설계 v1.2 2~3절): "A사 담당자 이OO → 박OO" 를 끝까지 따라간다. 키는 (A사, 담당자).
+-- 200 = 소유자가 적재한 이OO(2026-03-01 부터), 201 = Alice 의 박OO 제안(2026-09-01 부터), 202 = 충돌 후 키를 고쳐 따로 저장할 제안.
+-- 새 표가 없는 v1.0 스키마에서는 전부 실패해야 한다.
+DO $do$
+BEGIN
+  IF to_regclass('entity') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_from, last_confirmed_at)
+  VALUES (t.mid(200), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active',
+    'A사 담당자', '이OO', '[{"uri":"https://crm/acct/A"}]', '00000000-0000-0000-0000-0000000000a1',
+    '00000000-0000-0000-0000-0000000e0a01', '  담당자 ', '2026-03-01', '2026-03-01');
+END $do$;
+SELECT t.eq('N20 attribute is normalized by the trigger', $q$SELECT '[' || attribute || ']' FROM memory WHERE id = t.mid(200)$q$, '[담당자]');
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.eq('N21a alias "A Corp" (case and spacing differ) resolves to A사', $q$SELECT app_sec.resolve_entity('a corp')::text$q$, '00000000-0000-0000-0000-0000000e0a01');
+SELECT t.eq('N21b alias 에이사 resolves to the same entity', $q$SELECT app_sec.resolve_entity(' 에이사 ')::text$q$, '00000000-0000-0000-0000-0000000e0a01');
+SELECT t.eq('N21c unknown name resolves to nothing', $q$SELECT app_sec.resolve_entity('C사')::text$q$, 'NULL');
+SELECT t.err('N23 same key, same value (extra whitespace): no new row', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','  이OO ','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
+SELECT t.eq('N23a rows for the key/state/last op', $q$SELECT (SELECT count(*) FROM memory WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = '담당자') || '/' || t.state(t.mid(200)) || '/' || t.lastop(t.mid(200))$q$, '1/active/v2/reconfirm');
+SELECT t.eq('N23b last_confirmed_at moved forward', $q$SELECT (last_confirmed_at > '2026-03-01')::text FROM memory WHERE id = t.mid(200)$q$, 'true');
+SELECT t.err('N24 same key, different value', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, valid_from)
+  VALUES (t.mid(201),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','박OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자','2026-09-01')$q$, 'ok');
+SELECT t.eq('N24a conflict_with/tier/status', $q$SELECT (conflict_with = t.mid(200))::text || '/' || tier || '/' || status FROM memory WHERE id = t.mid(201)$q$, 'true/one_curator/proposed');
+SELECT t.eq('N24b the old value is still the only live one', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01','담당자','2026-10-01')$q$, '이OO');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N25 carol replaces: result/old/new', $q$SELECT d || '/' || t.state(t.mid(200)) || '/' || t.state(t.mid(201)) FROM (SELECT t.approve(t.mid(201)) AS d) AS s$q$, 'active/superseded/v3/active/v2');
+SELECT t.eq('N25b old valid_to / new supersedes old / new valid_from', $q$SELECT (SELECT valid_to FROM memory WHERE id = t.mid(200)) || '/' || (SELECT (supersedes_id = t.mid(200))::text || '/' || valid_from FROM memory WHERE id = t.mid(201))$q$, '2026-09-01/true/2026-09-01');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.eq('N26a as of 2026-02-01 (before any value)', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-02-01')$q$, 'NULL');
+SELECT t.eq('N26b as of 2026-08-15', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-08-15')$q$, '이OO');
+SELECT t.eq('N26c as of 2026-09-01 (the switch day)', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-09-01')$q$, '박OO');
+SELECT t.eq('N26d as of 2026-12-31', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-12-31')$q$, '박OO');
+SELECT t.err('N28 another value arrives for the key', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute)
+  VALUES (t.mid(202),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 기술 담당자','최OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
+SELECT t.eq('N28a conflicts with the live 박OO', $q$SELECT (conflict_with = t.mid(201))::text FROM memory WHERE id = t.mid(202)$q$, 'true');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.err('N28b carol saves it separately by changing the attribute', $q$UPDATE memory SET attribute = ' 기술 담당자' WHERE id = t.mid(202)$q$, 'ok');
+SELECT t.eq('N28c attribute normalized, conflict cleared', $q$SELECT attribute || '/' || coalesce(conflict_with::text, 'NULL') FROM memory WHERE id = t.mid(202)$q$, '기술 담당자/NULL');
+COMMIT;
+RESET ROLE;
+SELECT t.err('N22 a second live row for the same key is blocked by the partial unique index', $q$INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','dup','최OO','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, '23505');
+SELECT t.err('N22b the same key in a different store is allowed', $q$INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f0a1','fact','active','other store','최OO','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
+SELECT t.err('N21d an alias is unique per tenant after normalization', $q$INSERT INTO entity_alias (tenant_id, entity_id, alias_norm) VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000e0a02',' a CORP ')$q$, '23505');
+SELECT t.err('N27 a note cannot carry a key', $q$INSERT INTO memory (tenant_id, store_id, kind, title, created_by, subject_id, attribute)
+  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','memo','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','x')$q$, '23514');
 
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;

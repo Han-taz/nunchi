@@ -293,3 +293,27 @@ G1v	= unverified/one_curator	fail	client claims containment ok on a private room
 G1x	-> 23503	fail	room without a live binding for the store
 G1y	= external/one_curator	fail	client may raise origin to external
 G1z	= external/one_curator	fail	public room with an outside member
+N20	= [담당자]	fail	attribute trimmed and lowercased
+N21a	= 00000000-0000-0000-0000-0000000e0a01	fail	alias A Corp resolves
+N21b	= 00000000-0000-0000-0000-0000000e0a01	fail	alias 에이사 resolves to the same entity
+N21c	= NULL	fail	unknown name
+N21d	-> 23505	fail	alias unique per tenant after normalization
+N22	-> 23505	fail	partial unique index blocks a second live row
+N22b	(ok)	fail	same key in another store is allowed
+N23	(ok)	fail	same key and value inserts no row
+N23a	= 1/active/v2/reconfirm	fail	reconfirm: one row, version op reconfirm
+N23b	= true	fail	last_confirmed_at bumped
+N24	(ok)	fail	different value is accepted as a proposal
+N24a	= true/one_curator/proposed	fail	conflict_with set, tier at least one_curator
+N24b	= 이OO	fail	old value stays live until approval
+N25	= active/superseded/v3/active/v2	fail	decide replace path: old superseded first, new active
+N25b	= 2026-09-01/true/2026-09-01	fail	old valid_to = new valid_from, supersedes_id set
+N26a	= NULL	fail	as_of before any value
+N26b	= 이OO	fail	as_of August
+N26c	= 박OO	fail	as_of the switch day
+N26d	= 박OO	fail	as_of after the switch
+N27	-> 23514	fail	note cannot carry a key
+N28	(ok)	fail	third value proposal
+N28a	= true	fail	conflicts with the live row
+N28b	(ok)	fail	curator edits the attribute of a proposal
+N28c	= 기술 담당자/NULL	fail	attribute normalized and conflict cleared

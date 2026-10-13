@@ -21,6 +21,7 @@ HIDDEN_STORE = uuid.UUID("00000000-0000-0000-0000-0000000000d2")
 ACTIVE = uuid.UUID("00000000-0000-0000-0000-0000000000e1")
 PROPOSED_BY_OTHER = uuid.UUID("00000000-0000-0000-0000-0000000000e2")
 HIDDEN = uuid.UUID("00000000-0000-0000-0000-0000000000e3")
+SUBJECT = uuid.UUID("00000000-0000-0000-0000-0000000000e4")
 
 
 @pytest.fixture
@@ -36,6 +37,11 @@ def world(fresh_db: str, pool: Pool) -> Pool:
             "INSERT INTO store_grant (store_id, principal_id, role, tenant_id)"
             " VALUES (%s, %s, 'reader', %s)",
             (STORE, OTHER, TENANT),
+        )
+        conn.execute(
+            "INSERT INTO entity (id, tenant_id, kind, canonical_name)"
+            " VALUES (%s, %s, 'team', 'Infra')",
+            (SUBJECT, TENANT),
         )
         rows = (
             (ACTIVE, STORE, "active", "Deploy runbook", "restart the pods", USER),
@@ -159,7 +165,12 @@ def test_propose_into_a_store_without_contributor_is_denied(world: Pool) -> None
 def test_history_and_dependents(world: Pool) -> None:
     ref = SourceRef(uri=f"memory://{ACTIVE}")
     derived = ProposeRequest(
-        store_id=STORE, kind=MemoryKind.FACT, title="derived", source_refs=(ref,)
+        store_id=STORE,
+        kind=MemoryKind.FACT,
+        title="derived",
+        source_refs=(ref,),
+        subject_id=SUBJECT,
+        attribute="runbook",
     )
     with request_tx(world, USER, None) as conn:
         child = repo.propose(conn, derived)

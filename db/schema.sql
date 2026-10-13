@@ -103,6 +103,23 @@ CREATE TABLE store_grant (
 CREATE INDEX store_grant_principal_idx ON store_grant (principal_id);
 CREATE INDEX group_member_member_idx ON group_member (member_id);
 
+-- ── 주제(entity): 기억의 키 (subject, attribute) 의 subject ──────────
+-- "A사", "에이사", "A Corp" 는 별칭이고 한 entity 를 가리킨다. 별칭은 테넌트 안에서 유일하다.
+CREATE TABLE entity (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenant (id),
+  kind text NOT NULL,
+  canonical_name text NOT NULL,
+  UNIQUE (tenant_id, id)
+);
+CREATE TABLE entity_alias (
+  tenant_id uuid NOT NULL,
+  entity_id uuid NOT NULL,
+  alias_norm text NOT NULL,   -- app_sec.norm_text() 결과. 트리거가 정규화한다
+  PRIMARY KEY (tenant_id, alias_norm),
+  CONSTRAINT alias_entity_same_tenant FOREIGN KEY (tenant_id, entity_id) REFERENCES entity (tenant_id, id)
+);
+
 -- ── 메모리 ───────────────────────────────────────────────
 CREATE TYPE memory_kind AS ENUM ('fact', 'decision', 'procedure', 'note');
 -- provisional = 검토 전에 이미 노출된 상태. 불리언이 아니라 상태다 (전이 표가 허용하는 길만 있다)
@@ -136,7 +153,15 @@ CREATE TABLE memory (
   search_tsv tsvector GENERATED ALWAYS AS
   (to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(body, ''))) STORED,
   tier approval_tier NOT NULL DEFAULT 'one_curator',  -- 요청 컨텍스트가 있는 INSERT 에서 risk_tier() 가 정한다. 이후 불변
-  conflict_with uuid REFERENCES memory (id),            -- 같은 키의 살아있는 행 (서버 결정. 주체/속성이 들어오는 U5 에서 채운다)
+  conflict_with uuid REFERENCES memory (id),            -- 같은 키의 살아있는 행 (서버 결정: memory_bi2k_key)
+  subject_id uuid,                                      -- 키 = (subject_id, attribute). note 는 키가 없다
+  attribute text,                                       -- app_sec.norm_text() 로 정규화 (트리거)
+  last_confirmed_at timestamptz NOT NULL DEFAULT now(), -- 생성, 같은 값 재수집(reconfirm), curator 확인 때 갱신
+  CONSTRAINT memory_subject_same_tenant FOREIGN KEY (tenant_id, subject_id) REFERENCES entity (tenant_id, id),
+  CONSTRAINT memory_key_by_kind CHECK (
+    CASE WHEN kind = 'note' THEN subject_id IS NULL AND attribute IS NULL
+      ELSE subject_id IS NOT NULL AND attribute IS NOT NULL END
+  ),
   CONSTRAINT memory_store_same_tenant FOREIGN KEY (tenant_id, store_id) REFERENCES store (tenant_id, id),
   CHECK (status <> 'deleted' OR body IS null),
   CHECK (kind = 'note' OR jsonb_array_length(source_refs) > 0)  -- note 외에는 출처 필수
@@ -146,6 +171,9 @@ CREATE INDEX memory_store_status_idx ON memory (store_id, status);
 CREATE INDEX memory_search_idx ON memory USING gin (search_tsv);
 CREATE INDEX memory_sources_idx ON memory USING gin (source_refs jsonb_path_ops);  -- 역방향 계보 조회
 CREATE INDEX memory_hash_idx ON memory (store_id, content_hash);
+-- 한 스토어 안에서 키마다 살아 있는 기억은 최대 하나다. 교체는 decide() 가 이전 행을 먼저 superseded 로 바꾼 뒤 새 행을 활성화한다
+CREATE UNIQUE INDEX memory_live_key_uidx ON memory (store_id, subject_id, attribute)
+WHERE status IN ('active', 'provisional');
 
 -- 삭제된 내용 재유입 방지 (정리 작업·재제안이 되살리지 못하게)
 CREATE TABLE deleted_hash (
@@ -159,7 +187,7 @@ CREATE TABLE deleted_hash (
 -- append-only 버전 기록 = 감사 로그
 CREATE TYPE memory_op AS ENUM (
   'propose', 'auto_activate', 'approve', 'confirm', 'reject', 'retract',
-  'edit', 'supersede', 'expire', 'delete', 'redact'
+  'edit', 'supersede', 'expire', 'delete', 'redact', 'reconfirm'
 );
 
 CREATE TABLE memory_version (
@@ -428,6 +456,13 @@ CREATE POLICY store_grant_read ON store_grant FOR SELECT USING (
     OR store_id IN (SELECT app_sec.my_stores('curator'))
   )
 );
+
+ALTER TABLE entity ENABLE ROW LEVEL SECURITY;
+ALTER TABLE entity FORCE ROW LEVEL SECURITY;
+CREATE POLICY entity_read ON entity FOR SELECT USING (tenant_id = app_sec.ctx_tenant());
+ALTER TABLE entity_alias ENABLE ROW LEVEL SECURITY;
+ALTER TABLE entity_alias FORCE ROW LEVEL SECURITY;
+CREATE POLICY entity_alias_read ON entity_alias FOR SELECT USING (tenant_id = app_sec.ctx_tenant());
 
 ALTER TABLE memory ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory FORCE ROW LEVEL SECURITY;
@@ -752,6 +787,21 @@ BEGIN
   END LOOP;
 END $$;
 
+-- 키 정규화: 소문자, 앞뒤 공백 제거, 연속 공백 하나로
+CREATE FUNCTION app_sec.norm_text(t text) RETURNS text LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT lower(btrim(regexp_replace(t, '\s+', ' ', 'g')))
+$$;
+CREATE FUNCTION app_sec.alias_before_write() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  NEW.alias_norm := app_sec.norm_text(NEW.alias_norm);
+  RETURN NEW;
+END $$;
+CREATE TRIGGER entity_alias_norm BEFORE INSERT OR UPDATE ON entity_alias FOR EACH ROW EXECUTE FUNCTION app_sec.alias_before_write();
+-- entity 해석 1단계: 별칭 정확 일치. 호출자의 RLS 가 적용되어 자기 테넌트의 별칭만 본다 (유사도 후보는 U5 밖)
+CREATE FUNCTION app_sec.resolve_entity(p_name text) RETURNS uuid LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT a.entity_id FROM entity_alias AS a WHERE a.alias_norm = app_sec.norm_text(p_name)
+$$;
+
 -- 위험 등급 (설계서 2.1). 입력은 모두 서버/DB 가 정한 값이고 위에서부터 첫 일치 행이 등급이다.
 -- 1행(게이트 reject = 제안 거부)은 게이트의 몫이라 여기 없다. 신뢰 20점이 기준이고 점수 갱신은 proposer_trust 가 한다.
 -- gate_result.containment 가 없으면 방 근거가 없는 출처로 보고 확인된 것으로 취급한다 (방 테이블은 U6). 있는데 ok 가 아니면 9행이다.
@@ -893,6 +943,20 @@ BEGIN
      (OLD.id, OLD.tenant_id, OLD.store_id, OLD.kind, OLD.created_by, OLD.on_behalf_of, OLD.created_at, OLD.session_ref, OLD.tier) THEN
     RAISE EXCEPTION 'immutable column changed';
   END IF;
+  IF (NEW.subject_id, NEW.attribute) IS DISTINCT FROM (OLD.subject_id, OLD.attribute) THEN
+    IF OLD.status <> 'proposed' THEN
+      RAISE EXCEPTION 'immutable column changed';
+    END IF;
+    -- 별개로 저장: curator 가 제안의 키를 고치면 충돌 대상을 새 키로 다시 찾는다
+    NEW.attribute := app_sec.norm_text(NEW.attribute);
+    SELECT m.id INTO NEW.conflict_with FROM memory AS m
+    WHERE m.store_id = OLD.store_id AND m.subject_id = NEW.subject_id AND m.attribute = NEW.attribute
+      AND m.status IN ('active', 'provisional');
+    NEW.supersedes_id := NEW.conflict_with;
+  END IF;
+  IF NEW.status = 'active' AND OLD.status <> 'active' THEN
+    NEW.last_confirmed_at := now();
+  END IF;
   IF OLD.origin = 'external' AND NEW.origin = 'internal' THEN
     RAISE EXCEPTION 'origin cannot be laundered to internal';
   END IF;
@@ -927,14 +991,13 @@ BEGIN
   RETURN NEW;
 END $$;
 
--- 등급과 최초 상태는 서버가 정한다: 클라이언트가 보낸 tier, status, conflict_with 는 요청 컨텍스트가 있으면 덮어쓴다.
+-- 등급과 최초 상태는 서버가 정한다: 클라이언트가 보낸 tier, status 는 요청 컨텍스트가 있으면 덮어쓴다.
 -- risk_tier 는 app_rw 가 부를 수 없으므로 소유자 권한 트리거가 대신 부른다. 이름 순서상 memory_bi, memory_bi2_hash 다음에 돈다.
 CREATE FUNCTION app_sec.memory_set_tier() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE cont text;
 BEGIN
   IF app_sec.ctx_user() IS NOT NULL THEN
-    NEW.conflict_with := NULL;
     -- origin 과 containment 는 출처에서 서버가 정한다. 클라이언트 값은 올리는 쪽으로만 반영된다 (내릴 수 없다).
     SELECT f.p_origin, f.p_containment INTO NEW.origin, cont FROM app_sec.source_facts(NEW) AS f;
     IF jsonb_typeof(NEW.gate_result) <> 'object' THEN
@@ -966,6 +1029,40 @@ BEGIN
   ELSE
     NEW.content_hash := CASE WHEN NEW.body IS NULL THEN OLD.content_hash ELSE app_sec.content_hmac(NEW.body) END;
   END IF;
+  RETURN NEW;
+END $$;
+
+-- 갱신 판정 (설계서 3). 소유자 권한이라 RLS 너머의 살아 있는 행을 보므로, 호출자가 그 store 의 contributor 일 때만 판정한다
+-- (아니면 정책이 거절하게 둔다). memory_bi2_hash 가 content_hash 를 정한 뒤, memory_bi3_tier 가 등급을 정하기 전에 돈다.
+-- conflict_with 는 클라이언트 값을 버리고 여기서만 정한다. 같은 키 + 같은 값이면 새 행 없이 이전 행을 reconfirm 한다 (RETURN NULL).
+CREATE FUNCTION app_sec.memory_key_decide() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  live memory;
+BEGIN
+  IF NEW.attribute IS NOT NULL THEN
+    NEW.attribute := app_sec.norm_text(NEW.attribute);
+  END IF;
+  IF app_sec.ctx_user() IS NULL THEN
+    RETURN NEW;
+  END IF;
+  NEW.conflict_with := NULL;
+  IF NEW.subject_id IS NULL OR NEW.attribute IS NULL OR NEW.store_id NOT IN (SELECT app_sec.my_stores('contributor')) THEN
+    RETURN NEW;
+  END IF;
+  SELECT * INTO live FROM memory AS m
+  WHERE m.store_id = NEW.store_id AND m.tenant_id = NEW.tenant_id AND m.subject_id = NEW.subject_id
+    AND m.attribute = NEW.attribute AND m.status IN ('active', 'provisional')
+  FOR UPDATE;
+  IF NOT found THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.content_hash IS NOT NULL AND NEW.content_hash = live.content_hash THEN
+    UPDATE memory SET last_confirmed_at = now() WHERE id = live.id;
+    RETURN NULL;
+  END IF;
+  NEW.conflict_with := live.id;
+  NEW.supersedes_id := live.id;
   RETURN NEW;
 END $$;
 
@@ -1009,6 +1106,8 @@ DECLARE
 BEGIN
   v_op := CASE
     WHEN TG_OP = 'INSERT' THEN 'propose'
+    WHEN NEW.status = OLD.status AND NEW.last_confirmed_at IS DISTINCT FROM OLD.last_confirmed_at
+      AND (NEW.title, NEW.body, NEW.source_refs) IS NOT DISTINCT FROM (OLD.title, OLD.body, OLD.source_refs) THEN 'reconfirm'
     WHEN NEW.status = OLD.status THEN 'edit'
     ELSE (SELECT t.op FROM memory_transition AS t WHERE t.from_status = OLD.status AND t.to_status = NEW.status)
   END;
@@ -1055,6 +1154,7 @@ CREATE TRIGGER review_bi BEFORE INSERT ON review FOR EACH ROW EXECUTE FUNCTION a
 
 CREATE TRIGGER memory_bu BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_before_update();
 CREATE TRIGGER memory_bi2_hash BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
+CREATE TRIGGER memory_bi2k_key BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_key_decide();
 CREATE TRIGGER memory_bi3_tier BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_tier();
 CREATE TRIGGER memory_bu2_hash BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
 CREATE TRIGGER memory_aw AFTER INSERT OR UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_after_write();
@@ -1076,6 +1176,7 @@ DECLARE
   refusal text;
   target memory_status;
   v_outcome text;
+  v_old uuid;
 BEGIN
   IF me IS NULL THEN
     RAISE EXCEPTION 'no user context' USING ERRCODE = '28000';
@@ -1116,9 +1217,18 @@ BEGIN
     IF q.have < q.needed THEN
       v_outcome := 'pending_quorum:' || q.have || '/' || q.needed;
     ELSE
-      UPDATE memory SET status = 'superseded', valid_to = coalesce(m.valid_from, current_date)
-      WHERE id = m.supersedes_id AND status IN ('active', 'provisional') AND target = 'active';
-      UPDATE memory SET status = target WHERE id = m.id AND version = p_expected_version;
+      -- 교체: 같은 키(또는 supersedes_id)의 살아 있는 행을 먼저 superseded 로 바꾼 뒤 새 행을 활성화한다 (한 트랜잭션, 지연 제약 없음)
+      IF target = 'active' THEN
+        UPDATE memory SET status = 'superseded', valid_to = coalesce(m.valid_from, current_date)
+        WHERE id <> m.id AND status IN ('active', 'provisional')
+          AND (id = m.supersedes_id OR (store_id = m.store_id AND subject_id = m.subject_id AND attribute = m.attribute))
+        RETURNING id INTO v_old;
+      END IF;
+      UPDATE memory SET
+        status = target,
+        supersedes_id = coalesce(v_old, supersedes_id),
+        valid_from = CASE WHEN v_old IS NULL THEN valid_from ELSE coalesce(valid_from, current_date) END
+      WHERE id = m.id AND version = p_expected_version;
     END IF;
   END IF;
   UPDATE approval_card SET consumed_at = now(), outcome = v_outcome WHERE nonce = p_nonce;
@@ -1139,6 +1249,19 @@ STABLE SET search_path = pg_catalog, public, pg_temp AS $$
     SELECT v.*, lag(row_hash) OVER (ORDER BY id) AS expected_prev
     FROM memory_version AS v WHERE memory_id = p_mem
   ) AS x
+$$;
+
+-- 키의 이력: 그 날짜에 유효했던 기억 하나. 호출자의 RLS 가 적용된다. valid_from 이 없으면 처음부터, valid_to 는 배타적 끝이다
+CREATE FUNCTION app_sec.memory_as_of(p_store uuid, p_subject uuid, p_attribute text, p_as_of date)
+RETURNS TABLE (id uuid, title text, body text, status memory_status, valid_from date, valid_to date)
+LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT m.id, m.title, m.body, m.status, m.valid_from, m.valid_to FROM memory AS m
+  WHERE m.store_id = p_store AND m.subject_id = p_subject AND m.attribute = app_sec.norm_text(p_attribute)
+    AND m.status IN ('active', 'provisional', 'superseded', 'expired')
+    AND (m.valid_from IS NULL OR m.valid_from <= p_as_of)
+    AND (m.valid_to IS NULL OR p_as_of < m.valid_to)
+  ORDER BY m.valid_from DESC NULLS LAST, m.created_at DESC
+  LIMIT 1
 $$;
 
 -- ── 검색: RLS 아래에서는 @@ 가 non-LEAKPROOF 라 GIN 인덱스를 못 쓴다 (N10) ──
@@ -1190,7 +1313,7 @@ END $$;
 -- ── 앱 접속 역할 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──
 GRANT USAGE ON SCHEMA public TO app_rw;
 -- 주체/권한/감사 테이블은 읽기 전용이다. 버전은 memory 트리거, 삭제 해시는 삭제 트리거, 권한과 주체는 별도 관리 역할이 쓴다
-GRANT SELECT ON tenant, group_member, store, store_grant, memory_transition, approval_tier_rule TO app_rw;
+GRANT SELECT ON tenant, group_member, store, store_grant, memory_transition, approval_tier_rule, entity, entity_alias TO app_rw;
 -- principal.external_id(IdP subject, SCIM id)는 숨긴다: 컬럼 단위 GRANT 에서 뺀다. SELECT * 는 42501 이다.
 -- 필요한 조회는 SECURITY DEFINER 함수(app_sec.resolve_principal)로 낸다.
 GRANT SELECT (id, tenant_id, kind, display_name, active) ON principal TO app_rw;
@@ -1214,4 +1337,7 @@ GRANT EXECUTE ON FUNCTION app_sec.my_store_roles() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_stores(store_role) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.search(text, uuid[], memory_status[], memory_kind[]) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.verify_chain(uuid) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.norm_text(text) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.resolve_entity(text) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.memory_as_of(uuid, uuid, text, date) TO app_rw;
 GRANT EXECUTE ON FUNCTION principal_closure(uuid) TO app_rw;
