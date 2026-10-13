@@ -246,3 +246,14 @@ G3y	= pending_quorum:1/2/proposed/v1	fail	an approval by a since-revoked curator
 G4k	-> %quorum not met: 1 of 2%	fail	direct UPDATE cannot reach active on a revoked curator's approval
 G4l	= pending_quorum:1/2	fail	second memory, first current curator
 G3z	= active/active/v2	fail	two current curators reach quorum
+G5a	= pending_quorum:1/2	fail	ivan approves v1 (the verifier's scenario setup)
+G5b	= proposed/v2	fail	body edit bumps version
+G5c	= pending_quorum:1/2	fail	approval of v1 does not count after the body changed to v2
+G5d	-> %quorum not met: 1 of 2%	fail	direct UPDATE cannot activate v2 on a v1 approval
+G5e	= active/active/v3	fail	two curators who each saw v2 activate it
+G5f	= 1/2/2	fail	review rows keep the version they judged
+G5g	= pending_quorum:1/2	fail	first approval before role revoke
+G5h	= active/active/v2	fail	revoke then restore: earlier approval counts again
+G5i	= stale	fail	click on a card for the old version is stale
+G5j	= 0/proposed/v2	fail	stale click leaves no review
+G5k	= 2	fail	review version comes from the memory, not the client

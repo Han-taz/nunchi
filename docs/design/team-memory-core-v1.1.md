@@ -206,7 +206,7 @@ provisional은 조용히 active가 되지 않는다. 사람이 `confirm`하거�
 
 `wrong_clicker`를 `duplicate`보다 앞에 둔다. 반대 순서면 소비된 nonce를 아는 남이 원래 결과를 읽는다.
 
-정족수와 직무 분리는 `decide()`가 아니라 트리거가 본다. `decide()`를 우회해 UPDATE해도 제안자 본인이면 `42501`이고, 서로 다른 비저자 reviewer 수가 `approvals_needed`보다 적어도 `42501`이다. `two_curators`는 서로 다른 curator 두 명의 approve가 필요하다. 첫 사람은 `pending_quorum:1/2`를 받는다. supersede 승인은 같은 호출에서 옛 행을 superseded로 바꾼다.
+정족수와 직무 분리는 `decide()`가 아니라 트리거가 본다. `decide()`를 우회해 UPDATE해도 제안자 본인이면 `42501`이고, 서로 다른 비저자 reviewer 수가 `approvals_needed`보다 적어도 `42501`이다. `two_curators`는 서로 다른 curator 두 명의 approve가 필요하다. 첫 사람은 `pending_quorum:1/2`를 받는다. supersede 승인은 같은 호출에서 옛 행을 superseded로 바꾼다. review는 판단한 memory 버전을 `review.version`에 담고(트리거가 채운다), 정족수는 현재 버전의 review만 센다. 본문이 바뀌면 이전 승인은 기록에만 남고, 역할을 회수했다 복구하면 이전 승인이 다시 센다.
 
 ### 5.3 신뢰 점수 (planned, unit U4b)
 
