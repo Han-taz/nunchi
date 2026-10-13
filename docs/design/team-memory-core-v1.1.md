@@ -71,7 +71,7 @@ files: db/schema.sql, db/tests/smoke_test.sql, db/tests/expectations.tsv, src/nu
 |---|---|---|
 | DB (`app_sec.*`, RLS, 트리거) | 권한, 상태 기계, 감사의 유일한 구현 | 병합됨 (등급과 `decide`는 planned, unit U4a/U4b) |
 | 추출기 | 메시지 한 건을 `ProposalDraft` 초안으로 바꾼다 | 병합됨 (unit U9b) |
-| 쓰기 게이트 | 비밀값, 개인정보, 지시문 패턴을 LLM 없이 검사한다 | planned (unit U9a) |
+| 쓰기 게이트 | 비밀값은 거부하고 지시문 패턴은 표시한다. 개인정보는 검사하지 않는다. LLM은 쓰지 않는다 | planned (unit U9a) |
 | REST (`/v1`) | `list_stores`, `index`, `search`, `get`, `propose`, `history`, `dependents`. `decide`는 타입이 있는 501 | planned (unit U8c). 인증은 planned (unit U8b) |
 | MCP 서버 | 에이전트가 쓰는 같은 함수들의 MCP 노출 | planned (unit 미배정). `src/nunchi/mcp/`는 빈 패키지 |
 | Slack | 캡처(📌, @멘션), 승인 카드 DM, 버튼 콜백 | planned (unit U6). `src/nunchi/slack/`는 빈 패키지 |
@@ -137,7 +137,7 @@ files: db/schema.sql, db/tests/smoke_test.sql, db/tests/expectations.tsv, src/nu
 
 1. 캡처. 사람이나 에이전트가 `propose`를 직접 부르거나, Slack에서 📌 또는 @멘션으로 메시지 한 건을 고른다(planned, unit U6).
 2. 추출기. `Extractor.extract(source_text, context)`가 `ProposalDraft(kind, title, body, subject, attribute, source_refs, valid_from, origin)`을 돌려주거나, 기억할 가치가 없으면 `None`을 돌려준다. `origin`과 `source_refs`는 호출자가 `ExtractContext`로 넘기고 모델이 정하지 못한다. 모델 출력은 고정 JSON 스키마이고 이후 단계에서 데이터로만 쓰인다. 메시지 본문은 `<source>` 구분자 안에 넣고, 꺾쇠 괄호의 모든 표기(전각, 작은 형태 포함)를 HTML 엔티티로 바꿔 구분자를 닫지 못하게 한다. `ANTHROPIC_API_KEY`가 없으면 `NullExtractor`가 첫 줄을 제목으로 쓴다.
-3. 결정적 게이트(planned, unit U9a). LLM 없이 규칙 레지스트리 16행을 돈다. 비밀값과 한국 개인정보 패턴은 reject, 지시문 패턴은 flag다. 게이트는 추출된 본문과 원 메시지 둘 다에 돌린다(`evaluate_pair`, 합집합에서 가장 엄격한 verdict). 추출기가 지시문을 빼고 의미만 남기는 경우를 막기 위해서다. 결과는 `memory.gate_result`에 들어간다.
+3. 결정적 게이트(planned, unit U9a). LLM 없이 규칙 레지스트리 13행을 돈다. 비밀값(API 키, 토큰, 개인 키, `KEY=값` 줄, URL에 박힌 비밀번호)은 reject, 지시문 패턴은 flag다. 개인정보 패턴(주민번호, 카드, 전화, 계좌, 여권)은 소유자 결정으로 게이트에 두지 않는다. 게이트는 추출된 본문과 원 메시지 둘 다에 돌린다(`evaluate_pair`, 합집합에서 가장 엄격한 verdict). 추출기가 지시문을 빼고 의미만 남기는 경우를 막기 위해서다. 결과는 `memory.gate_result`에 들어간다.
 4. 위험 등급(planned, unit U4a). `app_sec.risk_tier(memory)`가 5.1의 표 순서 그대로 등급을 정한다. 클라이언트가 보낸 `status`, `tier`는 트리거가 덮어쓴다.
 5. 최초 상태. 등급이 `approval_tier_rule`을 통해 정한다. `auto`는 active, `auto_labeled`는 provisional, 나머지는 proposed다.
 6. 결정. proposed와 provisional은 `app_sec.decide()`로만 움직인다. 직접 `UPDATE ... SET status`는 review 행이 없으면 `42501`이다(planned, unit U4b).
