@@ -372,3 +372,11 @@ N31l	= 4	fail	new model makes rows stale
 N31m	= 0	fail	filled row leaves the list
 N31o	= 1	fail	second put upserts
 N31n	= 1	fail	stale stamp refills
+G9a	= false/0	fail	new column default
+G9b	-> 42501	fail	reader cannot switch
+G9c	-> 42501	fail	contributor cannot switch
+G9d	(ok)	fail	curator switches
+G9e	= true	fail	enable starts at now
+G9f	(ok)	fail	contributor advances
+G9g	= true	fail	cursor is monotone
+G9h	-> 42501	fail	reader cannot advance
