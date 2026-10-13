@@ -40,10 +40,18 @@ class ResolveConfig(BaseSettings):
 
     trigram_min: float = Field(0.6, ge=0, le=1)
     subject_cosine_min: float = Field(0.80, ge=0, le=1)
-    attribute_cosine_min: float = Field(0.88, ge=0, le=1)
+    attribute_cosine_min: float = Field(0.80, ge=0, le=1)
+    long_value_chars: int = Field(30, ge=1)
     scan_limit: int = Field(200, ge=1)
     context_entities: int = Field(10, ge=1)
     context_min: float = Field(0.5, ge=0, le=1)
+
+
+# Business attributes that mean one thing under many names, by match_key. Seeded so day one is right
+# before any embedding learns it; an existing attribute of the same group wins over a new spelling.
+ATTRIBUTE_SYNONYMS = (
+    ("담당자", "담당", "컨택", "컨택 포인트", "담당 PM", "PM", "연락 담당", "연락 담당자", "POC"),
+)
 
 
 def match_key(name: str) -> str:
@@ -53,11 +61,19 @@ def match_key(name: str) -> str:
     return _LETTER_NAMES.get(stripped, stripped)
 
 
+def _synonym_group(key: str) -> frozenset[str]:
+    for names in ATTRIBUTE_SYNONYMS:
+        keys = frozenset(match_key(n) for n in names)
+        if key in keys:
+            return keys
+    return frozenset()
+
+
 def _rows(conn: Conn, query: str, params: Sequence[object]) -> list[tuple[Any, ...]]:
     return cast("list[tuple[Any, ...]]", conn.execute(query, params).fetchall())
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
+def cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     return dot / ((math.hypot(*a) * math.hypot(*b)) or 1.0)
 
@@ -74,8 +90,8 @@ def _nearest[K: Hashable](
     except EmbedError as exc:
         log.warning("embedding unavailable, resolving without it: %s", exc)
         return None
-    best = max(zip(names, docs, strict=True), key=lambda kd: _cosine(query, kd[1]))
-    return best[0] if _cosine(query, best[1]) >= floor else None
+    best = max(zip(names, docs, strict=True), key=lambda kd: cosine(query, kd[1]))
+    return best[0] if cosine(query, best[1]) >= floor else None
 
 
 def resolve_subject(conn: Conn, name: str, embedder: Embedder | None, cfg: ResolveConfig) -> UUID:
@@ -123,6 +139,9 @@ def resolve_attribute(  # noqa: PLR0913, PLR0917 - the key (store, subject), the
         return attribute
     key = match_key(attribute)
     same = next((r[0] for r in rows if r[1] >= 1.0 or match_key(r[0]) == key), None)
+    if same is None:
+        group = _synonym_group(key)
+        same = next((r[0] for r in rows if group and match_key(r[0]) in group), None)
     if same is None and rows[0][1] >= cfg.trigram_min:
         same = rows[0][0]
     if same is None:

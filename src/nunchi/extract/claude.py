@@ -124,9 +124,13 @@ _ANGLES = str.maketrans(
 )
 
 
+def defang(text: str) -> str:
+    return text.translate(_ANGLES)
+
+
 def _block(tag: str, items: Sequence[Frozen]) -> str:
     listed = json.dumps([i.model_dump(mode="json") for i in items], ensure_ascii=False, indent=1)
-    return f"<{tag}>\n{listed.translate(_ANGLES)}\n</{tag}>\n"
+    return f"<{tag}>\n{defang(listed)}\n</{tag}>\n"
 
 
 def render_user_content(source_text: str, context: ExtractContext) -> str:
@@ -136,7 +140,7 @@ def render_user_content(source_text: str, context: ExtractContext) -> str:
         lists += _block("candidates", context.candidates)
     if context.entities:
         lists += _block("entities", context.entities)
-    return f"{head}{lists}<source>\n{source_text.translate(_ANGLES)}\n</source>"
+    return f"{head}{lists}<source>\n{defang(source_text)}\n</source>"
 
 
 class ClaudeExtractor:

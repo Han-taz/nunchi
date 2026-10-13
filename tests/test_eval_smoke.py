@@ -99,8 +99,8 @@ def test_noisy_oracle_restates_with_the_next_spelling() -> None:
         ("A사", "담당자"),
         ("에이사", "컨택"),
         ("A Corp", "담당 PM"),
-        ("에이 사", "컨택"),
-        ("에이사", "담당 PM"),
+        ("에이 사", "PM"),
+        ("에이사", "컨택"),
     ]
 
 
@@ -194,3 +194,17 @@ def test_sweep_flag_prints_the_table_and_saves_json(
     assert main([*argv, "--limit", "12", "--out-dir", str(tmp_path)]) == 0
     assert capsys.readouterr().out.startswith("embed text   floor    k  recall@1  recall@5\n")
     assert len(json.loads(next(tmp_path.glob("sweep-*.json")).read_text())) == 17
+
+
+def test_noisy_oracle_drifts_values_by_honorific_and_wording() -> None:
+    ctx = ExtractContext(
+        origin=MemoryOrigin.EXTERNAL, today=date(2026, 10, 13), store_id=UUID(int=1)
+    )
+
+    def values(memory: str) -> list[str | None]:
+        oracle = OracleExtractor(load_messages(), noisy=True)
+        drafts = (oracle.extract(m.filled, ctx) for m in load_messages() if m.memory == memory)
+        return [d.value for d in drafts if d]
+
+    assert values("m01")[:3] == ["이민수", "이민수님", "이민수 매니저님"]
+    assert values("m25")[:2] == ["매일 03시, 14일 보관", "매일 새벽 3시, 14일 보관"]

@@ -8,6 +8,7 @@ from typing import Literal
 from uuid import UUID
 
 from nunchi.capture.resolve import ResolveConfig, known_entities, resolve_attribute, resolve_subject
+from nunchi.capture.same import canonical_value
 from nunchi.db import Conn
 from nunchi.domain import repo
 from nunchi.domain.models import Frozen, MemoryOrigin, MemoryStatus, SourceRef
@@ -17,6 +18,7 @@ from nunchi.extract import (
     ExtractContext,
     Extractor,
     ProposalDraft,
+    ValueJudge,
     to_propose_request,
 )
 from nunchi.gate import Verdict, evaluate_pair
@@ -116,13 +118,14 @@ def _resolve_key(
     return subject_id, draft.model_copy(update={"attribute": attribute})
 
 
-def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the two optional services
+def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the optional services
     conn: Conn,
     extractor: Extractor,
     source_text: str,
     context: CaptureContext,
     embedder: Embedder | None = None,
     resolve: ResolveConfig | None = None,
+    judge: ValueJudge | None = None,
 ) -> CaptureResult:
     cfg = resolve or ResolveConfig()
     candidates, subjects = _candidates(conn, source_text, context.store_id, embedder)
@@ -143,6 +146,8 @@ def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the two option
         return Rejected(reasons=tuple(f.rule_id for f in gate.flags if f.action is Action.REJECT))
 
     subject_id, draft = _resolve_key(conn, draft, extract_context, embedder, cfg)
+    if subject_id is not None:
+        draft = canonical_value(conn, context.store_id, subject_id, draft, judge, cfg)
     request = to_propose_request(draft, extract_context, lambda _name: subject_id)
     flags = tuple(f.rule_id for f in gate.flags)
     outcome = repo.propose(conn, request.model_copy(update={"gate_flags": flags}))

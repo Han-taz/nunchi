@@ -20,7 +20,7 @@ SUBJECT_VARIANTS = {
     "BI 대시보드": ("비아이 대시보드", "BI dashboard"),
 }
 ATTRIBUTE_VARIANTS = {
-    "담당자": ("컨택", "담당 PM"),
+    "담당자": ("컨택", "담당 PM", "PM"),
     "정산일": ("정산 날짜", "정산 마감일"),
     "롤백 방법": ("롤백 절차", "롤백 하는 법"),
     "알림 채널": ("알림 채널명", "알람 채널"),
@@ -43,6 +43,34 @@ GOLD_VALUES = {
     "m29": "stg.nunchi.example",
 }  # fmt: skip
 
+# Noisy only. Person values come back with an honorific or a title on later mentions.
+HONORIFIC_SUFFIXES = ("님", " 매니저님")
+PERSON_MEMORIES = ("m01", "m02", "m05", "m06", "m24")
+# Long values restated in other words: the same answer, not a new one.
+VALUE_VARIANTS = {
+    "m11": ("PR 머지→태그→/deploy prod→5분 스모크",),
+    "m12": ("배포봇으로만",),
+    "m15": ("OpenVPN 프로파일→사번+OTP 로그인",),
+    "m17": ("계정 발급→개발환경 세팅→첫 주 버디→2주차 코드 투어",),
+    "m25": ("매일 새벽 3시, 14일 보관",),
+    "m27": ("#incident 채널→리드 지정→30분 공유→48시간 내 포스트모템",),
+}
+
+
+class OracleJudge:
+    """Gold knowledge: values are the same when they spell one gold value."""
+
+    def __init__(self) -> None:
+        self._group = {
+            spelling: m
+            for m, variants in VALUE_VARIANTS.items()
+            for spelling in (GOLD_VALUES[m], *variants)
+        }
+
+    def same(self, first: str, second: str) -> bool:
+        a, b = self._group.get(first), self._group.get(second)
+        return a is not None and a == b
+
 
 class OracleExtractor:
     """Returns the gold key, the gold value and a body for each gold memory. Clean, the body is the
@@ -54,6 +82,7 @@ class OracleExtractor:
     def __init__(self, messages: list[Message], *, noisy: bool = False) -> None:
         self._noisy = noisy
         self._seen: Counter[tuple[str, str]] = Counter()
+        self._said: Counter[str] = Counter()
         self._by_text = {m.filled: m for m in messages}
         self._first: dict[str, str] = {}
         for m in messages:
@@ -77,12 +106,24 @@ class OracleExtractor:
             kind=gold.kind,
             title=text[:_TITLE_CHARS],
             body=text,
-            value=GOLD_VALUES[gold.memory],
+            value=self._value(gold.memory),
             subject_name=self._spell(gold.subject, SUBJECT_VARIANTS, ""),
             attribute=self._spell(gold.attribute, ATTRIBUTE_VARIANTS, gold.subject or ""),
             source_refs=context.source_refs,
             origin=context.origin,
         )
+
+    def _value(self, memory: str) -> str:
+        """The gold value; noisy, a memory's later mentions drift by honorific or wording."""
+        n = self._said[memory]
+        self._said[memory] += 1
+        gold = GOLD_VALUES[memory]
+        if not self._noisy or n == 0:
+            return gold
+        if memory in PERSON_MEMORIES:
+            return gold + HONORIFIC_SUFFIXES[(n - 1) % len(HONORIFIC_SUFFIXES)]
+        variants = VALUE_VARIANTS.get(memory)
+        return variants[(n - 1) % len(variants)] if variants else gold
 
     def _spell(
         self, name: str | None, variants: Mapping[str, tuple[str, ...]], scope: str
