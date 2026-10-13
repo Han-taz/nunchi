@@ -200,7 +200,8 @@ CREATE TABLE review (
   note text,
   at timestamptz NOT NULL DEFAULT now(),
   via_agent_id uuid REFERENCES principal (id),
-  card_nonce uuid REFERENCES approval_card (nonce)
+  card_nonce uuid REFERENCES approval_card (nonce),
+  version integer NOT NULL
 );
 
 -- 상태 기계: 허용되는 (from, to) 전이는 이 표가 전부다. memory_bu 는 이 표를 한 번 조회할 뿐 분기하지 않는다.
@@ -665,6 +666,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
         m.id = p_mem.id
         AND m.store_id IN (SELECT app_sec.my_stores('curator'))
         AND v.memory_id = m.id
+        AND v.version = m.version
         AND v.verdict = (SELECT t.op::text FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = p_to)
         AND v.reviewer_id NOT IN (m.created_by, coalesce(m.on_behalf_of, m.created_by))
         AND EXISTS (
@@ -830,6 +832,16 @@ BEGIN
 END $$;
 
 CREATE TRIGGER memory_bi BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_before_insert();
+-- 리뷰가 판단한 memory 버전: 클라이언트 값은 무시하고 항상 잠긴 memory 행의 현재 version 으로 덮어쓴다.
+-- 정족수는 현재 version 의 리뷰만 센다 (본문이 바뀌면 이전 승인은 기록에만 남는다).
+CREATE FUNCTION app_sec.review_before_insert() RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  SELECT m.version INTO NEW.version FROM memory AS m WHERE m.id = NEW.memory_id;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER review_bi BEFORE INSERT ON review FOR EACH ROW EXECUTE FUNCTION app_sec.review_before_insert();
+
 CREATE TRIGGER memory_bu BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_before_update();
 CREATE TRIGGER memory_bi2_hash BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
 CREATE TRIGGER memory_bi3_tier BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_tier();

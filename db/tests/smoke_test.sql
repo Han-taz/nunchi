@@ -1038,5 +1038,69 @@ SELECT t.eq('G3z judy, a second current curator: result/status', $q$SELECT d || 
 COMMIT;
 RESET ROLE;
 
+-- G5) review 는 자신이 판단한 memory 버전에 묶인다 (PR #29 검증자 지적 1). Ivan 이 v1 을 승인한 뒤 본문이 v2 로 바뀌면 Ivan 의 승인은 기록에만 남고 정족수에서 빠진다.
+-- 118: 검증자 시나리오. 119: 역할 회수 후 복구하면 이전 승인이 다시 센다 (명시적 동작). 120: 본문이 먼저 바뀌면 낡은 버전의 승인은 stale 로 거절된다.
+-- 새 표가 없는 v1.0 스키마에서는 카드 INSERT 가 실패해 모두 실패한다.
+DO $do$
+BEGIN
+  IF to_regclass('approval_card') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, tier, title, body, source_refs, created_by)
+  SELECT t.mid(n), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'proposed', 'two_curators',
+    'version bound ' || n, 'body ' || n, '[{"uri":"https://crm/acct/A"}]', '00000000-0000-0000-0000-0000000000a1'
+  FROM generate_series(118, 120) AS n;
+  INSERT INTO approval_card (nonce, memory_id, version_at_issue, issued_to, platform) VALUES
+   ('00000000-0000-0000-0000-0000000dd050', t.mid(118), 1, '00000000-0000-0000-0000-0000000000f8', 'slack'),
+   ('00000000-0000-0000-0000-0000000dd051', t.mid(118), 2, '00000000-0000-0000-0000-0000000000f9', 'slack'),
+   ('00000000-0000-0000-0000-0000000dd052', t.mid(118), 2, '00000000-0000-0000-0000-0000000000f5', 'slack'),
+   ('00000000-0000-0000-0000-0000000dd053', t.mid(119), 1, '00000000-0000-0000-0000-0000000000f8', 'slack'),
+   ('00000000-0000-0000-0000-0000000dd054', t.mid(119), 1, '00000000-0000-0000-0000-0000000000f9', 'slack'),
+   ('00000000-0000-0000-0000-0000000dd055', t.mid(120), 1, '00000000-0000-0000-0000-0000000000f8', 'slack');
+END $do$;
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f8', NULL);
+SELECT t.eq('G5a ivan approves v1: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd050', t.mid(118), 1, 'approve')$q$, 'pending_quorum:1/2');
+COMMIT;
+RESET ROLE;
+UPDATE memory SET body = 'rewritten by another curator' WHERE id = t.mid(118);
+SELECT t.eq('G5b the body edit bumps the version', $q$SELECT t.state(t.mid(118))$q$, 'proposed/v2');
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f9', NULL);
+SELECT t.eq('G5c judy approves v2, ivan saw only v1: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd051', t.mid(118), 2, 'approve')$q$, 'pending_quorum:1/2');
+SELECT t.errm('G5d judy direct UPDATE cannot activate v2 on ivan''s v1 approval', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(118)$q$, '%quorum not met: 1 of 2%');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f5', NULL);
+SELECT t.eq('G5e frank approves v2, two curators saw v2: result/status', $q$SELECT d || '/' || t.state(t.mid(118)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd052', t.mid(118), 2, 'approve') AS d) AS s$q$, 'active/active/v3');
+COMMIT;
+RESET ROLE;
+SELECT t.eq('G5f review versions stay as judged, the activation does not rewrite them', $q$SELECT string_agg(version::text, '/' ORDER BY id) FROM review WHERE memory_id = t.mid(118)$q$, '1/2/2');
+
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f8', NULL);
+SELECT t.eq('G5g ivan approves 119: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd053', t.mid(119), 1, 'approve')$q$, 'pending_quorum:1/2');
+COMMIT;
+RESET ROLE;
+DELETE FROM store_grant WHERE store_id = '00000000-0000-0000-0000-00000000f001' AND principal_id = '00000000-0000-0000-0000-0000000000f8';
+INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
+ ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f8','curator','00000000-0000-0000-0000-000000000001');
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f9', NULL);
+SELECT t.eq('G5h ivan lost then regained curator: his earlier approval counts again', $q$SELECT d || '/' || t.state(t.mid(119)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd054', t.mid(119), 1, 'approve') AS d) AS s$q$, 'active/active/v2');
+COMMIT;
+RESET ROLE;
+
+UPDATE memory SET title = 'retitled before ivan clicked' WHERE id = t.mid(120);
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f8', NULL);
+SELECT t.eq('G5i ivan clicks a card for v1 after the edit: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd055', t.mid(120), 1, 'approve')$q$, 'stale');
+COMMIT;
+RESET ROLE;
+SELECT t.eq('G5j the stale click left no review and the memory is untouched', $q$SELECT (SELECT count(*) FROM review WHERE memory_id = t.mid(120)) || '/' || t.state(t.mid(120))$q$, '0/proposed/v2');
+DO $do$ BEGIN
+  IF to_regclass('approval_card') IS NOT NULL THEN
+    INSERT INTO review (memory_id, reviewer_id, verdict, version) VALUES (t.mid(120), '00000000-0000-0000-0000-0000000000f8', 'comment', 99);
+  END IF;
+END $do$;
+SELECT t.eq('G5k a client-supplied review version is overwritten by the memory version', $q$SELECT version::text FROM review WHERE memory_id = t.mid(120)$q$, '2');
+
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;
