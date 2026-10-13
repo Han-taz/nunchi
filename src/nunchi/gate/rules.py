@@ -91,7 +91,7 @@ _CARD_KEYWORD = re.compile("카드|card|신용|결제|CVC|유효기간", re.IGNO
 
 
 def _is_card(m: re.Match[str]) -> bool:
-    """True if the digits have a real scheme's IIN prefix and length and pass Luhn."""
+    """True if the digits have a real card scheme's issuer prefix and length and pass Luhn."""
     digits = [int(c) for c in m[0] if c.isdigit()]
     prefix_ok = any(
         lo <= int("".join(map(str, digits[:n]))) <= hi and len(digits) in lengths

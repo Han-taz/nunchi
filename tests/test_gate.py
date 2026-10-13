@@ -1,5 +1,6 @@
 import json
 import random
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 import pytest
@@ -466,7 +467,7 @@ def _group(number: str) -> str:
 def test_grouped_card_recall_per_scheme_and_order_id_precision() -> None:
     """1000 valid grouped test cards per scheme must all reject. Run with -s for the numbers."""
     rng = random.Random(20260101)  # noqa: S311
-    schemes = {
+    schemes: dict[str, tuple[Callable[[], str], int]] = {
         "visa": (lambda: "4", 16),
         "mastercard-5": (lambda: str(rng.randrange(51, 56)), 16),
         "mastercard-2": (lambda: str(rng.randrange(2221, 2721)), 16),
