@@ -5,6 +5,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from hypothesis import settings
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 
@@ -13,6 +14,10 @@ from nunchi.config import Settings
 from nunchi.db import open_pool
 
 REPO = Path(__file__).resolve().parent.parent
+
+settings.register_profile("default", max_examples=100)
+settings.register_profile("nightly", max_examples=3000, deadline=None)
+settings.load_profile(os.environ.get("NUNCHI_HYPOTHESIS_PROFILE", "default"))
 APP_ROLE = "nunchi_test_app"
 
 
