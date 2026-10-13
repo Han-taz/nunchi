@@ -374,6 +374,7 @@ def test_worker_digest_flag_runs_the_digest_every_period(
     fake.posts = list(DECISION)
     monkeypatch.setenv("NUNCHI_DATABASE_URL", url)
     monkeypatch.setenv("MM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("MM_ACTION_SECRET", "s3cret")
     monkeypatch.setenv("NUNCHI_TENANT_ID", str(TENANT))
     monkeypatch.setattr(worker, "Mattermost", lambda *_a: digest.client)
     monkeypatch.setattr(worker, "open_pool", lambda _s: digest.pool)
