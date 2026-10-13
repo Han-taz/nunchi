@@ -63,3 +63,17 @@ def test_non_note_needs_a_source() -> None:
 def test_title_must_be_present() -> None:
     with pytest.raises(ValidationError, match="title"):
         _propose(title="")
+
+
+@pytest.mark.parametrize("kind", ["fact", "decision", "procedure"])
+def test_every_non_note_kind_rejects_missing_sources(kind: str) -> None:
+    with pytest.raises(ValidationError) as exc:
+        _propose(kind=kind)
+    assert [e["msg"] for e in exc.value.errors()] == [
+        "Value error, source_refs is required unless kind is note"
+    ]
+    assert _propose(kind=kind, source_refs=[{"uri": "u"}]).kind == kind
+
+
+def test_note_with_sources_is_accepted() -> None:
+    assert len(_propose(source_refs=[{"uri": "u"}, {"uri": "v"}]).source_refs) == 2
