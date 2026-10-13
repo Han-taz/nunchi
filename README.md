@@ -26,7 +26,7 @@ nunchi는 팀·조직용 에이전트 메모리다. 에이전트가 쓰고 읽�
 Docker와 `psql` 클라이언트가 필요하다.
 
 ```sh
-docker run -d --rm --name nunchi-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
+docker run -d --rm --name nunchi-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 pgvector/pgvector:pg16
 export PG_URL=postgres://postgres:postgres@localhost:5432/postgres
 
 scripts/db-test.sh --url "$PG_URL"                       # 현재 스키마: 모든 테스트 통과해야 함

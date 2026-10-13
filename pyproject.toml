@@ -18,6 +18,7 @@ dependencies = [
   "starlette>=0.40",
   "uvicorn>=0.54.0",
   "slack-bolt>=1.30.0",
+  "httpx>=0.28.1",
 ]
 
 [dependency-groups]
@@ -25,7 +26,6 @@ dev = [
   "cryptography>=43",
   "deptry>=0.21",
   "diff-cover>=9.2",
-  "httpx>=0.28.1",
   "httpx2>=2.13.1",
   "hypothesis>=6.120",
   "mutmut>=3.2",
