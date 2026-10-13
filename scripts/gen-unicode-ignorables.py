@@ -1,10 +1,14 @@
 """Generate the regex class app_sec.strip_invisible removes from content_hmac input.
 
-usage: python scripts/gen-unicode-ignorables.py                        print the generated block
-       python scripts/gen-unicode-ignorables.py --check FILE...        compare it with FILE blocks
-       python scripts/gen-unicode-ignorables.py --refresh [--ucd-dir D]   rewrite the vendored table
-       python scripts/gen-unicode-ignorables.py --verify-upstream [--ucd-dir D]
-                                                                       prove the table is current
+usage:
+  python scripts/gen-unicode-ignorables.py
+    print the generated block
+  python scripts/gen-unicode-ignorables.py --check FILE...
+    compare it with the block in each FILE
+  python scripts/gen-unicode-ignorables.py --refresh [--ucd-dir DIR]
+    rewrite the vendored table
+  python scripts/gen-unicode-ignorables.py --verify-upstream [--ucd-dir DIR]
+    prove the vendored table is current
 
 The class is every code point with general category Cf, plus Default_Ignorable_Code_Point, plus
 the Cc controls that are not whitespace (tab, line feed, vertical tab, form feed, carriage return
