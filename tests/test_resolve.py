@@ -1,4 +1,5 @@
 from datetime import date
+from uuid import UUID
 
 import pytest
 
@@ -19,19 +20,23 @@ CTX = CaptureContext(
 
 
 class Scripted:
-    """Returns a draft with the key the test sets."""
+    """Returns a draft with the given key and records what the server offered."""
 
     def __init__(self) -> None:
+        self.seen: ExtractContext | None = None
         self.subject: str = ""
         self.attribute: str = ""
+        self.entity_id: UUID | None = None
         self.body: str = ""
 
     def extract(self, source_text: str, context: ExtractContext) -> ProposalDraft:
+        self.seen = context
         return ProposalDraft(
             kind=MemoryKind.FACT,
             title=self.body,
             body=self.body,
             subject_name=self.subject,
+            subject_entity_id=self.entity_id,
             attribute=self.attribute,
             source_refs=context.source_refs,
             origin=context.origin,
@@ -166,3 +171,33 @@ def test_the_cosine_floor_decides_the_embedding_merge(
                 ResolveConfig(subject_cosine_min=floor, trigram_min=1.0),
             )
     assert sorted({k[0] for k in keys(world)}) == entities
+
+
+@pytest.mark.db
+def test_the_extractor_is_offered_known_entities_with_attributes(world: Pool) -> None:
+    ex = Scripted()
+    say(world, ex, "A사", "담당자", "이OO")
+    say(world, ex, "A사", "계약 만료일", "2027-01-01")
+    say(world, ex, "A사", "담당자", "소식", source="A사 소식")
+    assert ex.seen is not None
+    [offered] = ex.seen.entities
+    assert (offered.name, offered.aliases, sorted(offered.attributes)) == (
+        "A사",
+        ("a사",),
+        ["계약 만료일", "담당자"],
+    )
+
+
+@pytest.mark.db
+def test_only_an_offered_entity_id_is_trusted(world: Pool) -> None:
+    ex = Scripted()
+    say(world, ex, "A사", "담당자", "이OO")
+    say(world, ex, "B사", "담당자", "최OO")
+    say(world, ex, "B사", "담당자", "최OO 휴직", source="A사와 B사 담당자 정리")
+    assert ex.seen is not None
+    a_id = next(e.id for e in ex.seen.entities if e.name == "A사")
+    ex.entity_id = a_id
+    say(world, ex, "컨택처", "담당자", "박OO", source="A사 소식")
+    ex.entity_id = UUID(int=7)
+    say(world, ex, "C사", "담당자", "정OO", source="A사 소식")
+    assert [k[0] for k in keys(world)] == ["A사", "B사", "B사", "A사", "C사"]

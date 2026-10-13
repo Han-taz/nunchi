@@ -14,6 +14,7 @@ from nunchi.domain.models import MemoryKind, MemoryOrigin, ProposeRequest, Sourc
 from nunchi.extract import (
     Candidate,
     ClaudeExtractor,
+    EntityContext,
     ExtractContext,
     ExtractionError,
     FailureReason,
@@ -41,6 +42,13 @@ CAND = Candidate(
     attribute="담당자",
 )
 CTX_WITH = CTX.model_copy(update={"candidates": (CAND,)})
+ENTITY = EntityContext(
+    id=UUID("00000000-0000-0000-0000-0000000000e1"),
+    name="A사",
+    aliases=("a사", "에이사"),
+    attributes=("담당자",),
+)
+CTX_ENTITY = CTX.model_copy(update={"entities": (ENTITY,)})
 
 
 def reply(**over: str | bool | None) -> dict[str, Any]:
@@ -443,6 +451,37 @@ def test_keyless_candidate_leaves_the_model_key_alone() -> None:
     draft = replying(message(json.dumps(says))).extract("x", ctx)
     assert draft is not None
     assert (draft.subject_name, draft.attribute) == ("deploy pipeline", "rollback method")
+
+
+def test_entities_are_rendered_as_a_data_block_with_aliases_and_attributes() -> None:
+    rendered = render_user_content("에이사 담당자 변경", CTX_ENTITY)
+    assert (
+        '<entities>\n[\n {\n  "id": "00000000-0000-0000-0000-0000000000e1",\n  "name": "A사",\n'
+        '  "aliases": [\n   "a사",\n   "에이사"\n  ],\n  "attributes": [\n   "담당자"\n  ]\n }\n]\n'
+        "</entities>\n<source>\n에이사 담당자 변경\n</source>"
+    ) in rendered
+    assert "<entities>" not in render_user_content("x", CTX)
+
+
+def test_offered_entity_id_becomes_the_draft_subject() -> None:
+    text = json.dumps(
+        reply(subject_name="에이 사", subject_entity_id=str(ENTITY.id), attribute="담당자")
+    )
+    draft = replying(message(text)).extract("에이 사 담당자 변경", CTX_ENTITY)
+    assert draft is not None
+    assert (draft.subject_name, draft.subject_entity_id, draft.attribute) == (
+        "A사",
+        ENTITY.id,
+        "담당자",
+    )
+
+
+@pytest.mark.parametrize("claimed", ["00000000-0000-0000-0000-0000000000ff", "A사", ""])
+def test_an_entity_id_that_was_not_offered_is_dropped(claimed: str) -> None:
+    text = json.dumps(reply(subject_name="새 회사", subject_entity_id=claimed))
+    draft = replying(message(text)).extract("새 회사 소식", CTX_ENTITY)
+    assert draft is not None
+    assert (draft.subject_name, draft.subject_entity_id) == ("새 회사", None)
 
 
 def test_the_default_model_is_haiku() -> None:
