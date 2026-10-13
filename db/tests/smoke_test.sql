@@ -326,7 +326,6 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
 
 -- A10) 앱 역할은 LOGIN NOBYPASSRLS NOINHERIT, RLS 테이블은 소유자에게도 정책을 강제한다
 SELECT t.eq('A10a app_rw login/bypassrls/inherit', $q$SELECT rolcanlogin || '/' || rolbypassrls || '/' || rolinherit FROM pg_roles WHERE rolname = 'app_rw'$q$, 'true/false/false');
-SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,group_member,memory,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
 SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,entity,entity_alias,group_member,memory,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
 
 SET ROLE app_rw;
@@ -1259,17 +1258,17 @@ DO $do$ BEGIN IF to_regclass('source_system') IS NOT NULL THEN DELETE FROM sourc
 
 
 -- N20~N28) 기억의 정체성 (설계 v1.2 2~3절): "A사 담당자 이OO → 박OO" 를 끝까지 따라간다. 키는 (A사, 담당자).
--- 200 = 소유자가 적재한 이OO(2026-03-01 부터), 201 = Alice 의 박OO 제안(2026-09-01 부터), 202 = 충돌 후 키를 고쳐 따로 저장할 제안.
+-- 300 = 소유자가 적재한 이OO(2026-03-01 부터), 301 = Alice 의 박OO 제안(2026-09-01 부터), 302 = 충돌 후 키를 고쳐 따로 저장할 제안.
 -- 새 표가 없는 v1.0 스키마에서는 전부 실패해야 한다.
 DO $do$
 BEGIN
   IF to_regclass('entity') IS NULL THEN RETURN; END IF;
   INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_from, last_confirmed_at)
-  VALUES (t.mid(200), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active',
+  VALUES (t.mid(300), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active',
     'A사 담당자', '이OO', '[{"uri":"https://crm/acct/A"}]', '00000000-0000-0000-0000-0000000000a1',
     '00000000-0000-0000-0000-0000000e0a01', '  담당자 ', '2026-03-01', '2026-03-01');
 END $do$;
-SELECT t.eq('N20 attribute is normalized by the trigger', $q$SELECT '[' || attribute || ']' FROM memory WHERE id = t.mid(200)$q$, '[담당자]');
+SELECT t.eq('N20 attribute is normalized by the trigger', $q$SELECT '[' || attribute || ']' FROM memory WHERE id = t.mid(300)$q$, '[담당자]');
 SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.eq('N21a alias "A Corp" (case and spacing differ) resolves to A사', $q$SELECT app_sec.resolve_entity('a corp')::text$q$, '00000000-0000-0000-0000-0000000e0a01');
@@ -1277,16 +1276,16 @@ SELECT t.eq('N21b alias 에이사 resolves to the same entity', $q$SELECT app_se
 SELECT t.eq('N21c unknown name resolves to nothing', $q$SELECT app_sec.resolve_entity('C사')::text$q$, 'NULL');
 SELECT t.err('N23 same key, same value (extra whitespace): no new row', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute)
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','  이OO ','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
-SELECT t.eq('N23a rows for the key/state/last op', $q$SELECT (SELECT count(*) FROM memory WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = '담당자') || '/' || t.state(t.mid(200)) || '/' || t.lastop(t.mid(200))$q$, '1/active/v2/reconfirm');
-SELECT t.eq('N23b last_confirmed_at moved forward', $q$SELECT (last_confirmed_at > '2026-03-01')::text FROM memory WHERE id = t.mid(200)$q$, 'true');
+SELECT t.eq('N23a rows for the key/state/last op', $q$SELECT (SELECT count(*) FROM memory WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = '담당자') || '/' || t.state(t.mid(300)) || '/' || t.lastop(t.mid(300))$q$, '1/active/v2/reconfirm');
+SELECT t.eq('N23b last_confirmed_at moved forward', $q$SELECT (last_confirmed_at > '2026-03-01')::text FROM memory WHERE id = t.mid(300)$q$, 'true');
 SELECT t.err('N24 same key, different value', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, valid_from)
-  VALUES (t.mid(201),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','박OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자','2026-09-01')$q$, 'ok');
-SELECT t.eq('N24a conflict_with/tier/status', $q$SELECT (conflict_with = t.mid(200))::text || '/' || tier || '/' || status FROM memory WHERE id = t.mid(201)$q$, 'true/one_curator/proposed');
+  VALUES (t.mid(301),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','박OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자','2026-09-01')$q$, 'ok');
+SELECT t.eq('N24a conflict_with/tier/status', $q$SELECT (conflict_with = t.mid(300))::text || '/' || tier || '/' || status FROM memory WHERE id = t.mid(301)$q$, 'true/one_curator/proposed');
 SELECT t.eq('N24b the old value is still the only live one', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01','담당자','2026-10-01')$q$, '이OO');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.eq('N25 carol replaces: result/old/new', $q$SELECT d || '/' || t.state(t.mid(200)) || '/' || t.state(t.mid(201)) FROM (SELECT t.approve(t.mid(201)) AS d) AS s$q$, 'active/superseded/v3/active/v2');
-SELECT t.eq('N25b old valid_to / new supersedes old / new valid_from', $q$SELECT (SELECT valid_to FROM memory WHERE id = t.mid(200)) || '/' || (SELECT (supersedes_id = t.mid(200))::text || '/' || valid_from FROM memory WHERE id = t.mid(201))$q$, '2026-09-01/true/2026-09-01');
+SELECT t.eq('N25 carol replaces: result/old/new', $q$SELECT d || '/' || t.state(t.mid(300)) || '/' || t.state(t.mid(301)) FROM (SELECT t.approve(t.mid(301)) AS d) AS s$q$, 'active/superseded/v3/active/v2');
+SELECT t.eq('N25b old valid_to / new supersedes old / new valid_from', $q$SELECT (SELECT valid_to FROM memory WHERE id = t.mid(300)) || '/' || (SELECT (supersedes_id = t.mid(300))::text || '/' || valid_from FROM memory WHERE id = t.mid(301))$q$, '2026-09-01/true/2026-09-01');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.eq('N26a as of 2026-02-01 (before any value)', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-02-01')$q$, 'NULL');
@@ -1294,12 +1293,12 @@ SELECT t.eq('N26b as of 2026-08-15', $q$SELECT body FROM app_sec.memory_as_of('0
 SELECT t.eq('N26c as of 2026-09-01 (the switch day)', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-09-01')$q$, '박OO');
 SELECT t.eq('N26d as of 2026-12-31', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-12-31')$q$, '박OO');
 SELECT t.err('N28 another value arrives for the key', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute)
-  VALUES (t.mid(202),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 기술 담당자','최OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
-SELECT t.eq('N28a conflicts with the live 박OO', $q$SELECT (conflict_with = t.mid(201))::text FROM memory WHERE id = t.mid(202)$q$, 'true');
+  VALUES (t.mid(302),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 기술 담당자','최OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
+SELECT t.eq('N28a conflicts with the live 박OO', $q$SELECT (conflict_with = t.mid(301))::text FROM memory WHERE id = t.mid(302)$q$, 'true');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.err('N28b carol saves it separately by changing the attribute', $q$UPDATE memory SET attribute = ' 기술 담당자' WHERE id = t.mid(202)$q$, 'ok');
-SELECT t.eq('N28c attribute normalized, conflict cleared', $q$SELECT attribute || '/' || coalesce(conflict_with::text, 'NULL') FROM memory WHERE id = t.mid(202)$q$, '기술 담당자/NULL');
+SELECT t.err('N28b carol saves it separately by changing the attribute', $q$UPDATE memory SET attribute = ' 기술 담당자' WHERE id = t.mid(302)$q$, 'ok');
+SELECT t.eq('N28c attribute normalized, conflict cleared', $q$SELECT attribute || '/' || coalesce(conflict_with::text, 'NULL') FROM memory WHERE id = t.mid(302)$q$, '기술 담당자/NULL');
 COMMIT;
 RESET ROLE;
 SELECT t.err('N22 a second live row for the same key is blocked by the partial unique index', $q$INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute)

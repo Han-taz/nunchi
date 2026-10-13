@@ -1,4 +1,5 @@
 import uuid
+from typing import Any
 
 import psycopg
 import pytest
@@ -10,6 +11,7 @@ from nunchi.domain.models import (
     MemoryOp,
     MemoryOrigin,
     MemoryStatus,
+    ProposeOutcome,
     ProposeRequest,
     Role,
     SourceRef,
@@ -125,7 +127,8 @@ def test_propose_binds_the_author_and_ignores_the_client(fresh_db: str, world: P
     with request_tx(world, USER, AGENT_NO_GRANT) as conn, pytest.raises(psycopg.Error):
         repo.propose(conn, req)
     with request_tx(world, USER, None) as conn:
-        direct = repo.propose(conn, req)
+        direct = repo.get(conn, repo.propose(conn, req).memory_id)
+    assert direct is not None
     assert (direct.status, direct.origin, direct.created_by, direct.on_behalf_of) == (
         MemoryStatus.PROVISIONAL,
         MemoryOrigin.INTERNAL,
@@ -146,7 +149,8 @@ def test_propose_as_agent_records_the_delegate(fresh_db: str, world: Pool) -> No
         )
     req = ProposeRequest(store_id=STORE, kind=MemoryKind.NOTE, title="by agent")
     with request_tx(world, USER, AGENT) as conn:
-        mem = repo.propose(conn, req)
+        mem = repo.get(conn, repo.propose(conn, req).memory_id)
+    assert mem is not None
     assert (mem.created_by, mem.on_behalf_of) == (AGENT, USER)
     assert mem.status == MemoryStatus.PROPOSED
 
@@ -173,7 +177,8 @@ def test_history_and_dependents(world: Pool) -> None:
         attribute="runbook",
     )
     with request_tx(world, USER, None) as conn:
-        child = repo.propose(conn, derived)
+        child = repo.get(conn, repo.propose(conn, derived).memory_id)
+    assert child is not None
     with request_tx(world, USER, None) as conn:
         versions = repo.history(conn, child.id)
         deps = repo.dependents(conn, ACTIVE)
@@ -200,10 +205,11 @@ def test_kind_filter_applies_before_the_row_limit(world: Pool, fresh_db: str) ->
         )
         conn.execute(
             "INSERT INTO memory"
-            " (id, tenant_id, store_id, kind, status, title, source_refs, created_by)"
+            " (id, tenant_id, store_id, kind, status, title, source_refs, created_by,"
+            " subject_id, attribute)"
             " VALUES ('ffffffff-ffff-ffff-ffff-ffffffffffff', %s, %s, 'fact', 'active', 'kiwi',"
-            ' \'[{"uri": "https://x"}]\', %s)',
-            (TENANT, STORE, USER),
+            ' \'[{"uri": "https://x"}]\', %s, %s, \'color\')',
+            (TENANT, STORE, USER, SUBJECT),
         )
     active = (MemoryStatus.ACTIVE,)
     with request_tx(world, USER, None) as conn:
@@ -211,3 +217,53 @@ def test_kind_filter_applies_before_the_row_limit(world: Pool, fresh_db: str) ->
         facts = repo.search(conn, "kiwi", None, [MemoryKind.FACT], active)
     assert len(unfiltered) == 50
     assert [h.id for h in facts] == [uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")]
+
+
+def _scalar(url: str, query: str, arg: object) -> Any:  # noqa: ANN401
+    with psycopg.connect(url) as conn:
+        row = conn.execute(query, (arg,)).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _fact(body: str) -> ProposeRequest:
+    return ProposeRequest(
+        store_id=STORE,
+        kind=MemoryKind.FACT,
+        title="Infra owner",
+        body=body,
+        source_refs=(SourceRef(uri="https://example.com/org"),),
+        subject_id=SUBJECT,
+        attribute="Owner",
+    )
+
+
+@pytest.mark.db
+def test_propose_same_key_same_value_reconfirms(fresh_db: str, world: Pool) -> None:
+    with request_tx(world, USER, None) as conn:
+        first = repo.propose(conn, _fact("Kim"))
+    confirmed = "SELECT last_confirmed_at FROM memory WHERE id = %s"
+    before = _scalar(fresh_db, confirmed, first.memory_id)
+    with request_tx(world, USER, None) as conn:
+        second = repo.propose(conn, _fact("Kim"))
+    after = _scalar(fresh_db, confirmed, first.memory_id)
+    count = _scalar(fresh_db, "SELECT count(*) FROM memory WHERE subject_id = %s", SUBJECT)
+    assert first.kind == "created"
+    assert second == ProposeOutcome(kind="reconfirmed", memory_id=first.memory_id)
+    assert after > before
+    assert count == 1
+
+
+@pytest.mark.db
+def test_propose_same_key_other_value_is_created_with_conflict(fresh_db: str, world: Pool) -> None:
+    with request_tx(world, USER, None) as conn:
+        first = repo.propose(conn, _fact("Kim"))
+    with request_tx(world, USER, None) as conn:
+        second = repo.propose(conn, _fact("Lee"))
+    with psycopg.connect(fresh_db) as conn:
+        row = conn.execute(
+            "SELECT conflict_with, supersedes_id FROM memory WHERE id = %s", (second.memory_id,)
+        ).fetchone()
+    assert second.kind == "created"
+    assert second.memory_id != first.memory_id
+    assert row == (first.memory_id, first.memory_id)

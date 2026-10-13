@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -145,6 +145,14 @@ class Memory(MemorySummary):
     version: int
     created_at: datetime
     updated_at: datetime
+
+
+class ProposeOutcome(Frozen):
+    """created: a new proposed row. reconfirmed: the DB found a live row with the same key and
+    value, wrote no new row, and refreshed that row's last_confirmed_at."""
+
+    kind: Literal["created", "reconfirmed"]
+    memory_id: UUID
 
 
 class MemoryVersion(Frozen):
