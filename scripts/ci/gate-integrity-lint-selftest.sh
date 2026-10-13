@@ -52,4 +52,12 @@ case_ "git show --output overwrites a base script" 's|^( +)run: git fetch .*|\1r
 case_ "git diff abbreviated --out" 's|^( +)run: git fetch .*|\1run: git diff --out=scripts/ci/pr-size.sh a b|' 'allowlist: --out='
 case_ "git fetch --upload-pack" 's|^( +)run: git fetch .*|\1run: git fetch --upload-pack=./head/x origin|' 'allowlist: --upload-pack'
 case_ "git log --ext-diff" 's|^( +)run: git fetch .*|\1run: git log -p --ext-diff|' 'allowlist: --ext-diff'
+case_ "head ref split across lines in env" 's|^( +)PR_NUMBER: .*|&\n\1HEAD_REF: ${{\n\1  github.event.pull_request.head.ref }}|' 'allowlist: \${{ github.event.pull_request.head.ref }}'
+case_ "unterminated expression" 's|^( +)PR_NUMBER: .*|&\n\1HEAD_REF: ${{ github.event.pull_request.head.ref|' 'allowlist: '
+case_ "second yaml document" 's|^permissions: \{\}|&\n---\nname: second|' 'multi-document'
+case_ "PATH in env" 's|^( +)PR_NUMBER: .*|&\n\1PATH: /tmp/evil|' 'change process behavior'
+case_ "GIT_EXTERNAL_DIFF in env" 's|^( +)PR_NUMBER: .*|&\n\1GIT_EXTERNAL_DIFF: ./head/x|' 'change process behavior'
+case_ "BASH_ENV in env" 's|^( +)PR_NUMBER: .*|&\n\1BASH_ENV: ./head/x|' 'change process behavior'
+case_ "LD_PRELOAD in env" 's|^( +)PR_NUMBER: .*|&\n\1LD_PRELOAD: ./head/x.so|' 'change process behavior'
+case_ "NODE_OPTIONS in env" 's|^( +)PR_NUMBER: .*|&\n\1NODE_OPTIONS: --require ./head/x|' 'change process behavior'
 echo "gate-integrity-lint self-test ok"

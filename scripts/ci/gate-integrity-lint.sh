@@ -27,14 +27,33 @@ if grep -qE '^[[:space:]]*(- )?(shell|defaults):' "$file"; then
 fi
 
 # The only expressions that may appear anywhere (run, env, with, concurrency, if) are ones
-# that carry no pull request head data.
+# that carry no pull request head data. Scan the whole file, not line by line, so a "${{" and
+# its "}}" split across lines cannot slip past: every "${{" must start exactly one allowlisted
+# expression.
 while IFS= read -r expr; do
   [ -n "$expr" ] || continue
-  case "$expr" in
-    '${{ github.event.pull_request.number }}' | '${{ github.event.pull_request.base.sha }}' | '${{ !cancelled() }}') ;;
-    *) err "expression is not on the base-only allowlist: $expr" ;;
-  esac
-done < <(grep -oE '\$\{\{[^}]*\}\}' "$file" | sort -u)
+  err "expression is not on the base-only allowlist: $expr"
+done < <(python3 -I - "$file" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+allowed = ("${{ github.event.pull_request.number }}", "${{ github.event.pull_request.base.sha }}", "${{ !cancelled() }}")
+for m in re.finditer(r"\$\{\{", text):
+    if not text.startswith(allowed, m.start()):
+        close = text.find("}}", m.start())
+        end = close + 2 if close != -1 else len(text)
+        print(" ".join(text[m.start():end].split()))
+PY
+)
+
+# One workflow document only: a second "---" document would be parsed separately by Actions.
+if awk '/^[[:space:]]*(#.*)?$/ { next } /^(---|\.\.\.)([[:space:]]|$)/ { if (seen) bad = 1; next } { seen = 1 } END { exit !bad }' "$file"; then
+  err "multi-document YAML is not allowed"
+fi
+
+# Variables that change how git, the shell, python or node behave let a base command load code.
+if grep -qE '^[[:space:]]*(- )?(PATH|ENV|BASH_ENV|NODE_OPTIONS|GIT_[A-Za-z0-9_]*|LD_[A-Za-z0-9_]*|DYLD_[A-Za-z0-9_]*|PYTHON[A-Za-z0-9_]*):' "$file"; then
+  err "env keys that change process behavior (PATH, GIT_*, LD_*, DYLD_*, BASH_ENV, ENV, PYTHON*, NODE_OPTIONS) are not allowed"
+fi
 
 triggers=$(awk '/^on:/ { on = 1; next } on && /^[^ #]/ { exit } on && /^  [a-z_]+:/ { sub(/:.*/, ""); gsub(/ /, ""); print }' "$file")
 [ "$triggers" = pull_request_target ] || err "the only trigger must be pull_request_target, found: ${triggers//$'\n'/ }"
