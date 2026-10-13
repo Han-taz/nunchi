@@ -808,6 +808,27 @@ CREATE FUNCTION app_sec.resolve_entity(p_name text) RETURNS uuid
 LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT a.entity_id FROM entity_alias AS a WHERE a.alias_norm = app_sec.norm_text(p_name)
 $$;
+-- entity 생성: 수집 파이프라인이 모르는 주제를 만날 때 쓴다. 테넌트는 요청 문맥에서 오고 별칭은 resolve_entity 와 같게 정규화된다.
+-- 이미 있는 이름이면 새로 만들지 않고 그 entity 를 돌려준다 (재시도에 안전). entity 승인은 이후 큐레이터 단위의 몫이다.
+CREATE FUNCTION app_sec.create_entity(p_name text, p_kind text) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  v_tenant uuid := app_sec.ctx_tenant();
+  v_id uuid;
+BEGIN
+  IF v_tenant IS NULL OR app_sec.ctx_user() IS NULL THEN
+    RAISE EXCEPTION 'no request context' USING ERRCODE = '42501';
+  END IF;
+  IF app_sec.norm_text(p_name) = '' THEN
+    RAISE EXCEPTION 'empty entity name' USING ERRCODE = '22023';
+  END IF;
+  SELECT a.entity_id INTO v_id FROM entity_alias AS a
+  WHERE a.tenant_id = v_tenant AND a.alias_norm = app_sec.norm_text(p_name);
+  IF v_id IS NOT NULL THEN RETURN v_id; END IF;
+  INSERT INTO entity (tenant_id, kind, canonical_name) VALUES (v_tenant, p_kind, btrim(p_name)) RETURNING id INTO v_id;
+  INSERT INTO entity_alias (tenant_id, entity_id, alias_norm) VALUES (v_tenant, v_id, p_name);
+  RETURN v_id;
+END $$;
 
 -- 위험 등급 (설계서 2.1). 입력은 모두 서버/DB 가 정한 값이고 위에서부터 첫 일치 행이 등급이다.
 -- 1행(게이트 reject = 제안 거부)은 게이트의 몫이라 여기 없다. 신뢰 20점이 기준이고 점수 갱신은 proposer_trust 가 한다.
@@ -1354,5 +1375,6 @@ GRANT EXECUTE ON FUNCTION app_sec.search(text, uuid[], memory_status[], memory_k
 GRANT EXECUTE ON FUNCTION app_sec.verify_chain(uuid) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.norm_text(text) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.resolve_entity(text) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.create_entity(text, text) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.memory_as_of(uuid, uuid, text, date) TO app_rw;
 GRANT EXECUTE ON FUNCTION principal_closure(uuid) TO app_rw;

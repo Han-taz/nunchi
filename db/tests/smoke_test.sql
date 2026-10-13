@@ -512,7 +512,7 @@ CREATE FUNCTION t.exec_list() RETURNS text LANGUAGE sql AS $$
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.begin_request,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
+  'app_sec.begin_request,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 BEGIN;
 CREATE FUNCTION public.t_eq() RETURNS void LANGUAGE sql AS $$ SELECT $$;
@@ -1301,6 +1301,9 @@ BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.eq('N21a alias "A Corp" (case and spacing differ) resolves to A사', $q$SELECT app_sec.resolve_entity('a corp')::text$q$, '00000000-0000-0000-0000-0000000e0a01');
 SELECT t.eq('N21b alias 에이사 resolves to the same entity', $q$SELECT app_sec.resolve_entity(' 에이사 ')::text$q$, '00000000-0000-0000-0000-0000000e0a01');
 SELECT t.eq('N21c unknown name resolves to nothing', $q$SELECT app_sec.resolve_entity('C사')::text$q$, 'NULL');
+SELECT t.eq('N21e create_entity makes a new entity', $q$SELECT (app_sec.create_entity(' New  Corp ', 'org') IS NOT NULL)::text$q$, 'true');
+SELECT t.eq('N21g it resolves by a differently spaced name', $q$SELECT (app_sec.resolve_entity('new corp') IS NOT NULL)::text$q$, 'true');
+SELECT t.eq('N21f create_entity on an existing alias returns that entity and adds no row', $q$SELECT (app_sec.create_entity('A CORP', 'org')::text) || '/' || (SELECT count(*) FROM entity WHERE canonical_name ILIKE '%corp%')$q$, '00000000-0000-0000-0000-0000000e0a01/1');
 SELECT t.err('N23 same key, same value (extra whitespace): no new row', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute)
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','  이OO ','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
 SELECT t.eq('N23a rows for the key/state/last op', $q$SELECT (SELECT count(*) FROM memory WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = '담당자') || '/' || t.state(t.mid(300)) || '/' || t.lastop(t.mid(300))$q$, '1/active/v2/reconfirm');
