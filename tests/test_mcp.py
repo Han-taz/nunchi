@@ -174,7 +174,7 @@ def test_get_hidden_memory_is_not_found(url: str) -> None:
 
 def test_history_lists_versions(url: str) -> None:
     versions = anyio.run(call, url, USER, "history", {"memory_id": str(KOREAN)})
-    assert [(v['version'], v['op']) for v in versions] == [(1, 'propose')]
+    assert [(v["version"], v["op"]) for v in versions] == [(1, "propose")]
 
 
 def test_as_of_picks_the_version_valid_on_that_date(url: str) -> None:
