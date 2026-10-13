@@ -23,7 +23,8 @@ from nunchi.domain.models import (
 
 _MEMORY_COLUMNS = sql.SQL(
     "id, store_id, kind, status, title, body, source_refs, origin, supersedes_id,"
-    " created_by, on_behalf_of, valid_from, valid_to, version, created_at, updated_at"
+    " created_by, on_behalf_of, valid_from, valid_to, version, created_at, updated_at,"
+    " subject_id, attribute, last_confirmed_at"
 )
 
 

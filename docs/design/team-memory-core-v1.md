@@ -159,13 +159,16 @@ DB 수준에서 거는 제약
 | `memory.index(store)` | active 항목의 제목과 설명 목록 (progressive disclosure) | reader |
 | `memory.search(query, stores?, kind?)` | 전문검색. 기본은 active만 | reader |
 | `memory.get(id)` | 본문, 출처, 이력 요약 | reader |
-| `memory.propose(store, kind, title, body, source_refs, origin, supersedes?)` | 제안. 게이트 결과를 돌려준다 | contributor |
+| `memory.propose(store, kind, title, body, source_refs, supersedes?)` | 제안. origin 은 서버가 정한다. 게이트 결과를 돌려준다 | contributor |
 | `memory.review(id, verdict, note)` | 승인/반려 | curator |
 | `memory.supersede(old_id, new_id)` | 대체 처리 | curator |
 | `memory.delete(id, reason)` | 삭제(tombstone + 해시 등록 + 버전 redact) | curator |
 | `memory.dependents(id)` | 이 메모리를 근거로 인용한 항목(역방향 계보) | reader |
 | `memory.history(id)` | 버전 기록 | reader |
 
+- REST 매핑(`/v1`): list_stores `GET /stores`, index `GET /stores/{id}/memories`, search `GET /search?q=&store=&kind=&status=`, get `GET /memories/{id}`, propose `POST /memories`, history `GET /memories/{id}/history`, dependents `GET /memories/{id}/dependents`, review `POST /memories/{id}/decision`(`app_sec.decide` 전까지 501). supersede 와 delete 는 아직 없다.
+- 인증은 `Authorization: Bearer <OIDC JWT>`(사용자)와 선택적 `X-Agent-Token`(에이전트)이다. 테넌트는 검증된 토큰의 `iss` 를 설정으로 매핑해서만 정하고, 헤더·경로·쿼리·본문의 값은 읽지 않는다.
+- 오류는 problem+json 이고 SQLSTATE 는 한 표로 매핑한다: 42501→403, 23505→409, 23503→404, 28000→401, P0001→409, 40001→503(재시도 후), 23514→422.
 - 수정은 `expected_version`을 받는다(낙관적 잠금). 충돌하면 409를 돌려준다.
 - 에이전트용 시스템 지시(AGENTS.md나 런타임 설정)는 한 줄이면 된다: "작업 전 memory.list_stores와 memory.index를 보고 필요한 것만 get, 새로 확인한 사실은 출처와 함께 propose."
 

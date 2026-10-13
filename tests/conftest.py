@@ -51,6 +51,7 @@ AGENT = uuid.UUID("00000000-0000-0000-0000-0000000000b1")
 AGENT_NO_GRANT = uuid.UUID("00000000-0000-0000-0000-0000000000b2")
 TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000c1")
 STORE = uuid.UUID("00000000-0000-0000-0000-0000000000d1")
+API_SUBJECT = uuid.UUID("00000000-0000-0000-0000-0000000000e5")
 
 
 def app_url(superuser_url: str) -> str:
@@ -83,6 +84,11 @@ def seeded(fresh_db: str, admin_url: str) -> Iterator[str]:
             "INSERT INTO store_grant (store_id, principal_id, role, tenant_id)"
             " VALUES (%s, %s, 'contributor', %s), (%s, %s, 'reader', %s)",
             (STORE, USER, TENANT, STORE, AGENT, TENANT),
+        )
+        conn.execute(
+            "INSERT INTO entity (id, tenant_id, kind, canonical_name)"
+            " VALUES (%s, %s, 'team', 'Infra')",
+            (API_SUBJECT, TENANT),
         )
         conn.execute(
             "INSERT INTO memory (tenant_id, store_id, kind, status, title, created_by)"

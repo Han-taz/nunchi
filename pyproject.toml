@@ -8,12 +8,15 @@ dependencies = [
   "psycopg[binary]>=3.3.6",
   "psycopg-pool>=3.2",
   "pydantic>=2.9",
+  "fastapi>=0.115",
   "pydantic-settings>=2.6",
   "anthropic>=1.13.0",
   # >=2.15: PyJWKClient rate-limits forced JWKS refreshes on unknown kids (cooldown_duration)
   "pyjwt[crypto]>=2.15,<3",
   "mcp>=1.29.0",
   "anyio>=4.15.1",
+  "starlette>=0.40",
+  "uvicorn>=0.54.0",
 ]
 
 [dependency-groups]
@@ -31,7 +34,6 @@ dev = [
   "pytest-cov>=6.0",
   "ruff>=0.8",
   "semgrep>=1.100",
-  "uvicorn>=0.54.0",
 ]
 
 [build-system]
@@ -76,8 +78,8 @@ exclude_also = ["if __name__ == .__main__.:"]
 known_first_party = ["nunchi"]
 
 [tool.deptry.per_rule_ignores]
-# the C accelerator for psycopg, selected by the [binary] extra and never imported
-DEP002 = ["psycopg-binary"]
+# never imported: psycopg-binary (the [binary] extra), uvicorn (`uvicorn --factory nunchi.api.serve:create`)
+DEP002 = ["psycopg-binary", "uvicorn"]
 
 [tool.mutmut]
 source_paths = ["src/nunchi/"]
