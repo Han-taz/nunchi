@@ -270,6 +270,37 @@ def test_build_extractor_reads_process_environment(monkeypatch: pytest.MonkeyPat
     assert isinstance(build_extractor(), NullExtractor)
 
 
+@pytest.mark.parametrize(
+    ("env", "sent"),
+    [
+        ({}, "claude-opus-5-5"),
+        ({"NUNCHI_EXTRACT_MODEL": ""}, "claude-opus-5-5"),
+        ({"NUNCHI_EXTRACT_MODEL": "anthropic/claude-opus-5-5"}, "anthropic/claude-opus-5-5"),
+    ],
+)
+def test_build_extractor_sends_the_configured_model(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], sent: str
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def respond(req: httpx2.Request) -> httpx2.Response:
+        seen.append(json.loads(req.content))
+        return httpx2.Response(200, json=message(json.dumps(reply())))
+
+    real = anthropic.Anthropic
+    monkeypatch.setattr(
+        anthropic,
+        "Anthropic",
+        lambda **kw: real(
+            **kw,
+            max_retries=0,
+            http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(respond)),
+        ),
+    )
+    build_extractor({"ANTHROPIC_API_KEY": "k"} | env).extract("x", CTX)
+    assert [body["model"] for body in seen] == [sent]
+
+
 def capture(out: list[dict[str, Any]], text: str) -> ClaudeExtractor:
     def respond(req: httpx2.Request) -> httpx2.Response:
         out.append(json.loads(req.content))
