@@ -10,7 +10,6 @@ dependencies = [
   "pydantic>=2.9",
   "pydantic-settings>=2.6",
   "anthropic>=1.13.0",
-  "pglast>=8.5",
 ]
 
 [dependency-groups]

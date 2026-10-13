@@ -2,18 +2,13 @@
 
 import hashlib
 import re
+import secrets
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import psycopg
-from pglast import parse_sql
-from pglast.ast import Node, ReindexStmt, TransactionStmt, VacuumStmt
-from pglast.enums import TransactionStmtKind
-from pglast.parser import ParseError
-from pglast.visitors import Visitor
 
 from nunchi.config import Settings
 
@@ -51,48 +46,24 @@ def read_manifest(directory: Path) -> dict[str, str]:
     return entries
 
 
-class _Unrunnable(Visitor):
-    """Records the first statement Postgres refuses to run inside a transaction block."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.found: str | None = None
-
-    def visit(self, ancestors: object, node: Node) -> None:
-        if self.found is not None:
-            return
-        if isinstance(node, TransactionStmt):
-            keyword = cast(TransactionStmtKind, node.kind).name.removeprefix("TRANS_STMT_")
-            self.found = (
-                f"{keyword.replace('_', ' ')} is not allowed; the runner supplies the transaction"
-            )
-        elif isinstance(node, VacuumStmt) and node.is_vacuumcmd:
-            self.found = "VACUUM cannot run inside the runner's transaction"
-        elif getattr(node, "concurrent", False) or (
-            isinstance(node, ReindexStmt)
-            and any(opt.defname == "concurrently" for opt in node.params or ())
-        ):
-            self.found = "CONCURRENTLY cannot run inside the runner's transaction"
+def _tag(taken: str) -> str:
+    """A random dollar-quote tag that appears nowhere in `taken`."""
+    while True:
+        tag = f"m{secrets.token_hex(8)}"
+        if tag not in taken:
+            return tag
 
 
-def check_runnable(name: str, sql: bytes) -> None:
-    """Refuse SQL that cannot run inside the runner's one transaction per migration.
+def wrap_for_server(text: str) -> str:
+    """One DO statement that makes the server run `text` itself, in the caller's transaction.
 
-    Postgres's own parser decides, so no string or comment trick can hide a statement.
+    Inside DO, plpgsql EXECUTE runs in an atomic SPI context: the server refuses COMMIT, END,
+    ROLLBACK, SAVEPOINT, PREPARE TRANSACTION, CONCURRENTLY and VACUUM, and it lexes `text`
+    with its own lexer, so no client-side reading of the SQL can disagree with it.
     """
-    try:
-        statements = parse_sql(sql.decode())
-    except UnicodeDecodeError as err:
-        msg = f"{name}: not valid UTF-8"
-        raise MigrationError(msg) from err
-    except ParseError as err:
-        msg = f"{name}: not parseable as PostgreSQL: {err}"
-        raise MigrationError(msg) from err
-    visitor = _Unrunnable()
-    visitor(statements)
-    if visitor.found is not None:
-        msg = f"{name}: {visitor.found}"
-        raise MigrationError(msg)
+    outer = _tag(text)
+    inner = _tag(text + outer)
+    return f"DO ${outer}$ BEGIN EXECUTE ${inner}${text}${inner}$; END ${outer}$"
 
 
 def load_migrations(directory: Path) -> list[Migration]:
@@ -105,7 +76,11 @@ def load_migrations(directory: Path) -> list[Migration]:
             msg = f"{path.name}: migration files are named NNNN_slug.sql"
             raise MigrationError(msg)
         data = path.read_bytes()
-        check_runnable(path.name, data)
+        try:
+            data.decode()
+        except UnicodeDecodeError as err:
+            msg = f"{path.name}: not valid UTF-8"
+            raise MigrationError(msg) from err
         checksum = hashlib.sha256(data).hexdigest()
         actual[path.name] = checksum
         migrations.append(Migration(match.group(1), path.name, data, checksum))
@@ -155,7 +130,10 @@ def migrate(conn: psycopg.Connection[tuple[object, ...]], directory: Path) -> li
             todo = pending(disk, {str(v): str(c) for v, c in rows})
             for migration in todo:
                 step = migration.name
-                conn.execute(migration.sql)
+                conn.execute("SET LOCAL standard_conforming_strings = on")
+                conn.execute("SET LOCAL backslash_quote = safe_encoding")
+                conn.execute("SET LOCAL escape_string_warning = on")
+                conn.execute(wrap_for_server(migration.sql.decode()).encode())
                 conn.execute(
                     "INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s)",
                     (migration.version, migration.checksum),
