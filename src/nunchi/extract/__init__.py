@@ -1,14 +1,19 @@
 from nunchi.extract.claude import ClaudeExtractor, build_extractor
 from nunchi.extract.draft import (
+    Candidate,
     ExtractContext,
     ExtractionError,
     Extractor,
     FailureReason,
     ProposalDraft,
+    Relation,
+    RelationKind,
 )
 from nunchi.extract.null import NullExtractor
+from nunchi.extract.request import UnknownSubjectError, to_propose_request
 
 __all__ = [
+    "Candidate",
     "ClaudeExtractor",
     "ExtractContext",
     "ExtractionError",
@@ -16,5 +21,9 @@ __all__ = [
     "FailureReason",
     "NullExtractor",
     "ProposalDraft",
+    "Relation",
+    "RelationKind",
+    "UnknownSubjectError",
     "build_extractor",
+    "to_propose_request",
 ]
