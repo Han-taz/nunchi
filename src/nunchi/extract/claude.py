@@ -82,9 +82,15 @@ class _Reply(Frozen):
     valid_from: date | None
 
 
+# Every angle bracket spelling becomes an HTML entity, so no closing tag of any case, spacing,
+# homoglyph, or zero-width spelling can form inside the data block.
+_ANGLES = str.maketrans(
+    dict.fromkeys("<\uff1c\ufe64", "&lt;") | dict.fromkeys(">\uff1e\ufe65", "&gt;")
+)
+
+
 def render_user_content(source_text: str, context: ExtractContext) -> str:
-    # A source that closes the delimiter early could pose as text outside the data block.
-    safe = source_text.replace("</source>", "<\\/source>")
+    safe = source_text.translate(_ANGLES)
     return (
         f"today: {context.today.isoformat()}\norigin: {context.origin}\n<source>\n{safe}\n</source>"
     )
