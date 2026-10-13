@@ -72,6 +72,20 @@ MCP 클라이언트는 `http://localhost:8000/mcp`에 연결하고 `Authorizatio
 
 전체 이야기(기억, 재확인, 충돌, 승인, 검색, 시점 조회)를 자동으로 확인하려면 `scripts/e2e.sh`를 실행한다. 가짜 Claude 엔드포인트를 띄우므로 네트워크와 키가 필요 없고, 끝나면 `docker compose down -v`로 정리한다.
 
+## Mattermost 연결
+
+nunchi 봇은 Mattermost 의 웹소켓으로 `:pushpin:` 반응과 `@nunchi` 멘션을 받아 기억을 제안하고, 큐레이터에게 승인 카드를 DM 으로 보낸다. 카드의 버튼(승인 / 거절)은 봇 프로세스 안의 작은 HTTP 서버(`/actions`)로 돌아온다.
+
+1. Mattermost 에서 봇 계정 `nunchi` 를 만들고 토큰을 발급한다. 시스템 콘솔에서 봇 계정과 `AllowedUntrustedInternalConnections`(예: `host.docker.internal`)를 허용해야 버튼 콜백이 봇에 닿는다.
+2. 환경 변수는 셸이나 `.env` 로만 넣는다. 저장소에 값을 쓰지 않는다.
+   - `MM_BOT_TOKEN`: 봇 토큰
+   - `MM_URL`, `MM_SITE_URL`: API 주소와 사용자에게 보이는 주소 (퍼머링크에 쓴다)
+   - `MM_ACTION_URL`: Mattermost 가 버튼 클릭을 보낼 주소 (기본 `http://host.docker.internal:8787/actions`)
+   - `MM_ACTION_SECRET`: 버튼 컨텍스트의 HMAC 비밀값. Mattermost 는 액션 호출에 서명하지 않으므로 이 값으로 위조를 막는다. 서명이 맞지 않으면 403 이고 결정은 일어나지 않는다.
+   - `NUNCHI_TENANT_ID`
+3. `docker compose -f deploy/compose.yml --profile mattermost up -d mattermost-bot` 으로 올린다.
+4. 사용자는 `principal_identity` 에 `platform = 'mattermost'` 로 이어져 있어야 한다. 클릭한 사람이 그 이어진 사용자이고 큐레이터일 때만 승인된다.
+
 ## 기여 흐름
 
 1. `develop`에서 브랜치를 만든다. `develop`과 `main`에는 직접 push하지 않는다.

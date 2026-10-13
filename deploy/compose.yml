@@ -104,3 +104,22 @@ services:
       NUNCHI_EMBEDDING_MODEL: ${NUNCHI_EMBEDDING_MODEL:-embeddinggemma-2}
       NUNCHI_EMBEDDING_DIM: ${NUNCHI_EMBEDDING_DIM:-512}
     restart: unless-stopped
+
+  # opt-in: docker compose --profile mattermost up mattermost-bot (secrets come from the shell or .env)
+  mattermost-bot:
+    <<: *app
+    profiles: ["mattermost"]
+    command: ["python", "-m", "nunchi.mattermost"]
+    environment:
+      <<: *app-env
+      MM_BOT_TOKEN: ${MM_BOT_TOKEN:-}
+      MM_URL: ${MM_URL:-http://host.docker.internal:8065}
+      MM_SITE_URL: ${MM_SITE_URL:-}
+      MM_ACTION_URL: ${MM_ACTION_URL:-http://host.docker.internal:8787/actions}
+      MM_ACTION_SECRET: ${MM_ACTION_SECRET:-}
+      NUNCHI_TENANT_ID: ${NUNCHI_TENANT_ID:-00000000-0000-4000-8000-000000000001}
+    ports:
+      - "${MM_ACTION_PORT:-8787}:8787"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
