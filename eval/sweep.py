@@ -17,25 +17,28 @@ from eval.score import Outcome
 from nunchi.config import Settings
 from nunchi.db import open_pool
 from nunchi.embed import Embedder
-from nunchi.extract import Extractor
+from nunchi.extract import Extractor, ValueJudge
 
 FLOORS = (0.2, 0.3, 0.4, 0.5)
 RRF_KS = (20, 60)
 
 
-def run_sweep(
+def run_sweep(  # noqa: PLR0913, PLR0917 - one run's inputs
     admin_url: str,
     extractor: Extractor,
     messages: list[Message],
     queries: list[Query],
     embedder: Embedder,
+    judge: ValueJudge | None = None,
 ) -> list[dict[str, Any]]:
     cached = CachingEmbedder(embedder)
     rows: list[dict[str, Any]] = []
     with fresh_database(admin_url) as app_url:
         pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
         try:
-            outcomes: list[Outcome] = [replay_one(pool, extractor, m, cached) for m in messages]
+            outcomes: list[Outcome] = [
+                replay_one(pool, extractor, m, cached, judge) for m in messages
+            ]
             rows.append(_row(pool, queries, outcomes, None, "trigram", None, None))
             with psycopg.connect(superuser_url(admin_url, app_url)) as admin:
                 for variant in VARIANTS:

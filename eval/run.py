@@ -18,7 +18,7 @@ from eval import score
 from eval.corpus import Message, Query, load_messages, load_queries
 from eval.db import CONTRIBUTOR, CURATORS, STORE, fresh_database, superuser_url
 from eval.embedding import embed_documents
-from eval.oracle import ConceptEmbedder, OracleExtractor
+from eval.oracle import ConceptEmbedder, OracleExtractor, OracleJudge
 from eval.score import Outcome
 from nunchi.capture import (
     CaptureContext,
@@ -32,7 +32,14 @@ from nunchi.db import Conn, Pool, open_pool, request_tx
 from nunchi.domain import repo
 from nunchi.domain.models import MemoryOrigin, MemoryStatus, SourceRef
 from nunchi.embed import Embedder, embedder_from_settings
-from nunchi.extract import ExtractionError, Extractor, NullExtractor, build_extractor
+from nunchi.extract import (
+    ExtractionError,
+    Extractor,
+    NullExtractor,
+    ValueJudge,
+    build_extractor,
+    build_judge,
+)
 
 RESULTS = Path(__file__).parent / "results"
 LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL)
@@ -48,7 +55,11 @@ def _describe(conn: Conn, outcome_id: UUID) -> tuple[str, UUID | None, UUID | No
 
 
 def replay_one(
-    pool: Pool, extractor: Extractor, msg: Message, embedder: Embedder | None = None
+    pool: Pool,
+    extractor: Extractor,
+    msg: Message,
+    embedder: Embedder | None = None,
+    judge: ValueJudge | None = None,
 ) -> Outcome:
     context = CaptureContext(
         store_id=STORE,
@@ -58,7 +69,7 @@ def replay_one(
     )
     try:
         with request_tx(pool, CONTRIBUTOR, None) as conn:
-            result = capture(conn, extractor, msg.filled, context, embedder)
+            result = capture(conn, extractor, msg.filled, context, embedder, judge=judge)
             if isinstance(result, Created | Reconfirmed):
                 db_kind, subject_id, conflict = _describe(conn, result.memory_id)
     except ExtractionError:
@@ -126,17 +137,18 @@ def run_search(  # noqa: PLR0913, PLR0917 - the knobs a sweep varies
     return rows
 
 
-def run_eval(
+def run_eval(  # noqa: PLR0913, PLR0917 - one run's inputs
     admin_url: str,
     extractor: Extractor,
     messages: list[Message],
     queries: list[Query],
     embedder: Embedder | None = None,
+    judge: ValueJudge | None = None,
 ) -> dict[str, Any]:
     with fresh_database(admin_url) as app_url:
         pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
         try:
-            outcomes = [replay_one(pool, extractor, m, embedder) for m in messages]
+            outcomes = [replay_one(pool, extractor, m, embedder, judge) for m in messages]
             if embedder is not None:
                 with psycopg.connect(superuser_url(admin_url, app_url)) as admin:
                     embed_documents(admin, embedder, "title+body")
@@ -189,9 +201,31 @@ def table(report: dict[str, Any]) -> str:
     return "\n".join([head, *(f"{name:<28}{value}" for name, value in rows)])
 
 
+def _resolve_sweep(args: argparse.Namespace) -> int:
+    if args.embedder == "none":
+        sys.stderr.write("eval: --resolve-sweep needs --embedder concept or env\n")
+        return 2
+    from eval.resolve_sweep import resolve_sweep_table, run_resolve_sweep  # noqa: PLC0415
+
+    embedder: Embedder = (
+        ConceptEmbedder()
+        if args.embedder == "concept"
+        else embedder_from_settings(Settings(database_url="unused"))  # type: ignore[assignment]
+    )
+    judge = build_judge(os.environ)
+    if judge is None:
+        sys.stderr.write("eval: ANTHROPIC_API_KEY is not set; the judge rows are skipped\n")
+    rows = run_resolve_sweep(embedder, judge)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    (args.out_dir / f"resolve-sweep-{stamp}.json").write_text(json.dumps(rows, indent=1))
+    sys.stdout.write(resolve_sweep_table(rows) + "\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m eval.run")
-    parser.add_argument("--db", required=True, help="superuser URL of a Postgres server")
+    parser.add_argument("--db", help="superuser URL of a Postgres server (not needed for sweeps)")
     parser.add_argument("--extractor", choices=("claude", "fake", "noisy"), default="claude")
     parser.add_argument(
         "--embedder",
@@ -204,14 +238,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="ingest once, then print search recall over vector floor x RRF k x embed text",
     )
+    parser.add_argument(
+        "--resolve-sweep",
+        action="store_true",
+        help="attribute cosine floors, and the value judge when an API key is set, on gold pairs",
+    )
     parser.add_argument("--limit", type=int, help="replay only the first N messages")
     parser.add_argument("--out-dir", type=Path, default=RESULTS)
     args = parser.parse_args(argv)
+    if args.resolve_sweep:
+        return _resolve_sweep(args)
+    if args.db is None:
+        parser.error("--db is required")
     messages = load_messages(args.limit)
     extractor: Extractor
+    judge: ValueJudge | None = None
     if args.extractor in ("fake", "noisy"):
         extractor = OracleExtractor(load_messages(), noisy=args.extractor == "noisy")
+        judge = OracleJudge()
     else:
+        judge = build_judge(os.environ)
         extractor = build_extractor(os.environ)
         if isinstance(extractor, NullExtractor):
             sys.stderr.write("eval: ANTHROPIC_API_KEY is not set; use --extractor fake\n")
@@ -233,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         (args.out_dir / f"sweep-{stamp}.json").write_text(json.dumps(rows, indent=1))
         sys.stdout.write(sweep_table(rows) + "\n")
         return 0
-    report = run_eval(args.db, extractor, messages, load_queries(), embedder)
+    report = run_eval(args.db, extractor, messages, load_queries(), embedder, judge)
     report["config"] = {
         "extractor": args.extractor,
         "embedder": args.embedder,

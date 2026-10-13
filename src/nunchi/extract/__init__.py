@@ -10,12 +10,14 @@ from nunchi.extract.draft import (
     Relation,
     RelationKind,
 )
+from nunchi.extract.judge import ClaudeJudge, ValueJudge, build_judge
 from nunchi.extract.null import NullExtractor
 from nunchi.extract.request import UnknownSubjectError, to_propose_request
 
 __all__ = [
     "Candidate",
     "ClaudeExtractor",
+    "ClaudeJudge",
     "EntityContext",
     "ExtractContext",
     "ExtractionError",
@@ -26,6 +28,8 @@ __all__ = [
     "Relation",
     "RelationKind",
     "UnknownSubjectError",
+    "ValueJudge",
     "build_extractor",
+    "build_judge",
     "to_propose_request",
 ]
