@@ -35,10 +35,15 @@ class Rule:
 
 MSG_CRED = "비밀 정보(시크릿)가 포함되어 있습니다. 제거한 뒤 다시 제안하세요"
 MSG_PII = "원문 링크로 대체하세요"
+MSG_PII_BARE = "주민등록번호처럼 보이는 숫자입니다. 사람이 확인하세요"
 MSG_INSTRUCTION = "지시문처럼 보입니다. 사람이 내용을 확인하세요"
 
 _ENTROPY_MIN_BITS = 3.5
 _SEP = "[ ./-]?"
+_RRN_WINDOW = 20
+_RRN_KEYWORD = re.compile("주민|등록번호|외국인|RRN|resident", re.IGNORECASE)
+_INSTRUCTION_WINDOW = 15
+_INSTRUCTION_OBJECT = re.compile("지시|명령|프롬프트")
 
 
 def _is_rrn(m: re.Match[str]) -> bool:
@@ -50,6 +55,24 @@ def _is_rrn(m: re.Match[str]) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _near(m: re.Match[str], word: re.Pattern[str], window: int) -> bool:
+    """True if `word` occurs within `window` characters before or after the match."""
+    text = m.string
+    return word.search(text, max(0, m.start() - window), m.end() + window) is not None
+
+
+def _is_keyed_rrn(m: re.Match[str]) -> bool:
+    return _is_rrn(m) and _near(m, _RRN_KEYWORD, _RRN_WINDOW)
+
+
+def _is_unkeyed_rrn(m: re.Match[str]) -> bool:
+    return _is_rrn(m) and not _near(m, _RRN_KEYWORD, _RRN_WINDOW)
+
+
+def _is_directed_at_instructions(m: re.Match[str]) -> bool:
+    return _near(m, _INSTRUCTION_OBJECT, _INSTRUCTION_WINDOW)
 
 
 def _is_card(m: re.Match[str]) -> bool:
@@ -131,10 +154,26 @@ RULES: tuple[Rule, ...] = (
     Rule(
         "pii-kr-rrn",
         Kind.PII,
-        re.compile(r"(?<!\d)(?P<front>\d{6})[- ]?(?P<back>[1-8]\d{6})(?!\d)"),
+        re.compile(r"(?<!\d)(?P<front>\d{6})[- ](?P<back>[1-8]\d{6})(?!\d)"),
         Action.REJECT,
         MSG_PII,
         _is_rrn,
+    ),
+    Rule(
+        "pii-kr-rrn-keyed",
+        Kind.PII,
+        re.compile(r"(?<!\d)(?P<front>\d{6})(?P<back>[1-8]\d{6})(?!\d)"),
+        Action.REJECT,
+        MSG_PII,
+        _is_keyed_rrn,
+    ),
+    Rule(
+        "pii-kr-rrn-bare",
+        Kind.PII,
+        re.compile(r"(?<!\d)(?P<front>\d{6})(?P<back>[1-8]\d{6})(?!\d)"),
+        Action.FLAG,
+        MSG_PII_BARE,
+        _is_unkeyed_rrn,
     ),
     Rule(
         "pii-kr-phone",
@@ -148,7 +187,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         "pii-kr-card",
         Kind.PII,
-        re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)"),
+        re.compile(r"(?<!\d)\d(?:[ ./-]?\d){12,18}(?!\d)"),
         Action.REJECT,
         MSG_PII,
         _is_card,
@@ -206,12 +245,13 @@ RULES: tuple[Rule, ...] = (
         re.compile(r"(?:하도록|해야)\s?합니다|하십시오"),
         Action.FLAG,
         MSG_INSTRUCTION,
+        _is_directed_at_instructions,
     ),
     Rule(
         "inject-polite-request-ko",
         Kind.INSTRUCTION,
         re.compile(
-            r"(?:지시|명령|규칙|프롬프트|시스템)[^.\n]{0,15}?(?:해 ?주세요|하세요|바랍니다)"
+            r"(?:지시|명령|규칙(?!적)|프롬프트|시스템)[^.\n]{0,15}?(?:해 ?주세요|하세요|바랍니다)"
         ),
         Action.FLAG,
         MSG_INSTRUCTION,

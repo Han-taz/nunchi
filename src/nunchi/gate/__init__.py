@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from urllib.parse import unquote
 
 from nunchi.gate.normalize import normalize
 from nunchi.gate.rules import RULES, Action, Kind, Rule
@@ -50,14 +51,16 @@ class GateResult:
         }
 
 
-def _hit(rule: Rule, text: str) -> bool:
-    return any(rule.check is None or rule.check(m) for m in rule.pattern.finditer(text))
+def _hit(rule: Rule, views: tuple[str, ...]) -> bool:
+    return any(rule.check is None or rule.check(m) for v in views for m in rule.pattern.finditer(v))
 
 
 def evaluate(text: str) -> GateResult:
     canonical = normalize(text)
+    # The percent-decoded copy exists only for matching; nothing stores it.
+    views = tuple(dict.fromkeys((canonical, normalize(unquote(canonical)))))
     return GateResult(
-        tuple(Flag(r.id, r.kind, r.action, r.message) for r in RULES if _hit(r, canonical))
+        tuple(Flag(r.id, r.kind, r.action, r.message) for r in RULES if _hit(r, views))
     )
 
 
