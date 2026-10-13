@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,18 @@ class Settings(BaseSettings):
     db_pool_timeout: Annotated[float, Field(gt=0)] = 30.0
     db_connect_timeout: Annotated[int, Field(ge=1)] = 10
     migrations_dir: Path = Path("db/migrations")
+    # Unset base URL turns embeddings off; search and capture then run on trigram alone.
+    embedding_base_url: str | None = None
+    embedding_api_key: SecretStr | None = None
+    embedding_model: str = "embeddinggemma-2"
+    # memory_embedding.embedding is vector(512); another size needs a migration first.
+    embedding_dim: Annotated[int, Field(ge=512, le=512)] = 512
+    embedding_timeout: Annotated[float, Field(gt=0)] = 5.0
+
+    @field_validator("embedding_base_url", "embedding_api_key", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def _pool_bounds_are_ordered(self) -> Self:

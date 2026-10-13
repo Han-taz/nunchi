@@ -11,6 +11,10 @@ x-app: &app
       {"${DEV_ISSUER}":{"tenant_id":"00000000-0000-4000-8000-000000000001","jwks_url":"http://jwks:9100/jwks.json"}}
     NUNCHI_MIGRATIONS_DIR: /app/db/migrations
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    NUNCHI_EMBEDDING_BASE_URL: ${NUNCHI_EMBEDDING_BASE_URL:-}
+    NUNCHI_EMBEDDING_API_KEY: ${NUNCHI_EMBEDDING_API_KEY:-}
+    NUNCHI_EMBEDDING_MODEL: ${NUNCHI_EMBEDDING_MODEL:-embeddinggemma-2}
+    NUNCHI_EMBEDDING_DIM: ${NUNCHI_EMBEDDING_DIM:-512}
   depends_on:
     seed:
       condition: service_completed_successfully
@@ -25,7 +29,7 @@ services:
       - ./.dev/jwks:/jwks:ro
 
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     healthcheck:
@@ -95,4 +99,8 @@ services:
     command: ["python", "-m", "nunchi.worker", "--every", "3600"]
     environment:
       NUNCHI_DATABASE_URL: ${NUNCHI_WORKER_DATABASE_URL}
+      NUNCHI_EMBEDDING_BASE_URL: ${NUNCHI_EMBEDDING_BASE_URL:-}
+      NUNCHI_EMBEDDING_API_KEY: ${NUNCHI_EMBEDDING_API_KEY:-}
+      NUNCHI_EMBEDDING_MODEL: ${NUNCHI_EMBEDDING_MODEL:-embeddinggemma-2}
+      NUNCHI_EMBEDDING_DIM: ${NUNCHI_EMBEDDING_DIM:-512}
     restart: unless-stopped

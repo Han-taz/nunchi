@@ -339,3 +339,10 @@ N30d	(ok)	fail
 N30e	(ok)	fail
 N30f	(ok)	fail
 N30g	(ok)	fail
+N31h	-> 42501	fail	no table privilege
+N31i	-> 42501	fail	app_rw cannot write embeddings
+N31k	= Q31 plain	fail	worker fill list
+N31l	= 4	fail	new model makes rows stale
+N31m	= 0	fail	filled row leaves the list
+N31o	= 1	fail	second put upserts
+N31n	= 1	fail	stale stamp refills

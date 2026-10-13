@@ -326,7 +326,7 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
 
 -- A10) 앱 역할은 LOGIN NOBYPASSRLS NOINHERIT, RLS 테이블은 소유자에게도 정책을 강제한다
 SELECT t.eq('A10a app_rw login/bypassrls/inherit', $q$SELECT rolcanlogin || '/' || rolbypassrls || '/' || rolinherit FROM pg_roles WHERE rolname = 'app_rw'$q$, 'true/false/false');
-SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,entity,entity_alias,group_member,inbound_event,memory,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
+SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,entity,entity_alias,group_member,inbound_event,memory,memory_embedding,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
 
 SET ROLE app_rw;
 
@@ -515,8 +515,8 @@ SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exe
   'app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.issue_card,app_sec.issue_slack_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
-SELECT t.eq('P3d nunchi_worker executes exactly the two worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
-  'app_sec.mark_expired,app_sec.stale_memories | tables=0');
+SELECT t.eq('P3d nunchi_worker executes exactly the four worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
+  'app_sec.mark_expired,app_sec.memories_to_embed,app_sec.put_embedding,app_sec.stale_memories | tables=0');
 BEGIN;
 CREATE FUNCTION public.t_eq() RETURNS void LANGUAGE sql AS $$ SELECT $$;
 SELECT t.eq('P3b a production function named public.t_eq is listed', $q$SELECT (t.exec_list() LIKE '%public.t_eq%')::text$q$, 'true');
@@ -1377,6 +1377,40 @@ SELECT t.eq('N30g the row is expired and a second pass moves nothing', $q$SELECT
 SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SET LOCAL ROLE app_rw;
 SELECT t.eq('N30f search exposes stale and last_confirmed_at', $q$SELECT stale::text || '/' || (last_confirmed_at < now() - interval '180 days')::text FROM app_sec.search('W1a')$q$, 'true/true');
+ROLLBACK;
+-- N31) 임베딩 저장과 워커 채우기 (v1.2 §7): e1,e2,e3 는 벡터 있음, e4 는 없음, e5 는 proposed (롤백되는 트랜잭션 안의 임시 행)
+BEGIN; RESET ROLE;
+CREATE FUNCTION t.vec(k integer) RETURNS real[] LANGUAGE sql IMMUTABLE AS $$ SELECT array_agg((CASE WHEN i = k THEN 1 ELSE 0 END)::real ORDER BY i) FROM generate_series(1, 512) AS i $$;
+DO $setup$ BEGIN
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES ('00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', 'active', 'Q31 fusion', 'alpha beta gamma', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES ('00000000-0000-0000-0000-0000000031b2', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', 'active', 'Q31 fusion', 'alpha', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES ('00000000-0000-0000-0000-0000000031b3', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f002', 'note', 'active', 'Q31 hr only', 'salary band', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES ('00000000-0000-0000-0000-0000000031b4', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', 'active', 'Q31 plain', 'no vector yet', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES ('00000000-0000-0000-0000-0000000031b5', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', 'proposed', 'Q31 proposed', 'draft', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1');
+EXECUTE 'INSERT INTO memory_embedding (memory_id, model, dim, embedding, updated_at) SELECT id, ''m'', 512, t.vec(CASE id WHEN ''00000000-0000-0000-0000-0000000031b1'' THEN 1 WHEN ''00000000-0000-0000-0000-0000000031b2'' THEN 3 ELSE 2 END)::vector(512), updated_at FROM memory WHERE id IN (''00000000-0000-0000-0000-0000000031b1'', ''00000000-0000-0000-0000-0000000031b2'', ''00000000-0000-0000-0000-0000000031b3'')';
+EXCEPTION WHEN OTHERS THEN NULL;
+END $setup$;
+SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SET LOCAL ROLE app_rw;
+SELECT t.err('N31h app_rw reads no embedding table directly', $q$SELECT count(*) FROM memory_embedding$q$, '42501');
+SELECT t.err('N31i app_rw cannot write an embedding', $q$SELECT app_sec.put_embedding('00000000-0000-0000-0000-0000000031b4', 'm', t.vec(4), now())$q$, '42501');
+RESET ROLE;
+DO $g$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nunchi_worker') THEN CREATE ROLE nunchi_worker NOLOGIN; END IF;
+  GRANT USAGE ON SCHEMA t TO nunchi_worker;
+END $g$;
+SET LOCAL ROLE nunchi_worker;
+SELECT t.eq('N31k worker fill list: live rows without a vector (not the embedded, not the proposed)', $q$SELECT string_agg(title, ',' ORDER BY title) FROM app_sec.memories_to_embed('m', 100) WHERE title LIKE 'Q31%'$q$, 'Q31 plain');
+SELECT t.eq('N31l a new model makes every live Q31 row stale', $q$SELECT count(*)::text FROM app_sec.memories_to_embed('m2', 1000) WHERE title LIKE 'Q31%'$q$, '4');
+DO $w$ BEGIN
+  PERFORM app_sec.put_embedding(id, 'm', t.vec(4), updated_at) FROM app_sec.memories_to_embed('m', 100) WHERE title = 'Q31 plain';
+EXCEPTION WHEN OTHERS THEN NULL;
+END $w$;
+SELECT t.eq('N31m after put_embedding the fill list no longer holds the row', $q$SELECT count(*)::text FROM app_sec.memories_to_embed('m', 100) WHERE title = 'Q31 plain'$q$, '0');
+RESET ROLE;
+DO $w$ BEGIN PERFORM app_sec.put_embedding('00000000-0000-0000-0000-0000000031b4', 'm', t.vec(4), now() - interval '1 day'); EXCEPTION WHEN OTHERS THEN NULL; END $w$;
+SELECT t.eq('N31o a second put_embedding upserts instead of adding a row', $q$SELECT count(*)::text FROM memory_embedding WHERE memory_id = '00000000-0000-0000-0000-0000000031b4'$q$, '1');
+SELECT t.eq('N31n a vector stamped before the last memory update is stale again', $q$SELECT count(*)::text FROM app_sec.memories_to_embed('m', 100) WHERE title = 'Q31 plain'$q$, '1');
 ROLLBACK;
 SET ROLE app_rw;
 
