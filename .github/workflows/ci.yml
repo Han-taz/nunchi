@@ -386,6 +386,7 @@ jobs:
       - name: pytest (warnings are errors, 100% coverage of the skeleton)
         env:
           NUNCHI_TEST_ADMIN_URL: ${{ env.PG_URL }}
+          NUNCHI_HYPOTHESIS_PROFILE: ${{ github.event_name == 'schedule' && 'nightly' || 'default' }}
         run: uv run pytest
       - name: diff-cover (80% of changed lines)
         if: github.event_name == 'pull_request'
