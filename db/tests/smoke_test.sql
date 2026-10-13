@@ -512,7 +512,7 @@ CREATE FUNCTION t.exec_list(r text DEFAULT 'app_rw') RETURNS text LANGUAGE sql A
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.entity_matches,app_sec.issue_card,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
+  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.entity_matches,app_sec.issue_card,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.pending_dm_cards,app_sec.quorum,app_sec.record_card_sent,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
 SELECT t.eq('P3d nunchi_worker executes exactly the four worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
@@ -1257,6 +1257,8 @@ SELECT t.eq('G10d the snapshot is exactly the new list with its external flag', 
 SET ROLE app_rw;
 SELECT t.ctx(t.g5(2), NULL);
 SELECT t.err('G10e a contributor of another store replaces the snapshot of a binding it cannot see', $q$SELECT app_sec.replace_room_members(gen_random_uuid(), ARRAY['U5X1'], ARRAY[]::text[])$q$, '42501');
+-- G11a) 카드 발송 표시: 모르는 nonce 나 내 제안이 아닌 카드는 표시되지 않는다
+SELECT t.eq('G11a marking a card nobody issued to this proposer returns false', $q$SELECT app_sec.record_card_sent(gen_random_uuid(), 'D1', 'P1')::text$q$, 'false');
 ROLLBACK;
 
 -- G6a–g) 신원: SCIM 으로 이은 활성 사용자만, 같은 Slack id 를 두 번 이을 수 없고, 앱은 표를 직접 읽지 못한다

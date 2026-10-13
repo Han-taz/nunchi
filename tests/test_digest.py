@@ -11,8 +11,15 @@ from nunchi.db import Pool
 from nunchi.domain.models import MemoryKind, MemoryOrigin
 from nunchi.extract import ExtractContext, ExtractionError, FailureReason, ProposalDraft
 from nunchi.extract.claude import SYSTEM_PROMPT, render_user_content
+from nunchi.mattermost.cards import CardConfig
 from nunchi.mattermost.client import Mattermost
-from nunchi.mattermost.digest import Digest, DigestLimits, DigestReport, run_digest
+from nunchi.mattermost.digest import (
+    Digest,
+    DigestLimits,
+    DigestReport,
+    run_digest,
+    send_proposal_cards,
+)
 from nunchi.mattermost.membership import refresh_memberships
 from nunchi.worker import __main__ as worker
 from tests.conftest import STORE, TENANT, USER
@@ -25,6 +32,7 @@ DM = "d" * 26
 OFF = "f" * 26
 ALICE = "a" * 26
 BOB = "o" * 26
+CURATOR = "k" * 26
 T0 = 1_700_000_000_000
 MIN = 60_000
 
@@ -54,11 +62,21 @@ class FakeMattermost:
         self.posts: list[dict[str, Any]] = []
         self.requested: list[str] = []
         self.members: dict[str, list[str]] = {}
+        self.dms: list[tuple[str, dict[str, Any]]] = []
+        self.dm_down = False
 
     def __call__(self, request: httpx.Request) -> httpx.Response:  # noqa: PLR0911
         path = request.url.path.removeprefix("/api/v4")
         self.requested.append(path)
         query = request.url.params
+        if path == "/channels/direct":
+            return httpx.Response(200, json={"id": "dm-" + "-".join(json.loads(request.content))})
+        if path == "/posts" and request.method == "POST":
+            if self.dm_down:
+                return httpx.Response(500, json={})
+            body = json.loads(request.content)
+            self.dms.append((body["channel_id"], body["props"]["attachments"][0]))
+            return httpx.Response(200, json={"id": f"sent{len(self.dms)}"})
         if path.startswith("/channels/") and path.endswith("/posts"):
             channel = path.split("/")[2]
             since, page, per = int(query["since"]), int(query["page"]), int(query["per_page"])
@@ -164,8 +182,9 @@ def world(fresh_db: str, pool: Pool) -> World:
         )
         conn.execute(
             "INSERT INTO principal_identity (platform, platform_user_id, tenant_id, principal_id,"
-            " link_quality) VALUES ('mattermost', %s, %s, %s, 'scim')",
-            (BOT, TENANT, USER),
+            " link_quality) VALUES ('mattermost', %s, %s, %s, 'scim'),"
+            " ('mattermost', %s, %s, %s, 'scim')",
+            (BOT, TENANT, USER, CURATOR, TENANT, CUR),
         )
         bind(conn, ROOM, "public", True)
         bind(conn, OFF, "private", False)
@@ -440,8 +459,8 @@ def test_worker_digest_flag_runs_the_digest_every_period(
 
     assert sleeps == [600.0]
     refreshed = "membership: refreshed 0\n"
-    assert first == refreshed + f"digest: {DigestReport(windows=1, created=1)}\n"
-    assert capsys.readouterr().out == refreshed + f"digest: {DigestReport()}\n"
+    assert first == refreshed + f"digest: {DigestReport(windows=1, created=1)}\ncards: sent 1\n"
+    assert capsys.readouterr().out == refreshed + f"digest: {DigestReport()}\ncards: sent 0\n"
 
 
 @pytest.mark.db
@@ -537,3 +556,77 @@ def test_an_unreadable_or_empty_channel_keeps_its_old_snapshot(world: World) -> 
             (ROOM, OFF),
         ).fetchall()
     assert kept == [(ROOM, ALICE), (OFF, ALICE)]
+
+
+CARDS = CardConfig("http://nunchi/actions", b"secret")
+
+
+def sent_nonces(url: str) -> list[tuple[bool, str | None]]:
+    with psycopg.connect(url) as conn:
+        return conn.execute(
+            "SELECT message_ts IS NOT NULL, message_ts FROM approval_card ORDER BY issued_at"
+        ).fetchall()
+
+
+@pytest.mark.db
+def test_a_digest_proposal_reaches_the_curator_as_one_card_and_a_rerun_sends_none(
+    world: World,
+) -> None:
+    digest, fake, _, url = world
+    fake.posts = list(DECISION)
+    run_digest(digest)
+
+    assert send_proposal_cards(digest, CARDS) == 1
+
+    channel, attachment = fake.dms[0]
+    assert (len(fake.dms), channel) == (1, f"dm-{BOT}-{CURATOR}")
+    assert attachment["text"].startswith(
+        "**금요일 배포 금지**\n[원문](https://mm.example/devshow/pl/"
+    )
+    assert [a["id"] for a in attachment["actions"]] == ["approve", "reject"]
+    assert sent_nonces(url) == [(True, "sent1")]
+    assert send_proposal_cards(digest, CARDS) == 0
+    assert run_digest(digest) == DigestReport()
+    assert send_proposal_cards(digest, CARDS) == 0
+    assert len(fake.dms) == 1
+
+
+@pytest.mark.db
+def test_a_card_whose_dm_failed_is_sent_on_the_next_sweep_without_a_second_card(
+    world: World,
+) -> None:
+    digest, fake, _, url = world
+    fake.posts = list(DECISION)
+    run_digest(digest)
+    fake.dm_down = True
+
+    assert send_proposal_cards(digest, CARDS) == 0
+    assert sent_nonces(url) == [(False, None)]
+
+    fake.dm_down = False
+    assert send_proposal_cards(digest, CARDS) == 1
+    assert sent_nonces(url) == [(True, "sent1")]
+    assert len(fake.dms) == 1
+
+
+@pytest.mark.db
+def test_a_confidential_store_card_names_the_proposal_by_id_only(world: World) -> None:
+    digest, fake, _, url = world
+    fake.posts = list(DECISION)
+    run_digest(digest)
+    with psycopg.connect(url) as conn:
+        conn.execute("UPDATE store SET confidential = true WHERE id = %s", (STORE,))
+
+    send_proposal_cards(digest, CARDS)
+
+    assert fake.dms[0][1]["text"].startswith("기밀 store 제안 #")
+    assert "금요일" not in fake.dms[0][1]["text"]
+
+
+@pytest.mark.db
+def test_a_bot_without_a_linked_principal_sends_no_cards(world: World) -> None:
+    digest, fake, _, _ = world
+    stranger = Digest(digest.pool, digest.client, digest.extractor, TENANT, "z" * 26)
+
+    assert send_proposal_cards(stranger, CARDS) == 0
+    assert fake.dms == []

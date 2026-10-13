@@ -9,8 +9,9 @@ from nunchi.db import Conn, open_pool
 from nunchi.embed import Embedder, EmbedError, embedder_from_settings
 from nunchi.extract import build_extractor
 from nunchi.mattermost.__main__ import MattermostEnv
+from nunchi.mattermost.cards import CardConfig
 from nunchi.mattermost.client import Mattermost
-from nunchi.mattermost.digest import Digest, DigestLimits, run_digest
+from nunchi.mattermost.digest import Digest, DigestLimits, run_digest, send_proposal_cards
 from nunchi.mattermost.membership import refresh_memberships
 from nunchi.worker.embedding import embed_missing
 from nunchi.worker.freshness import run_once
@@ -39,9 +40,11 @@ def _digest_loop(args: argparse.Namespace) -> int:
         embedder_from_settings(settings),
         DigestLimits(args.digest_max_windows, args.digest_max_chars),
     )
+    cards = CardConfig(env.mm_action_url, env.mm_action_secret.get_secret_value().encode())
     while True:
         sys.stdout.write(f"membership: refreshed {refresh_memberships(digest)}\n")
         sys.stdout.write(f"digest: {run_digest(digest)}\n")
+        sys.stdout.write(f"cards: sent {send_proposal_cards(digest, cards)}\n")
         sys.stdout.flush()
         if args.once:
             return 0
