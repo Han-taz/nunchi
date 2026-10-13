@@ -2,7 +2,8 @@
 -- Statements are copied from db/schema.sql (the schema-drift job compares the two).
 -- Existing reviews are stamped with their memory's current version, so no earlier approval changes meaning.
 ALTER TABLE review ADD COLUMN version integer;
-UPDATE review SET version = m.version FROM memory AS m WHERE m.id = review.memory_id;
+UPDATE review SET version = m.version FROM memory AS m
+WHERE m.id = review.memory_id;
 ALTER TABLE review ALTER COLUMN version SET NOT NULL;
 
 CREATE FUNCTION app_sec.review_before_insert() RETURNS trigger LANGUAGE plpgsql
