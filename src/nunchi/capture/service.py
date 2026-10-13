@@ -10,6 +10,7 @@ from uuid import UUID
 from nunchi.db import Conn
 from nunchi.domain import repo
 from nunchi.domain.models import Frozen, MemoryOrigin, MemoryStatus, SourceRef
+from nunchi.embed import Embedder
 from nunchi.extract import Candidate, ExtractContext, Extractor, to_propose_request
 from nunchi.gate import Verdict, evaluate_pair
 from nunchi.gate.rules import Action
@@ -55,8 +56,11 @@ class Reconfirmed(Frozen):
 CaptureResult = Skipped | Rejected | Created | Reconfirmed
 
 
-def _candidates(conn: Conn, source_text: str, store_id: UUID) -> tuple[Candidate, ...]:
-    hits = repo.search(conn, source_text[:_QUERY_CHARS], [store_id], None, _LIVE)[:_CANDIDATES]
+def _candidates(
+    conn: Conn, source_text: str, store_id: UUID, embedder: Embedder | None
+) -> tuple[Candidate, ...]:
+    hits = repo.search(conn, source_text[:_QUERY_CHARS], [store_id], None, _LIVE, embedder=embedder)
+    hits = hits[:_CANDIDATES]
     if not hits:
         return ()
     rows = conn.execute(
@@ -90,9 +94,13 @@ def _resolve_or_create(conn: Conn, name: str) -> UUID:
 
 
 def capture(
-    conn: Conn, extractor: Extractor, source_text: str, context: CaptureContext
+    conn: Conn,
+    extractor: Extractor,
+    source_text: str,
+    context: CaptureContext,
+    embedder: Embedder | None = None,
 ) -> CaptureResult:
-    candidates = _candidates(conn, source_text, context.store_id)
+    candidates = _candidates(conn, source_text, context.store_id, embedder)
     draft = extractor.extract(
         source_text,
         ExtractContext(

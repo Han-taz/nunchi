@@ -20,6 +20,7 @@ from nunchi.domain.models import (
     SearchHit,
     StoreRole,
 )
+from nunchi.embed import Embedder, embed_query
 
 _MEMORY_COLUMNS = sql.SQL(
     "id, store_id, kind, status, title, body, source_refs, origin, supersedes_id,"
@@ -46,22 +47,29 @@ def index(conn: Conn, store_id: UUID) -> list[MemorySummary]:
         ).fetchall()
 
 
-def search(
+def search(  # noqa: PLR0913 - the filters are the search
     conn: Conn,
     query: str,
     stores: Sequence[UUID] | None,
     kinds: Sequence[MemoryKind] | None,
     statuses: Sequence[MemoryStatus],
+    *,
+    embedder: Embedder | None = None,
 ) -> list[SearchHit]:
+    """Trigram search, fused with vector search when an embedder is given and answers."""
+    vector = embed_query(embedder, query)
     with conn.cursor(row_factory=class_row(SearchHit)) as cur:
         return cur.execute(
             "SELECT id, store_id, kind, title, status, score, stale, last_confirmed_at"
-            " FROM app_sec.search(%s, %s::uuid[], %s::memory_status[], %s::memory_kind[])",
+            " FROM app_sec.search(%s, %s::uuid[], %s::memory_status[], %s::memory_kind[],"
+            " %s::real[], %s)",
             (
                 query,
                 list(stores) if stores is not None else None,
                 [s.value for s in statuses],
                 [k.value for k in kinds] if kinds is not None else None,
+                vector,
+                embedder.model if embedder is not None and vector is not None else None,
             ),
         ).fetchall()
 

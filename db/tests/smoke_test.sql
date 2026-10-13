@@ -1378,7 +1378,7 @@ SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SET LOCAL ROLE app_rw;
 SELECT t.eq('N30f search exposes stale and last_confirmed_at', $q$SELECT stale::text || '/' || (last_confirmed_at < now() - interval '180 days')::text FROM app_sec.search('W1a')$q$, 'true/true');
 ROLLBACK;
--- N31) 임베딩 저장과 워커 채우기 (v1.2 §7): e1,e2,e3 는 벡터 있음, e4 는 없음, e5 는 proposed (롤백되는 트랜잭션 안의 임시 행)
+-- N31) 하이브리드 검색과 임베딩 (v1.2 §5, §7): 벡터는 e1=B, e2=A(RRF 로 A 가 위로), e3=hr, e4=임베딩 없음, e5=proposed (롤백되는 트랜잭션 안의 임시 행)
 BEGIN; RESET ROLE;
 CREATE FUNCTION t.vec(k integer) RETURNS real[] LANGUAGE sql IMMUTABLE AS $$ SELECT array_agg((CASE WHEN i = k THEN 1 ELSE 0 END)::real ORDER BY i) FROM generate_series(1, 512) AS i $$;
 DO $setup$ BEGIN
@@ -1392,8 +1392,19 @@ EXCEPTION WHEN OTHERS THEN NULL;
 END $setup$;
 SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SET LOCAL ROLE app_rw;
+SELECT t.eq('N31a vector only: a query with no shared words finds the row whose vector matches', $q$SELECT string_agg(title, ',') FROM app_sec.search('qqqq', NULL, NULL, NULL, t.vec(1), 'm')$q$, 'Q31 fusion');
+SELECT t.eq('N31b no query vector: the same query finds nothing (trigram only)', $q$SELECT count(*)::text FROM app_sec.search('qqqq')$q$, '0');
+SELECT t.eq('N31c both lists vote: the row that also matches by vector ranks first', $q$SELECT string_agg(right(id::text, 2), ',' ORDER BY score DESC) FROM app_sec.search('Q31 fusion', NULL, NULL, NULL, t.vec(3), 'm') WHERE title = 'Q31 fusion'$q$, 'b2,b1');
+SELECT t.eq('N31d without the vector the tie falls back to id order', $q$SELECT string_agg(right(id::text, 2), ',' ORDER BY score DESC, id) FROM app_sec.search('Q31 fusion') WHERE title = 'Q31 fusion'$q$, 'b1,b2');
+SELECT t.eq('N31e a vector from another model is ignored', $q$SELECT count(*)::text FROM app_sec.search('qqqq', NULL, NULL, NULL, t.vec(1), 'other')$q$, '0');
+SELECT t.eq('N31f alice never sees the hr store embedding, even by its exact vector', $q$SELECT count(*)::text FROM app_sec.search('qqqq', NULL, NULL, NULL, t.vec(2), 'm')$q$, '0');
+SELECT t.eq('N31g alice cannot name the hr store either', $q$SELECT count(*)::text FROM app_sec.search('qqqq', ARRAY['00000000-0000-0000-0000-00000000f002']::uuid[], NULL, NULL, t.vec(2), 'm')$q$, '0');
 SELECT t.err('N31h app_rw reads no embedding table directly', $q$SELECT count(*) FROM memory_embedding$q$, '42501');
 SELECT t.err('N31i app_rw cannot write an embedding', $q$SELECT app_sec.put_embedding('00000000-0000-0000-0000-0000000031b4', 'm', t.vec(4), now())$q$, '42501');
+RESET ROLE;
+SELECT t.ctx('00000000-0000-0000-0000-0000000000b1', NULL);
+SET LOCAL ROLE app_rw;
+SELECT t.eq('N31j the hr curator finds it', $q$SELECT string_agg(title, ',') FROM app_sec.search('qqqq', NULL, NULL, NULL, t.vec(2), 'm')$q$, 'Q31 hr only');
 RESET ROLE;
 DO $g$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nunchi_worker') THEN CREATE ROLE nunchi_worker NOLOGIN; END IF;

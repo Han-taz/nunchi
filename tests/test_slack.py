@@ -349,9 +349,10 @@ def test_main_wires_env_tokens_and_bolt_routes_the_three_events_to_the_handlers(
     monkeypatch.setenv("NUNCHI_TENANT_ID", str(TENANT))
     monkeypatch.setenv("NUNCHI_DATABASE_URL", "postgresql://unused")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("NUNCHI_EMBEDDING_BASE_URL", raising=False)
     monkeypatch.setattr(slack_main, "App", make_app)
     monkeypatch.setattr(
-        slack_main, "Deps", lambda pool, ext, tenant, _c: Deps(pool, ext, tenant, fake)
+        slack_main, "Deps", lambda pool, ext, tenant, _c, emb: Deps(pool, ext, tenant, fake, emb)
     )
     monkeypatch.setattr(slack_main, "open_pool", lambda _settings: slack_db)
     monkeypatch.setattr(

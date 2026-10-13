@@ -15,6 +15,7 @@ from slack_bolt import App
 from nunchi.capture import CaptureContext, CaptureResult, Reconfirmed, Rejected, Skipped, capture
 from nunchi.db import Conn, Pool, request_tx
 from nunchi.domain.models import MemoryOrigin, MemoryStatus, SourceRef
+from nunchi.embed import Embedder
 from nunchi.extract import ExtractionError, Extractor
 
 PIN = "pushpin"
@@ -47,6 +48,7 @@ class Deps:
     extractor: Extractor
     tenant_id: UUID
     client: Any  # slack_sdk WebClient (a fake in tests); every call passes keyword arguments
+    embedder: Embedder | None = None
 
 
 _Dm = tuple[str, str, list[dict[str, Any]]]  # Slack user id, fallback text, blocks
@@ -115,7 +117,7 @@ def _capture(conn: Conn, deps: Deps, event_id: str, text: str, ref: SourceRef) -
     context = CaptureContext(
         store_id=bound[0], origin=MemoryOrigin.INTERNAL, source_refs=(ref,), today=date.today()
     )
-    return _outcome(conn, capture(conn, deps.extractor, text, context), ref.uri)
+    return _outcome(conn, capture(conn, deps.extractor, text, context, deps.embedder), ref.uri)
 
 
 def _outcome(conn: Conn, result: CaptureResult, link: str) -> _Outcome:
