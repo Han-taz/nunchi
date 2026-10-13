@@ -28,9 +28,27 @@ ATTRIBUTE_VARIANTS = {
 }
 
 
+# The bare answer of each gold memory: what a restatement must agree on, in any wording.
+GOLD_VALUES = {
+    "m01": "이민수", "m02": "박민수", "m03": "2027-03-31", "m04": "2027-06-30",
+    "m05": "최지우", "m06": "정하늘", "m07": "매월 25일", "m08": "Postgres",
+    "m09": "Aurora PostgreSQL", "m10": "30초",
+    "m11": "PR 머지→릴리즈 태그→/deploy prod→스모크 테스트",
+    "m12": "배포봇", "m13": "매주 월요일 10시", "m14": "격주 월요일 10시",
+    "m15": "프로파일 다운로드→import→사번+OTP 로그인",
+    "m16": "staging.nunchi.example", "m17": "계정 발급→개발환경 세팅→버디 배정→코드 투어",
+    "m18": "5영업일", "m19": "2명 승인", "m20": "#alerts-prod", "m21": "#oncall-alerts",
+    "m22": "4시간", "m23": "2시간", "m24": "한솔", "m25": "매일 03시, 14일 보관",
+    "m26": "목요일", "m27": "채널 생성→리드 지정→30분 공유→포스트모템", "m28": "90일",
+    "m29": "stg.nunchi.example",
+}  # fmt: skip
+
+
 class OracleExtractor:
-    """Returns the gold key and the first-seen wording of each gold memory, so a restatement
-    carries the identical body the server hashes. A secret message gets a leaky draft on purpose,
+    """Returns the gold key, the gold value and a body for each gold memory. Clean, the body is the
+    first-seen wording, so a restatement carries the identical body the server hashes. Noisy, the
+    body is the message's own wording and the key spellings drift, so only the value still says
+    "same". A secret message gets a leaky draft on purpose,
     so the gate (and not the extractor) is what the run measures for it."""
 
     def __init__(self, messages: list[Message], *, noisy: bool = False) -> None:
@@ -54,11 +72,12 @@ class OracleExtractor:
             )
         if not gold.remember or gold.kind is None or gold.memory is None:
             return None
-        text = self._first[gold.memory]
+        text = gold.filled if self._noisy else self._first[gold.memory]
         return ProposalDraft(
             kind=gold.kind,
             title=text[:_TITLE_CHARS],
             body=text,
+            value=GOLD_VALUES[gold.memory],
             subject_name=self._spell(gold.subject, SUBJECT_VARIANTS, ""),
             attribute=self._spell(gold.attribute, ATTRIBUTE_VARIANTS, gold.subject or ""),
             source_refs=context.source_refs,

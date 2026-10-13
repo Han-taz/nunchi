@@ -4,6 +4,11 @@ from typing import Annotated, Self
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Hybrid search knobs: the vector arm keeps rows at or above this cosine similarity, and RRF
+# fuses the two ranked lists with this k. Change them here only; repo.search defaults to them.
+SEARCH_VECTOR_FLOOR = 0.4
+SEARCH_RRF_K = 60
+
 
 class Settings(BaseSettings):
     """Process configuration, read from NUNCHI_* environment variables.

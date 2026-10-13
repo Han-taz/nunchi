@@ -55,6 +55,11 @@ def _seed(conn: psycopg.Connection[tuple[object, ...]]) -> None:
         )
 
 
+def superuser_url(admin_url: str, app_url: str) -> str:
+    """The admin role's URL for the database that `app_url` (from fresh_database) points at."""
+    return _with(admin_url, database=urlsplit(app_url).path.lstrip("/"))
+
+
 @contextmanager
 def fresh_database(admin_url: str) -> Iterator[str]:
     """Yield a non-superuser URL (so row-level security applies) to a new seeded database."""

@@ -63,6 +63,12 @@ to that entity's id and subject_name to its name. Otherwise set subject_entity_i
 subject_name to the name the message uses. When the property is one of that entity's attributes \
 under other wording (담당자 and 컨택 and PM are one property), copy that attribute exactly. Only \
 listed ids are valid.
+- value is the bare answer to "the subject's attribute is ___": a few words, no sentence, \
+no particles or politeness (attribute "정산 담당자" gives value "김철수"; "점검 주기" gives \
+"매월 1일"; "회의실 위치" gives "3층"). Restating the same fact in other words must give the \
+same value, and a changed fact must give a different one. When a candidate already has the same \
+value, copy its value exactly. For a procedure, value is its step names in order joined by "→", \
+each step one to three words. Must be null for note.
 - valid_from is an ISO date (YYYY-MM-DD) when the message says when the statement starts to hold. \
 Resolve relative dates against today's date given in the user turn. Use null otherwise.
 """
@@ -79,6 +85,7 @@ REPLY_SCHEMA: dict[str, Any] = {
         "subject_name": _NULLABLE_STRING,
         "subject_entity_id": _NULLABLE_STRING,
         "attribute": _NULLABLE_STRING,
+        "value": _NULLABLE_STRING,
         "valid_from": _NULLABLE_STRING,
     },
     "required": [
@@ -90,6 +97,7 @@ REPLY_SCHEMA: dict[str, Any] = {
         "subject_name",
         "subject_entity_id",
         "attribute",
+        "value",
         "valid_from",
     ],
     "additionalProperties": False,
@@ -105,6 +113,7 @@ class _Reply(Frozen):
     subject_name: str | None
     subject_entity_id: str | None = None  # a free string: an id the model garbled matches nothing
     attribute: str | None
+    value: str | None = None  # a reply without it still parses; the key then falls back to the body
     valid_from: date | None
 
 
@@ -175,6 +184,7 @@ class ClaudeExtractor:
                 subject_name=subject_name,
                 subject_entity_id=entity.id if entity else None,
                 attribute=attribute,
+                value=(reply.value or None) if reply.kind is not MemoryKind.NOTE else None,
                 source_refs=context.source_refs,
                 valid_from=reply.valid_from,
                 origin=context.origin,

@@ -330,6 +330,18 @@ N28c	= 기술 담당자/NULL	fail	attribute normalized and conflict cleared
 N29a	= true	fail	curator opens a card
 N29b	= true	fail	opening a card twice returns the same card
 N29c	-> 42501	fail	agent context cannot open a card
+N40	(ok)	fail	first value with spaces is accepted
+N40a	= active/이민수	fail	value stored normalized (lower, trimmed)
+N41	(ok)	fail	same key and value in other words inserts no row
+N41a	= 1/reconfirm	fail	reconfirm by value, not by body
+N42	(ok)	fail	other value is accepted as a proposal
+N42a	= true/proposed	fail	other value conflicts with the live row
+N43	(ok)	fail	legacy row without a value
+N43a	= active	fail	legacy row goes live
+N44	(ok)	fail	restatement with a value on a legacy row
+N44a	= 1/reconfirm/아무 값	fail	legacy falls back to body hash and gets its value
+N45	(ok)	fail	other body on a legacy row
+N45a	= true	fail	legacy other body conflicts
 N18a	(ok)	fail
 N18b	(ok)	fail
 N18c	(ok)	fail

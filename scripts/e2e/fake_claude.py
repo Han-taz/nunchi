@@ -19,6 +19,7 @@ def reply_for(user_content: str) -> dict[str, object]:
             "body": None,
             "subject_name": None,
             "attribute": None,
+            "value": None,
             "valid_from": None,
         }
     return {
@@ -29,6 +30,7 @@ def reply_for(user_content: str) -> dict[str, object]:
         "body": source,
         "subject_name": match["subject"],
         "attribute": "담당자",
+        "value": match["name"],
         "valid_from": None,
     }
 
