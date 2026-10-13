@@ -16,6 +16,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.server import Settings as FastMcpSettings
+from mcp.server.transport_security import TransportSecuritySettings
 from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
 
@@ -54,6 +55,18 @@ def _wrap(memory_body: str | None, origin: str, status: str) -> dict[str, Any]:
     return {"type": "memory", "origin": origin, "status": status, "body": memory_body}
 
 
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+
+
+def transport_security(allowed_hosts: tuple[str, ...]) -> TransportSecuritySettings:
+    """DNS-rebinding guard: Host must name an allowed host on any port; loopback always passes."""
+    hosts = tuple(dict.fromkeys((*LOOPBACK_HOSTS, *allowed_hosts)))
+    return TransportSecuritySettings(
+        allowed_hosts=[f"{h}:*" for h in hosts] + list(hosts),
+        allowed_origins=[f"http://{h}:*" for h in hosts] + [f"http://{h}" for h in hosts],
+    )
+
+
 def build_server(  # noqa: PLR0913, PLR0917 - the optional services are injected for tests
     pool: Pool,
     verifier: TokenVerifier,
@@ -61,12 +74,14 @@ def build_server(  # noqa: PLR0913, PLR0917 - the optional services are injected
     extractor: Extractor | None = None,
     embedder: Embedder | None = None,
     judge: ValueJudge | None = None,
+    allowed_hosts: tuple[str, ...] = (),
 ) -> FastMCP:
     extractor = extractor if extractor is not None else build_extractor()
     judge = judge if judge is not None else build_judge()
     mcp = FastMCP(
         "nunchi",
         token_verifier=BearerVerifier(verifier),
+        transport_security=transport_security(allowed_hosts),
         auth=AuthSettings(
             issuer_url=public_url,
             resource_server_url=public_url,

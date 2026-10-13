@@ -380,3 +380,8 @@ G9e	= true	fail	enable starts at now
 G9f	(ok)	fail	contributor advances
 G9g	= true	fail	cursor is monotone
 G9h	-> 42501	fail	reader cannot advance
+G10a	-> 42501	fail	reader cannot replace members
+G10b	-> 22023	fail	empty list refused
+G10c	(ok)	fail	contributor replaces members
+G10d	= U5X1=false,U5X2=true	fail	snapshot equals the new list
+G10e	-> 42501	fail	unknown binding refused

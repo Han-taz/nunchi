@@ -15,6 +15,11 @@ if __name__ == "__main__":
         TokenVerifier(OidcSettings()),
         os.environ.get("NUNCHI_MCP_PUBLIC_URL", "http://127.0.0.1:8000"),
         embedder=embedder_from_settings(settings),
+        allowed_hosts=tuple(
+            h.strip()
+            for h in os.environ.get("NUNCHI_MCP_ALLOWED_HOSTS", "localhost").split(",")
+            if h.strip()
+        ),
     )
     server.settings.host = os.environ.get("NUNCHI_MCP_HOST", "127.0.0.1")
     server.settings.port = int(os.environ.get("NUNCHI_MCP_PORT", "8000"))

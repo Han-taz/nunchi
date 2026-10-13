@@ -11,6 +11,7 @@ from nunchi.extract import build_extractor
 from nunchi.mattermost.__main__ import MattermostEnv
 from nunchi.mattermost.client import Mattermost
 from nunchi.mattermost.digest import Digest, DigestLimits, run_digest
+from nunchi.mattermost.membership import refresh_memberships
 from nunchi.worker.embedding import embed_missing
 from nunchi.worker.freshness import run_once
 
@@ -39,6 +40,7 @@ def _digest_loop(args: argparse.Namespace) -> int:
         DigestLimits(args.digest_max_windows, args.digest_max_chars),
     )
     while True:
+        sys.stdout.write(f"membership: refreshed {refresh_memberships(digest)}\n")
         sys.stdout.write(f"digest: {run_digest(digest)}\n")
         sys.stdout.flush()
         if args.once:

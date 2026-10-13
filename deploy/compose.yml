@@ -86,6 +86,7 @@ services:
       NUNCHI_MCP_HOST: 0.0.0.0
       NUNCHI_MCP_PORT: "8000"
       NUNCHI_MCP_PUBLIC_URL: http://localhost:${MCP_PORT:-8000}
+      NUNCHI_MCP_ALLOWED_HOSTS: ${NUNCHI_MCP_ALLOWED_HOSTS:-localhost}
     ports:
       - "${MCP_PORT:-8000}:8000"
     healthcheck:
@@ -120,6 +121,24 @@ services:
       NUNCHI_TENANT_ID: ${NUNCHI_TENANT_ID:-00000000-0000-4000-8000-000000000001}
     ports:
       - "${MM_ACTION_PORT:-8787}:8787"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # opt-in with the bot: refreshes room membership snapshots, then digests bound channels.
+  # It acts as the bot principal under row-level security, so it connects as app_rw (the
+  # nunchi_worker role has no table or begin_request access).
+  digest:
+    <<: *app
+    profiles: ["mattermost"]
+    command: ["python", "-m", "nunchi.worker", "--digest", "--every", "600"]
+    environment:
+      <<: *app-env
+      MM_BOT_TOKEN: ${MM_BOT_TOKEN:-}
+      MM_URL: ${MM_URL:-http://host.docker.internal:8065}
+      MM_SITE_URL: ${MM_SITE_URL:-}
+      MM_ACTION_SECRET: ${MM_ACTION_SECRET:-}
+      NUNCHI_TENANT_ID: ${NUNCHI_TENANT_ID:-00000000-0000-4000-8000-000000000001}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

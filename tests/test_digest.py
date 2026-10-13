@@ -13,6 +13,7 @@ from nunchi.extract import ExtractContext, ExtractionError, FailureReason, Propo
 from nunchi.extract.claude import SYSTEM_PROMPT, render_user_content
 from nunchi.mattermost.client import Mattermost
 from nunchi.mattermost.digest import Digest, DigestLimits, DigestReport, run_digest
+from nunchi.mattermost.membership import refresh_memberships
 from nunchi.worker import __main__ as worker
 from tests.conftest import STORE, TENANT, USER
 
@@ -52,6 +53,7 @@ class FakeMattermost:
     def __init__(self) -> None:
         self.posts: list[dict[str, Any]] = []
         self.requested: list[str] = []
+        self.members: dict[str, list[str]] = {}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:  # noqa: PLR0911
         path = request.url.path.removeprefix("/api/v4")
@@ -66,6 +68,13 @@ class FakeMattermost:
             return httpx.Response(
                 200, json={"order": [p["id"] for p in rows], "posts": {p["id"]: p for p in rows}}
             )
+        if path.startswith("/channels/") and path.endswith("/members"):
+            channel = path.split("/")[2]
+            if channel not in self.members:
+                return httpx.Response(500, json={})
+            page, per = int(query["page"]), int(query["per_page"])
+            ids = self.members[channel][page * per : (page + 1) * per]
+            return httpx.Response(200, json=[{"channel_id": channel, "user_id": u} for u in ids])
         if path.startswith("/channels/") and path.split("/")[2] not in CHANNELS:
             return httpx.Response(404, json={})
         if path.startswith("/channels/"):
@@ -77,9 +86,13 @@ class FakeMattermost:
             rows = [p for p in self.posts if root in (p["id"], p["root_id"])]
             return httpx.Response(200, json={"order": [], "posts": {p["id"]: p for p in rows}})
         if path == "/users/ids":
-            names = {ALICE: "minji.kim", BOB: "junho.park"}
+            names = {ALICE: "minji.kim", BOB: "junho.park", BOT: "nunchi"}
             return httpx.Response(
-                200, json=[{"id": i, "username": names[i]} for i in json.loads(request.content)]
+                200,
+                json=[
+                    {"id": i, "username": names[i], "remote_id": "peer" if i == BOB else ""}
+                    for i in json.loads(request.content)
+                ],
             )
         if path == "/users/me":
             return httpx.Response(200, json={"id": BOT, "username": "nunchi"})
@@ -379,6 +392,15 @@ def test_the_client_pages_until_a_page_is_short() -> None:
     assert [q for q in fake.requested] == [f"/channels/{ROOM}/posts"] * 3
 
 
+def test_the_client_pages_channel_members_until_a_page_is_short() -> None:
+    fake = FakeMattermost()
+    fake.members = {ROOM: [ALICE, BOB, BOT]}
+    client = Mattermost("http://mm", "tok", "https://mm.example", httpx.MockTransport(fake))
+
+    assert client.channel_member_ids(ROOM, per_page=2) == [ALICE, BOB, BOT]
+    assert fake.requested == [f"/channels/{ROOM}/members"] * 2
+
+
 def test_the_window_instruction_reaches_the_extractor_prompt() -> None:
     context = ExtractContext(
         origin=MemoryOrigin.INTERNAL,
@@ -417,8 +439,9 @@ def test_worker_digest_flag_runs_the_digest_every_period(
     assert worker.main(["--digest", "--once"]) == 0
 
     assert sleeps == [600.0]
-    assert first == f"digest: {DigestReport(windows=1, created=1)}\n"
-    assert capsys.readouterr().out == f"digest: {DigestReport()}\n"
+    refreshed = "membership: refreshed 0\n"
+    assert first == refreshed + f"digest: {DigestReport(windows=1, created=1)}\n"
+    assert capsys.readouterr().out == refreshed + f"digest: {DigestReport()}\n"
 
 
 @pytest.mark.db
@@ -442,6 +465,15 @@ def test_an_unlinked_bot_reads_nothing(world: World) -> None:
 
 
 @pytest.mark.db
+def test_an_unlinked_bot_refreshes_no_membership(world: World) -> None:
+    digest, fake, extractor, _ = world
+    stranger = Digest(digest.pool, digest.client, extractor, TENANT, "z" * 26)
+
+    assert refresh_memberships(stranger) == 0
+    assert fake.requested == []
+
+
+@pytest.mark.db
 def test_a_later_window_restating_the_live_decision_only_reconfirms_it(world: World) -> None:
     digest, fake, _, url = world
     fake.posts = list(DECISION)
@@ -451,3 +483,57 @@ def test_a_later_window_restating_the_live_decision_only_reconfirms_it(world: Wo
 
     assert run_digest(digest) == DigestReport(windows=1, stored_nothing=1)
     assert len(rows(url)) == 1
+
+
+def containment(url: str, channel: str = ROOM) -> tuple[bool, int]:
+    with psycopg.connect(url) as conn:
+        row = conn.execute(
+            "SELECT c.ok, c.external_members FROM room_binding AS b,"
+            " LATERAL app_sec.room_containment(b.id) AS c WHERE b.channel_id = %s",
+            (channel,),
+        ).fetchone()
+    assert row is not None
+    return bool(row[0]), int(row[1])
+
+
+@pytest.mark.db
+def test_refresh_makes_a_stale_snapshot_contained_again_and_flags_remote_members(
+    world: World,
+) -> None:
+    digest, fake, _extractor, url = world
+    with psycopg.connect(url) as conn:
+        conn.execute(
+            "INSERT INTO principal_identity (platform, platform_user_id, tenant_id, principal_id,"
+            " link_quality) VALUES ('mattermost', %s, %s, %s, 'scim')",
+            (ALICE, TENANT, CUR),
+        )
+        conn.execute("UPDATE room_member SET synced_at = now() - interval '2 hours'")
+    assert containment(url) == (False, 0)
+    fake.members = {ROOM: [ALICE, BOT, BOB], OFF: [ALICE, BOT], DM: [ALICE]}
+
+    assert refresh_memberships(digest) == 3
+
+    assert containment(url) == (True, 1)
+    with psycopg.connect(url) as conn:
+        members = conn.execute(
+            "SELECT platform_user_id, is_external FROM room_member WHERE channel_id = %s"
+            " ORDER BY platform_user_id",
+            (ROOM,),
+        ).fetchall()
+    assert members == [(ALICE, False), (BOT, False), (BOB, True)]
+
+
+@pytest.mark.db
+def test_an_unreadable_or_empty_channel_keeps_its_old_snapshot(world: World) -> None:
+    digest, fake, _extractor, url = world
+    fake.members = {ROOM: [], DM: [ALICE]}  # OFF answers 500
+
+    assert refresh_memberships(digest) == 1
+
+    with psycopg.connect(url) as conn:
+        kept = conn.execute(
+            "SELECT channel_id, platform_user_id FROM room_member WHERE channel_id IN (%s, %s)"
+            " ORDER BY channel_id",
+            (ROOM, OFF),
+        ).fetchall()
+    assert kept == [(ROOM, ALICE), (OFF, ALICE)]
