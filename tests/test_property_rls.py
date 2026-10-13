@@ -74,19 +74,10 @@ def worlds(draw: st.DrawFn) -> World:
         if groups
         else []
     )
-    grants = frozenset(
-        draw(
-            st.lists(
-                st.tuples(st.integers(0, stores - 1), st.integers(0, total - 1), st.integers(0, 2)),
-                max_size=8,
-            )
-        )
-    )
     # one role per (store, principal): the table's primary key
-    seen: dict[tuple[int, int], int] = {}
-    for s, p, r in sorted(grants):
-        seen.setdefault((s, p), r)
-    grants = frozenset((s, p, r) for (s, p), r in seen.items())
+    pairs = st.tuples(st.integers(0, stores - 1), st.integers(0, total - 1))
+    chosen = draw(st.dictionaries(pairs, st.integers(0, 2), max_size=8))
+    grants = frozenset((s, p, r) for (s, p), r in chosen.items())
     mems = []
     for _ in range(draw(st.integers(0, 6))):
         store = draw(st.integers(0, stores - 1))
