@@ -1,0 +1,96 @@
+name: nunchi
+
+x-app: &app
+  build:
+    context: ..
+  image: nunchi:dev
+  restart: "no"
+  environment: &app-env
+    NUNCHI_DATABASE_URL: postgres://app_rw:${APP_RW_PASSWORD}@postgres:5432/postgres
+    NUNCHI_OIDC_ISSUERS: >-
+      {"${DEV_ISSUER}":{"tenant_id":"00000000-0000-4000-8000-000000000001","jwks_url":"http://jwks:9100/jwks.json"}}
+    NUNCHI_MIGRATIONS_DIR: /app/db/migrations
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  depends_on:
+    seed:
+      condition: service_completed_successfully
+    jwks:
+      condition: service_started
+
+services:
+  jwks:
+    image: nunchi:dev
+    command: ["python", "-m", "http.server", "9100", "--directory", "/jwks"]
+    volumes:
+      - ./.dev/jwks:/jwks:ro
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *app
+    command: ["python", "-m", "nunchi.migrate"]
+    environment:
+      NUNCHI_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      NUNCHI_MIGRATIONS_DIR: /app/db/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed:
+    image: postgres:16
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      APP_RW_PASSWORD: ${APP_RW_PASSWORD}
+    volumes:
+      - ./seed.sql:/seed.sql:ro
+    entrypoint:
+      - sh
+      - -ec
+      - >-
+        psql -h postgres -U postgres -v ON_ERROR_STOP=1
+        -c "ALTER ROLE app_rw PASSWORD '$$APP_RW_PASSWORD'" -f /seed.sql
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    <<: *app
+    command: ["uvicorn", "--factory", "nunchi.api.serve:create", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), 2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mcp:
+    <<: *app
+    command: ["python", "-m", "nunchi.mcp"]
+    environment:
+      <<: *app-env
+      NUNCHI_MCP_HOST: 0.0.0.0
+      NUNCHI_MCP_PORT: "8000"
+      NUNCHI_MCP_PUBLIC_URL: http://localhost:${MCP_PORT:-8000}
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "nunchi.worker", "--every", "3600"]
+    environment:
+      NUNCHI_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+    restart: unless-stopped

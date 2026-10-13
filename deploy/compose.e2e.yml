@@ -1,0 +1,23 @@
+# Adds a fake Anthropic endpoint so the e2e run is deterministic and offline.
+services:
+  fake-claude:
+    image: nunchi:dev
+    command: ["python", "/fake_claude.py"]
+    volumes:
+      - ../scripts/e2e/fake_claude.py:/fake_claude.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9000), 2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+  mcp:
+    environment:
+      ANTHROPIC_API_KEY: e2e-not-a-secret
+      ANTHROPIC_BASE_URL: http://fake-claude:9000
+    depends_on:
+      fake-claude:
+        condition: service_healthy
