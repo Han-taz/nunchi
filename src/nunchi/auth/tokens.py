@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 import jwt
@@ -55,25 +55,29 @@ class TokenVerifier:
             for iss, cfg in settings.issuers.items()
         }
 
+    def _verify_against_issuers(self, token: str) -> tuple[dict[str, Any], str]:
+        """Accept the token only if some configured issuer's JWKS verifies it and `iss` equals that
+        issuer. The token's own claims are never read before a signature has been checked."""
+        for iss, client in self._jwks.items():
+            try:
+                key = client.get_signing_key_from_jwt(token).key
+                claims = jwt.decode(
+                    token,
+                    key,
+                    algorithms=list(ALGORITHMS),
+                    audience=self._settings.audience,
+                    issuer=iss,
+                    options={"require": ["exp", "iss", "aud", "sub"]},
+                )
+            except jwt.PyJWTError:
+                continue
+            return claims, iss
+        msg = "token not verified by any configured issuer"
+        raise AuthError(msg)
+
     def verify(self, token: str) -> Subject:
         """Check signature, algorithm, iss, aud, exp and nbf. Raise AuthError on any failure."""
-        try:
-            # the unverified iss only selects which JWKS to use; decode() then enforces it
-            iss = jwt.decode(token, options={"verify_signature": False}).get("iss")
-            if not isinstance(iss, str) or iss not in self._settings.issuers:
-                msg = "unknown issuer"
-                raise AuthError(msg)
-            key = self._jwks[iss].get_signing_key_from_jwt(token).key
-            claims = jwt.decode(
-                token,
-                key,
-                algorithms=list(ALGORITHMS),
-                audience=self._settings.audience,
-                issuer=iss,
-                options={"require": ["exp", "iss", "aud", "sub"]},
-            )
-        except jwt.PyJWTError as exc:
-            raise AuthError(type(exc).__name__) from exc
+        claims, iss = self._verify_against_issuers(token)
         sub = claims["sub"]
         if not isinstance(sub, str) or not sub:
             msg = "sub must be a non-empty string"

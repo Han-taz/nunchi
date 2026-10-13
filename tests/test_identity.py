@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Callable
 
 import psycopg
 import pytest
@@ -37,19 +38,20 @@ def test_inactive_principal_is_rejected(pool: Pool, fresh_db: str) -> None:
         authenticate(pool, j.verifier(TENANT), j.mint(str(USER)), None)
 
 
-@pytest.mark.parametrize(
-    ("bearer", "agent"),
-    [
-        (None, None),
-        ("junk", None),
-        (j.mint(str(USER)), "junk"),
-        (j.mint(str(USER)), j.mint(str(OTHER))),
-        (j.mint(str(AGENT)), None),
-        (j.mint(str(USER), iss=j.ISSUER_B), None),
-        (j.mint(str(USER)), j.mint(str(AGENT), iss=j.ISSUER_B)),
-    ],
-)
-def test_authentication_failures(pool: Pool, bearer: str | None, agent: str | None) -> None:
+BAD_CREDENTIALS: dict[str, Callable[[], tuple[str | None, str | None]]] = {
+    "no bearer": lambda: (None, None),
+    "junk bearer": lambda: ("junk", None),
+    "junk agent token": lambda: (j.mint(str(USER)), "junk"),
+    "agent token names a user": lambda: (j.mint(str(USER)), j.mint(str(OTHER))),
+    "bearer names an agent": lambda: (j.mint(str(AGENT)), None),
+    "user from the other issuer": lambda: (j.mint(str(USER), iss=j.ISSUER_B), None),
+    "agent from the other issuer": lambda: (j.mint(str(USER)), j.mint(str(AGENT), iss=j.ISSUER_B)),
+}
+
+
+@pytest.mark.parametrize("name", sorted(BAD_CREDENTIALS))
+def test_authentication_failures(pool: Pool, name: str) -> None:
+    bearer, agent = BAD_CREDENTIALS[name]()
     with pytest.raises(AuthError):
         authenticate(pool, j.verifier(TENANT, TENANT_B), bearer, agent)
 

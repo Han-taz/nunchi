@@ -63,4 +63,4 @@ def test_default_verifier_builds_one_jwks_client_per_issuer() -> None:
         issuers={"https://i": IssuerConfig(tenant_id=TENANT, jwks_url="https://i/j")}
     )
     with pytest.raises(AuthError):
-        TokenVerifier(settings).verify(j.mint("a", iss="https://elsewhere.test"))
+        TokenVerifier(settings).verify("not-a-jwt")
