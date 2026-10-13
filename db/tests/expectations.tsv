@@ -298,6 +298,9 @@ N21a	= 00000000-0000-0000-0000-0000000e0a01	fail	alias A Corp resolves
 N21b	= 00000000-0000-0000-0000-0000000e0a01	fail	alias 에이사 resolves to the same entity
 N21c	= NULL	fail	unknown name
 N21d	-> 23505	fail	alias unique per tenant after normalization
+N21e	= true	fail	create_entity makes an entity
+N21g	= true	fail	create_entity then resolve_entity finds it
+N21f	= 00000000-0000-0000-0000-0000000e0a01/1	fail	create_entity is idempotent on an existing alias
 N22	-> 23505	fail	partial unique index blocks a second live row
 N22b	(ok)	fail	same key in another store is allowed
 N23	(ok)	fail	same key and value inserts no row
