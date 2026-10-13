@@ -6,9 +6,14 @@
 # Lines are added + deleted, counted against the merge base, with repository
 # attributes ignored so a .gitattributes in the PR cannot hide a file.
 #
-#   docs/research/** and docs/reviews/**   real *.md only is exempt (reference
-#                                          prose). A chained extension such as
-#                                          .sql.md or .py.md is not exempt.
+#   docs/research/** and docs/reviews/**   *.md is exempt from the line budget
+#                                          only when it is text: git gives numeric
+#                                          counts and the blob is valid UTF-8 with
+#                                          no NUL byte. A binary renamed .md is
+#                                          sized like any binary. A second
+#                                          extension (.sql.md, .py.md, .s-ql.md,
+#                                          ..md) is not exempt unless it is all
+#                                          digits (gatemem-2606.18829.md).
 #   lock files                             exempt only when the manifest it is
 #                                          generated from changed in the same PR
 #                                          (uv.lock needs pyproject.toml)
@@ -19,7 +24,8 @@
 # bytes are capped too, measured from the blob at HEAD:
 #   any file                               at most 512 KB (lock files that pass
 #                                          their manifest rule are exempt)
-#   all non-exempt files together          at most 1 MiB
+#   all changed files together             at most 1 MiB, exempt .md included
+#                                          (exemption covers the line budget only)
 #
 # There is no bypass. A PR over the limit must be split.
 set -euo pipefail
@@ -40,14 +46,24 @@ git_diff() {
     diff --no-ext-diff --no-textconv --no-renames "$@"
 }
 
-# "<bytes>\t<path>" for every added or modified file, sized from its HEAD blob.
+# "<bytes> <t|b>\t<path>" for every added or modified file, sized from its HEAD
+# blob. t marks a blob that is valid UTF-8 without NUL bytes.
 sizes="$(mktemp)"
 trap 'rm -f "$sizes"' EXIT
 git_diff --raw -z --no-abbrev --diff-filter=d "$base...$head" |
   while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
     read -r _ mode _ sha _ <<<"${meta#:}"
-    if [ "$mode" = 160000 ]; then size=0; else size=$(git cat-file -s "$sha"); fi
-    printf '%s\t%s\n' "$size" "$path"
+    kind=b
+    if [ "$mode" = 160000 ]; then
+      size=0
+    else
+      size=$(git cat-file -s "$sha")
+      if [ "$(git cat-file blob "$sha" | tr -d '\0' | wc -c)" -eq "$size" ] &&
+        git cat-file blob "$sha" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+        kind=t
+      fi
+    fi
+    printf '%s %s\t%s\n' "$size" "$kind" "$path"
   done >"$sizes"
 
 result=$(git_diff --numstat -z "$base...$head" | tr '\0' '\n' |
@@ -55,7 +71,9 @@ result=$(git_diff --numstat -z "$base...$head" | tr '\0' '\n' |
     BEGIN {
       while ((getline line < sizes) > 0) {
         tab = index(line, "\t")
-        bytes[substr(line, tab + 1)] = substr(line, 1, tab - 1) + 0
+        split(substr(line, 1, tab - 1), sk, " ")
+        bytes[substr(line, tab + 1)] = sk[1] + 0
+        kind[substr(line, tab + 1)] = sk[2]
       }
     }
     $0 !~ /^([0-9]+|-)\t([0-9]+|-)\t/ { print "BINARY malformed numstat record: " $0; bad = 1; next }
@@ -78,8 +96,10 @@ result=$(git_diff --numstat -z "$base...$head" | tr '\0' '\n' |
         if (path == "uv.lock" && "pyproject.toml" in changed) continue
         size = bytes[path] + 0
         if (size > file_cap) { print "BYTES " path " is " size " bytes (file cap " file_cap ")"; bad = 1; continue }
-        if (path ~ /^docs\/(research|reviews)\/.*\.md$/ && path !~ /\.[A-Za-z][A-Za-z0-9_]*\.md$/) continue
         total_bytes += size
+        base = path; sub(/^.*\//, "", base)
+        if (path ~ /^docs\/(research|reviews)\/.*\.md$/ && add[i] != "-" && kind[path] == "t" &&
+            (base !~ /\.[^.]*\.md$/ || base ~ /\.[0-9]+\.md$/)) continue
         if (add[i] == "-") {
           if (path ~ /\.(png|jpg|gif|svg|pdf|ico)$/) {
             units = int((size + 10239) / 10240); if (units < 1) units = 1

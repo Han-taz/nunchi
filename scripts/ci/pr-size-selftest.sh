@@ -112,6 +112,42 @@ huge_md() {
   mkdir -p docs/research
   head -c 600000 /dev/zero | tr '\0' 'a' > docs/research/huge.md
 }
+binary_md() {
+  mkdir -p docs/research
+  { printf '\0'; head -c 100000 /dev/zero; } > docs/research/payload.md
+}
+late_nul_md() {
+  mkdir -p docs/research
+  { seq 1 5000; printf '\0'; } > docs/research/late.md
+}
+invalid_utf8_md() {
+  mkdir -p docs/research
+  { seq 1 5000; printf '\377\376\n'; } > docs/research/latin.md
+}
+binary_md_big() {
+  mkdir -p docs/research
+  for i in 1 2 3 4 5 6; do { printf '\0'; head -c 500000 /dev/zero; } > "docs/research/p$i.md"; done
+}
+ten_big_md() {
+  mkdir -p docs/research
+  for i in 1 2 3 4 5 6 7 8 9 10; do head -c 500000 /dev/zero | tr '\0' 'a' | fold -w 100 > "docs/research/n$i.md"; done
+}
+two_big_md_ok() {
+  mkdir -p docs/research
+  for i in 1 2; do head -c 400000 /dev/zero | tr '\0' 'a' | fold -w 100 > "docs/research/n$i.md"; done
+}
+double_dot_md() {
+  mkdir -p docs/research
+  seq 1 5000 > docs/research/x.sql..md
+}
+hyphen_ext_md() {
+  mkdir -p docs/research
+  seq 1 5000 > docs/research/x.s-ql.md
+}
+digit_ext_md() {
+  mkdir -p docs/research
+  seq 1 5000 > docs/research/x.1sql.md
+}
 big_png() { { printf '\211PNG\0\0'; head -c 102400 /dev/zero; } > big.png; }
 big_png_ok() { { printf '\211PNG\0\0'; head -c 30000 /dev/zero; } > mid.png; }
 many_big_pngs() {
@@ -144,4 +180,13 @@ case_ "600 KB .md exceeds the file cap" 1 huge_md "file cap"
 case_ "100 KB png counts 550 lines" 0 big_png "lines after exemptions: 550"
 case_ "30 KB png counts 150 lines" 0 big_png_ok "lines after exemptions: 150"
 case_ "twenty 100 KB pngs exceed the limit" 1 many_big_pngs "Split the PR"
+case_ "NUL-byte file renamed .md under docs/research" 1 binary_md "binary file not on the allowlist"
+case_ "NUL after 8000 bytes in a .md (git sees text)" 1 late_nul_md "Split the PR"
+case_ "invalid UTF-8 .md with 5000 lines" 1 invalid_utf8_md "Split the PR"
+case_ "six 500 KB binary .md files" 1 binary_md_big "total cap"
+case_ "ten 500 KB .md files exceed the total cap" 1 ten_big_md "total cap"
+case_ "two 400 KB .md files fit the total cap" 0 two_big_md_ok
+case_ "5000-line x.sql..md" 1 double_dot_md "Split the PR"
+case_ "5000-line x.s-ql.md" 1 hyphen_ext_md "Split the PR"
+case_ "5000-line x.1sql.md" 1 digit_ext_md "Split the PR"
 echo "pr-size self-test ok"
