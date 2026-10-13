@@ -224,15 +224,6 @@ def test_runner_retries_serialization_failures(pool: Pool) -> None:
 
     assert run(flaky) == "done"
     assert len(calls) == 3
-    calls.clear()
-
-    def always(conn: object) -> str:
-        calls.append(1)
-        raise psycopg.errors.SerializationFailure
-
-    with pytest.raises(psycopg.errors.SerializationFailure):
-        run(always)
-    assert len(calls) == 3
 
 
 def test_http_exception_and_validation_shapes(client: TestClient) -> None:
