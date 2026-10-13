@@ -27,6 +27,9 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- 앱이 부를 수 있는 함수는 파일 끝의 명시적 GRANT EXECUTE 목록이 전부다 (P3 이 목록을 테스트로 고정한다).
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM public;
 
+-- pg_trgm 의 연산자 함수도 이 기본값 아래에서 만들어진다(마이그레이션 0009 와 같은 상태).
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- ── 앱 접속 역할: LOGIN NOBYPASSRLS NOINHERIT (클러스터 전역 역할이라 이미 있으면 속성을 맞춘다) ──
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_rw') THEN
@@ -150,8 +153,6 @@ CREATE TABLE memory (
   version integer NOT NULL DEFAULT 1,              -- 낙관적 잠금
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  search_tsv tsvector GENERATED ALWAYS AS
-  (to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(body, ''))) STORED,
   tier approval_tier NOT NULL DEFAULT 'one_curator',  -- 요청 컨텍스트가 있는 INSERT 에서 risk_tier() 가 정한다. 이후 불변
   conflict_with uuid REFERENCES memory (id),            -- 같은 키의 살아있는 행 (서버 결정: memory_bi2k_key)
   subject_id uuid,                                      -- 키 = (subject_id, attribute). note 는 키가 없다
@@ -170,7 +171,7 @@ CREATE TABLE memory (
 );
 
 CREATE INDEX memory_store_status_idx ON memory (store_id, status);
-CREATE INDEX memory_search_idx ON memory USING gin (search_tsv);
+CREATE INDEX memory_search_idx ON memory USING gin ((title || ' ' || coalesce(body, '')) gin_trgm_ops);
 CREATE INDEX memory_sources_idx ON memory USING gin (source_refs jsonb_path_ops);  -- 역방향 계보 조회
 CREATE INDEX memory_hash_idx ON memory (store_id, content_hash);
 -- 한 스토어 안에서 키마다 살아 있는 기억은 최대 하나다. 교체는 decide() 가 이전 행을 먼저 superseded 로 바꾼 뒤 새 행을 활성화한다
@@ -1270,11 +1271,12 @@ LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   LIMIT 1
 $$;
 
--- ── 검색: RLS 아래에서는 @@ 가 non-LEAKPROOF 라 GIN 인덱스를 못 쓴다 (N10) ──
--- 인덱스를 쓰는 SECURITY DEFINER 함수로 제공하고, memory_read 정책과 같은 가시성 규칙을 my_stores() 로 직접 적용한다.
--- websearch_to_tsquery 비용은 항 수에 제곱으로 늘어난다(30k 항에 CPU 9.6초).
--- 1000자를 넘거나 tsquery 노드(항과 연산자)가 64개를 넘으면 22023 으로 거부한다.
--- 공백 분리 항 수는 NBSP·쉼표 구분을 못 세므로 노드 수로 센다.
+-- ── 검색: pg_trgm (v1.2 §5) ──
+-- 한국어는 조사가 붙고 띄어쓰기가 흔들려서 simple FTS 가 '담당자' 로 '담당자는' 을 못 찾는다. trigram 은 부분 문자열로 맞는다.
+-- 질의는 두 가지로 맞춘다: 원문, 그리고 공백을 뺀 형태('배포 절차' 로 '배포절차는' 을 찾기 위해). 둘 중 하나가 word_similarity 0.3 이상이면 후보다.
+-- 점수 = word_similarity 의 큰 쪽 × 상태 가중치(provisional 0.7, 그 밖 1.0). 인덱스는 title || ' ' || body 식 하나에 건다.
+-- RLS 아래에서는 연산자가 non-LEAKPROOF 라 인덱스를 못 쓴다(N10). 그래서 SECURITY DEFINER 함수로 제공하고
+-- memory_read 정책과 같은 가시성 규칙을 my_stores() 로 직접 적용한다. 1000자를 넘기면 22023 으로 거부한다.
 -- 기본 status 는 active 만이다. 가시성 규칙이 정책과 어긋나지 않는지는 smoke_test 의 N10 이 사용자별로 비교한다.
 -- 결과는 점수 순 50건까지. 본문은 돌려주지 않고 id 로 RLS 아래에서 다시 읽는다.
 CREATE FUNCTION app_sec.search(
@@ -1285,22 +1287,27 @@ CREATE FUNCTION app_sec.search(
 ) RETURNS TABLE (id uuid, store_id uuid, kind memory_kind, title text, status memory_status, score real)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 #variable_conflict use_column
-DECLARE v_tsq tsquery;
+DECLARE v_q text; v_squeezed text; v_old_threshold text;
 BEGIN
   IF length(p_query) > 1000 THEN
     RAISE EXCEPTION 'search query too long: at most 1000 characters' USING ERRCODE = '22023';
   END IF;
-  v_tsq := websearch_to_tsquery('simple', p_query);
-  IF numnode(v_tsq) > 64 THEN
-    RAISE EXCEPTION 'search query too complex: at most 64 tsquery nodes' USING ERRCODE = '22023';
+  v_q := btrim(p_query);
+  v_squeezed := regexp_replace(v_q, '\s+', '', 'g');
+  IF v_squeezed = '' THEN
+    RETURN;
   END IF;
+  v_old_threshold := coalesce(current_setting('pg_trgm.word_similarity_threshold', true), '0.6');
+  PERFORM set_config('pg_trgm.word_similarity_threshold', '0.3', true);
   RETURN QUERY
-  WITH q AS (SELECT v_tsq AS tsq)
-    SELECT m.id, m.store_id, m.kind, m.title, m.status, ts_rank(m.search_tsv, q.tsq) AS score
-    FROM q, memory AS m
+    SELECT m.id, m.store_id, m.kind, m.title, m.status,
+      (greatest(word_similarity(v_q, m.title || ' ' || coalesce(m.body, '')),
+                word_similarity(v_squeezed, m.title || ' ' || coalesce(m.body, '')))
+       * CASE m.status WHEN 'provisional' THEN 0.7 ELSE 1.0 END)::real AS score
+    FROM memory AS m
     WHERE
       m.tenant_id = app_sec.ctx_tenant()
-      AND m.search_tsv @@ q.tsq
+      AND (v_q <% (m.title || ' ' || coalesce(m.body, '')) OR v_squeezed <% (m.title || ' ' || coalesce(m.body, '')))
       AND (p_stores IS NULL OR m.store_id = ANY (p_stores))
       AND m.status = ANY (coalesce(p_statuses, ARRAY['active']::memory_status[]))
       AND (p_kinds IS NULL OR m.kind = ANY (p_kinds))
@@ -1314,6 +1321,7 @@ BEGIN
       )
     ORDER BY score DESC, m.id
     LIMIT 50;
+  PERFORM set_config('pg_trgm.word_similarity_threshold', v_old_threshold, true);
 END $$;
 
 -- ── 앱 접속 역할 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──

@@ -575,13 +575,13 @@ COMMIT;
 
 -- 함수가 보여 주는 행 = 같은 호출자가 memory 를 직접 읽어 보이는 행 (정책과 함수의 가시성 규칙이 어긋나지 않는다)
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.eq('N10k parity alice+bot', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE search_tsv @@ websearch_to_tsquery('simple', 'zebra')))::text$q$, 'true');
+SELECT t.eq('N10k parity alice+bot', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE title LIKE '%zebra%'))::text$q$, 'true');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.eq('N10l parity carol', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE search_tsv @@ websearch_to_tsquery('simple', 'zebra')))::text$q$, 'true');
+SELECT t.eq('N10l parity carol', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE title LIKE '%zebra%'))::text$q$, 'true');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', NULL);
-SELECT t.eq('N10m parity dave', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE search_tsv @@ websearch_to_tsquery('simple', 'zebra')))::text$q$, 'true');
+SELECT t.eq('N10m parity dave', $q$SELECT ((SELECT string_agg(id::text, ',' ORDER BY id) FROM app_sec.search('zebra', NULL, enum_range(NULL::memory_status))) = (SELECT string_agg(id::text, ',' ORDER BY id) FROM memory WHERE title LIKE '%zebra%'))::text$q$, 'true');
 
 -- N17) kind 필터는 함수 안에서, 50건 제한 전에 적용된다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
@@ -592,16 +592,43 @@ COMMIT;
 -- N13) 검색 입력 상한: 1000자, tsquery 노드 64개. 넘으면 22023, 한계 바로 아래는 정상 실행 (zebra 32개 = 노드 63개, 33개 = 65개)
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.err('N13a search with 1001 characters', $q$SELECT * FROM app_sec.search(repeat('a', 1001))$q$, '22023');
-SELECT t.err('N13b search with 65 terms', $q$SELECT * FROM app_sec.search(repeat('a ', 65))$q$, '22023');
+SELECT t.err('N13b search with 65 terms is fine: trigram has no tsquery node limit', $q$SELECT * FROM app_sec.search(repeat('a ', 65))$q$, 'ok');
 SELECT t.err('N13c search with 3000 leading minus signs', $q$SELECT * FROM app_sec.search(repeat('-', 3000))$q$, '22023');
 SELECT t.err('N13d search with 32 terms (63 nodes)', $q$SELECT * FROM app_sec.search(repeat('zebra ', 32))$q$, 'ok');
-SELECT t.err('N13f search with 999 characters of x,x,x (999 nodes)', $q$SELECT * FROM app_sec.search(repeat('x,', 499) || 'x')$q$, '22023');
-SELECT t.err('N13g search with 65 NBSP-separated terms', $q$SELECT * FROM app_sec.search(repeat('a' || chr(160), 65))$q$, '22023');
-SELECT t.err('N13h search with 33 terms (65 nodes)', $q$SELECT * FROM app_sec.search(repeat('zebra ', 33))$q$, '22023');
+SELECT t.err('N13f search with 999 characters of x,x,x is fine', $q$SELECT * FROM app_sec.search(repeat('x,', 499) || 'x')$q$, 'ok');
+SELECT t.err('N13g search with 65 NBSP-separated terms is fine', $q$SELECT * FROM app_sec.search(repeat('a' || chr(160), 65))$q$, 'ok');
+SELECT t.err('N13h search with 33 terms is fine', $q$SELECT * FROM app_sec.search(repeat('zebra ', 33))$q$, 'ok');
 SELECT t.err('N13e search with 1000 characters', $q$SELECT * FROM app_sec.search(repeat('a', 1000))$q$, 'ok');
 ROLLBACK;
 COMMIT;
 RESET ROLE;
+
+-- N18) 한국어 trigram 검색: 조사, 띄어쓰기, 본문 매칭, 상태 가중치, 스토어 격리 (롤백되는 트랜잭션 안의 임시 행)
+BEGIN; RESET ROLE;
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES
+ ('00000000-0000-0000-0000-0000000e1801','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','active','A사 담당자는 이민수','x','[]','00000000-0000-0000-0000-0000000000c1'),
+ ('00000000-0000-0000-0000-0000000e1802','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','active','배포절차는 다음과 같다','x','[]','00000000-0000-0000-0000-0000000000c1'),
+ ('00000000-0000-0000-0000-0000000e1803','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','active','온보딩','신규 입사자는 첫날 노트북을 수령한다','[]','00000000-0000-0000-0000-0000000000c1'),
+ ('00000000-0000-0000-0000-0000000e1805','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','active','휴가 신청 안내','x','[]','00000000-0000-0000-0000-0000000000c1'),
+ ('00000000-0000-0000-0000-0000000e1806','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f002','note','active','인사 담당자는 박지영','x','[]','00000000-0000-0000-0000-0000000000b1');
+DO $do$ BEGIN
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by) VALUES
+   ('00000000-0000-0000-0000-0000000e1804','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','note','provisional','휴가 신청 안내','x','[]','00000000-0000-0000-0000-0000000000c1');
+EXCEPTION WHEN invalid_text_representation THEN NULL;
+END $do$;
+SET ROLE app_rw;
+SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.eq('N18a 담당자 finds the title with a particle attached', $q$SELECT string_agg(title, ',' ORDER BY title COLLATE "C") FROM app_sec.search('담당자')$q$, 'A사 갱신 담당자 변경,A사 담당자는 이민수');
+SELECT t.eq('N18b 배포 절차 (spaced) finds 배포절차는 (unspaced + particle)', $q$SELECT string_agg(title, ',') FROM app_sec.search('배포 절차')$q$, '배포절차는 다음과 같다');
+SELECT t.eq('N18c an unrelated query finds nothing', $q$SELECT count(*)::text FROM app_sec.search('냉장고 수리비')$q$, '0');
+SELECT t.eq('N18d body-only match: 노트북 finds 온보딩', $q$SELECT string_agg(title, ',') FROM app_sec.search('노트북')$q$, '온보딩');
+SELECT t.eq('N18e provisional ranks below an equally matching active, at 0.7 of its score', $q$SELECT string_agg(status || ':' || round(score::numeric, 2), ',' ORDER BY score DESC, id) FROM app_sec.search('휴가 신청 안내', NULL, ARRAY['active', 'provisional']::memory_status[])$q$, 'active:1.00,provisional:0.70');
+SELECT t.eq('N18f a blank query finds nothing', $q$SELECT count(*)::text FROM app_sec.search('   ')$q$, '0');
+SELECT t.eq('N18g reader of the sales store never sees the hr row', $q$SELECT string_agg(title, ',' ORDER BY title COLLATE "C") FROM app_sec.search('인사 담당자', NULL, enum_range(NULL::memory_status))$q$, 'A사 갱신 담당자 변경,A사 담당자는 이민수');
+SELECT t.ctx('00000000-0000-0000-0000-0000000000b1', NULL);
+SELECT t.eq('N18h reader of the hr store sees only the hr row', $q$SELECT string_agg(title, ',') FROM app_sec.search('담당자', NULL, enum_range(NULL::memory_status))$q$, '인사 담당자는 박지영');
+ROLLBACK;
+SET ROLE app_rw;
 
 -- ═══ search_path·임시 객체 하이재킹 (S1–S5) ═══════════════
 -- S1(모든 함수의 search_path 고정 lint)은 scripts/db-test.sh 가 lint_search_path.sql 로 실행한다.
