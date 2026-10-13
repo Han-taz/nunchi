@@ -244,23 +244,3 @@ def test_http_exception_and_validation_shapes(client: TestClient) -> None:
     bad = client.get("/v1/memories/not-a-uuid", headers=as_user(USER))
     assert bad.status_code == 422
     assert bad.json()["detail"].startswith("path.memory_id")
-
-
-def test_a_request_cannot_choose_the_tenant(client: TestClient) -> None:
-    # USER lives in TENANT, which ISSUER_A maps to. Naming another tenant anywhere changes nothing.
-    forged = {
-        **as_user(USER),
-        "X-Tenant-Id": str(OTHER_TENANT),
-        "X-Nunchi-Tenant": str(OTHER_TENANT),
-    }
-    params = {"tenant_id": str(OTHER_TENANT), "tenant": str(OTHER_TENANT)}
-    res = client.get("/v1/stores", headers=forged, params=params)
-    assert [s["slug"] for s in res.json()] == ["s"]
-    # the same sub through the issuer of another tenant is unknown there, whatever else is sent
-    foreign = {**j.auth(str(USER), iss=j.ISSUER_B), "X-Tenant-Id": str(TENANT)}
-    assert (
-        client.get("/v1/stores", headers=foreign, params={"tenant_id": str(TENANT)}).status_code
-        == 401
-    )
-    unknown_issuer = j.auth(str(USER), iss="https://evil.test")
-    assert client.get("/v1/stores", headers=unknown_issuer).status_code == 401

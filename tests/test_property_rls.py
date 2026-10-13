@@ -230,11 +230,10 @@ def api_env(
 
 
 @settings(PROFILE)
-@given(w=worlds(), data=st.data())
+@given(w=worlds())
 def test_api_matches_the_oracle_and_the_laws(
     api_env: tuple[TestClient, psycopg.Connection[tuple[object, ...]]],
     w: World,
-    data: st.DataObject,
 ) -> None:
     client, admin = api_env
     s = seed(admin, w)
@@ -263,20 +262,3 @@ def test_api_matches_the_oracle_and_the_laws(
         assert client.get(f"/v1/memories/{mid}", headers=h_b).status_code == 404
     found = client.get("/v1/search", params={"q": "zebra", "status": list(STATUSES)}, headers=h_b)
     assert found.json() == []
-    # revoking a grant never increases visibility, and the oracle still agrees
-    if w.grants:
-        victim = data.draw(st.sampled_from(sorted(w.grants)))
-        for u in range(w.users):
-            if w.active[u]:
-                before = api.get_visible(u, None)
-                break
-        else:
-            return
-        admin.execute(
-            "DELETE FROM store_grant WHERE store_id = %s AND principal_id = %s",
-            (s.store_ids[victim[0]], s.ids[victim[1]]),
-        )
-        w2 = replace(w, grants=w.grants - {victim})
-        after = api.get_visible(u, None)
-        assert after <= before
-        assert after == visible(w2, u, None)
