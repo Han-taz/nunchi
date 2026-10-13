@@ -6,6 +6,7 @@ from nunchi.capture.service import (
     Rejected,
     Skipped,
     capture,
+    capture_all,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "Rejected",
     "Skipped",
     "capture",
+    "capture_all",
 ]

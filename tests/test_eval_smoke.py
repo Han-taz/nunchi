@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 from eval import score
-from eval.corpus import Message, Query, load_messages, load_queries
+from eval.corpus import Message, Query, load_messages, load_queries, window_groups
 from eval.embedding import CachingEmbedder
 from eval.oracle import GOLD_VALUES, ConceptEmbedder, OracleExtractor
 from eval.run import main, run_eval, table
@@ -92,8 +92,7 @@ def test_noisy_oracle_restates_with_the_next_spelling() -> None:
     )
     spelled = []
     for m in messages[:5]:
-        draft = oracle.extract(m.filled, ctx)
-        assert draft is not None
+        (draft,) = oracle.extract(m.filled, ctx)
         spelled.append((draft.subject_name, draft.attribute))
     assert spelled == [
         ("A사", "담당자"),
@@ -124,11 +123,13 @@ def test_noisy_oracle_rewords_the_body_and_keeps_the_value() -> None:
     ctx = ExtractContext(
         origin=MemoryOrigin.EXTERNAL, today=date(2026, 10, 13), store_id=UUID(int=1)
     )
-    clean = [OracleExtractor(load_messages()).extract(m.filled, ctx) for m in restated]
-    noisy = [OracleExtractor(load_messages(), noisy=True).extract(m.filled, ctx) for m in restated]
-    assert len({d.body for d in clean if d}) == 1
-    assert [d.body for d in noisy if d] == [m.filled for m in restated]
-    assert {d.value for d in clean + noisy if d} == {"이민수"}
+    clean = [OracleExtractor(load_messages()).extract(m.filled, ctx)[0] for m in restated]
+    noisy = [
+        OracleExtractor(load_messages(), noisy=True).extract(m.filled, ctx)[0] for m in restated
+    ]
+    assert len({d.body for d in clean}) == 1
+    assert [d.body for d in noisy] == [m.filled for m in restated]
+    assert {d.value for d in clean + noisy} == {"이민수"}
 
 
 class CountingEmbedder:
@@ -176,8 +177,10 @@ def test_sweep_scores_trigram_then_every_embed_text_floor_and_k(admin_url: str) 
     assert grid[9] == ("title+body", 0.2, 20)
     assert grid[-1] == ("title+body", 0.5, 60)
     # Equal scores break ties by random row id, so recall wobbles by a query or two between runs.
-    assert rows[0]["recall@1"] == pytest.approx(0.62, abs=0.05)
-    assert rows[0]["recall@5"] == pytest.approx(0.667, abs=0.05)
+    # The ten multi-item windows add distractors to the same queries: the first 110 messages alone
+    # still score 0.62 and 0.667.
+    assert rows[0]["recall@1"] == pytest.approx(0.55, abs=0.05)
+    assert rows[0]["recall@5"] == pytest.approx(0.62, abs=0.05)
     assert sweep_table(rows).splitlines()[1].split()[:3] == ["trigram", "-", "-"]
 
 
@@ -203,8 +206,38 @@ def test_noisy_oracle_drifts_values_by_honorific_and_wording() -> None:
 
     def values(memory: str) -> list[str | None]:
         oracle = OracleExtractor(load_messages(), noisy=True)
-        drafts = (oracle.extract(m.filled, ctx) for m in load_messages() if m.memory == memory)
-        return [d.value for d in drafts if d]
+        drafts = (oracle.extract(m.filled, ctx)[0] for m in load_messages() if m.memory == memory)
+        return [d.value for d in drafts]
 
     assert values("m01")[:3] == ["이민수", "이민수님", "이민수 매니저님"]
     assert values("m25")[:2] == ["매일 03시, 14일 보관", "매일 새벽 3시, 14일 보관"]
+
+
+def test_corpus_has_ten_multi_item_windows_with_one_text_each() -> None:
+    groups = [g for g in window_groups(load_messages()) if g[0].group]
+    assert len(groups) == 10
+    assert all(len(g) >= 2 and len({m.text for m in g}) == 1 for g in groups)
+    assert [len(g) for g in groups] == [3, 2, 3, 2, 2, 3, 2, 3, 2, 3]
+
+
+def test_oracle_returns_one_draft_per_gold_item_of_a_window() -> None:
+    oracle = OracleExtractor(load_messages())
+    window = next(g for g in window_groups(load_messages()) if g[0].group == "g01")
+    ctx = ExtractContext(
+        origin=MemoryOrigin.EXTERNAL, today=date(2026, 10, 13), store_id=UUID(int=1)
+    )
+    drafts = oracle.extract(window[0].filled, ctx)
+    assert [(d.subject_name, d.attribute, d.value) for d in drafts] == [
+        ("리뉴얼 사이트", "프레임워크", "Next.js"),
+        ("리뉴얼 사이트", "DB", "Postgres"),
+        ("리뉴얼 사이트", "마감일", "2026-11-30"),
+    ]
+
+
+def test_item_recall_splits_multi_item_windows_from_single_messages() -> None:
+    def item(group: str | None, result: str) -> Outcome:
+        msg = _msg("new").model_copy(update={"group": group})
+        return Outcome(message=msg, result=result, memory_id=UUID(int=1), db_kind="fact")
+
+    outcomes = [item("g", "created"), item("g", "skipped"), item(None, "created")]
+    assert score.item_recall(outcomes) == {"multi": 0.5, "single": 1.0}

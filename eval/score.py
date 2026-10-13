@@ -55,6 +55,17 @@ def extraction(outcomes: Sequence[Outcome]) -> dict[str, float | int | None]:
     }
 
 
+def item_recall(outcomes: Sequence[Outcome]) -> dict[str, float | None]:
+    """Recall per gold item, split by whether the item came from a multi-item window."""
+    gold = [o for o in outcomes if o.message.remember]
+    multi = [o for o in gold if o.message.group is not None]
+    single = [o for o in gold if o.message.group is None]
+    return {
+        "multi": _ratio(sum(o.remembered for o in multi), len(multi)),
+        "single": _ratio(sum(o.remembered for o in single), len(single)),
+    }
+
+
 def kind_accuracy(outcomes: Sequence[Outcome]) -> float | None:
     hit = [o for o in outcomes if o.remembered and o.message.remember]
     return _ratio(sum(o.db_kind == o.message.kind for o in hit), len(hit))

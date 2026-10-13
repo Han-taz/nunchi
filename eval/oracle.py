@@ -41,6 +41,12 @@ GOLD_VALUES = {
     "m22": "4시간", "m23": "2시간", "m24": "한솔", "m25": "매일 03시, 14일 보관",
     "m26": "목요일", "m27": "채널 생성→리드 지정→30분 공유→포스트모템", "m28": "90일",
     "m29": "stg.nunchi.example",
+    "m30": "Next.js", "m31": "Postgres", "m32": "2026-11-30", "m33": "매주 금요일",
+    "m34": "오세훈", "m35": "Grafana", "m36": "CPU 80%", "m37": "PagerDuty", "m38": "5초",
+    "m39": "격주 금요일", "m40": "VPN 접속 후 qa.nunchi.example", "m41": "매월 5일",
+    "m42": "팀장", "m43": "영수증 촬영→앱 등록→팀장 승인", "m44": "Figma Variables",
+    "m45": "격주 수요일", "m46": "Vercel", "m47": "분기 1회", "m48": "윤서진",
+    "m49": "2026-12-15", "m50": "한지민", "m51": "#launch",
 }  # fmt: skip
 
 # Noisy only. Person values come back with an honorific or a title on later mentions.
@@ -55,6 +61,11 @@ VALUE_VARIANTS = {
     "m25": ("매일 새벽 3시, 14일 보관",),
     "m27": ("#incident 채널→리드 지정→30분 공유→48시간 내 포스트모템",),
 }
+
+
+def _wording(m: Message) -> str:
+    """A window's items share its text; the tag keeps their bodies apart, as a model's would be."""
+    return f"{m.filled}\n({m.subject} {m.attribute})" if m.group else m.filled
 
 
 class OracleJudge:
@@ -83,14 +94,24 @@ class OracleExtractor:
         self._noisy = noisy
         self._seen: Counter[tuple[str, str]] = Counter()
         self._said: Counter[str] = Counter()
-        self._by_text = {m.filled: m for m in messages}
+        self._by_text: dict[str, list[Message]] = {}
+        for m in messages:
+            if m.group is not None and m.filled in self._by_text:
+                self._by_text[m.filled].append(m)
+            else:
+                self._by_text[m.filled] = [m]
         self._first: dict[str, str] = {}
         for m in messages:
             if m.memory is not None:
-                self._first.setdefault(m.memory, m.filled)
+                self._first.setdefault(m.memory, _wording(m))
 
-    def extract(self, source_text: str, context: ExtractContext) -> ProposalDraft | None:
-        gold = self._by_text[source_text]
+    def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]:
+        drafts = (self._draft(g, source_text, context) for g in self._by_text[source_text])
+        return tuple(d for d in drafts if d is not None)
+
+    def _draft(
+        self, gold: Message, source_text: str, context: ExtractContext
+    ) -> ProposalDraft | None:
         if gold.secret:
             return ProposalDraft(
                 kind=MemoryKind.NOTE,
@@ -101,7 +122,7 @@ class OracleExtractor:
             )
         if not gold.remember or gold.kind is None or gold.memory is None:
             return None
-        text = gold.filled if self._noisy else self._first[gold.memory]
+        text = _wording(gold) if self._noisy else self._first[gold.memory]
         return ProposalDraft(
             kind=gold.kind,
             title=text[:_TITLE_CHARS],

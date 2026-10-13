@@ -119,7 +119,7 @@ def _resolve_key(
     return subject_id, draft.model_copy(update={"attribute": attribute})
 
 
-def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the optional services
+def capture_all(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the optional services
     conn: Conn,
     extractor: Extractor,
     source_text: str,
@@ -127,7 +127,10 @@ def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the optional s
     embedder: Embedder | None = None,
     resolve: ResolveConfig | None = None,
     judge: ValueJudge | None = None,
-) -> CaptureResult:
+) -> tuple[CaptureResult, ...]:
+    """One result per draft the extractor returned, in order; (Skipped(),) when it returned none.
+    A single message (not a window) keeps its first draft only. Later drafts see the entities and
+    memories earlier ones wrote, because they share the transaction."""
     cfg = resolve or ResolveConfig()
     candidates, subjects = _candidates(conn, source_text, context.store_id, embedder)
     extract_context = ExtractContext(
@@ -139,17 +142,46 @@ def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the optional s
         entities=known_entities(conn, context.store_id, source_text, subjects, cfg),
         window=context.window,
     )
-    draft = extractor.extract(source_text, extract_context)
-    if draft is None:
-        return Skipped()
+    drafts = extractor.extract(source_text, extract_context)
+    if not context.window:
+        drafts = drafts[:1]
+    if not drafts:
+        return (Skipped(),)
+    return tuple(
+        _capture_draft(conn, draft, source_text, extract_context, embedder, cfg, judge)
+        for draft in drafts
+    )
 
+
+def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the optional services
+    conn: Conn,
+    extractor: Extractor,
+    source_text: str,
+    context: CaptureContext,
+    embedder: Embedder | None = None,
+    resolve: ResolveConfig | None = None,
+    judge: ValueJudge | None = None,
+) -> CaptureResult:
+    """The first result, for callers that expect one (the pin path, MCP remember)."""
+    return capture_all(conn, extractor, source_text, context, embedder, resolve, judge)[0]
+
+
+def _capture_draft(  # noqa: PLR0913, PLR0917
+    conn: Conn,
+    draft: ProposalDraft,
+    source_text: str,
+    extract_context: ExtractContext,
+    embedder: Embedder | None,
+    cfg: ResolveConfig,
+    judge: ValueJudge | None,
+) -> CaptureResult:
     gate = evaluate_pair(source_text, f"{draft.title}\n{draft.body or ''}")
     if gate.verdict is Verdict.REJECT:
         return Rejected(reasons=tuple(f.rule_id for f in gate.flags if f.action is Action.REJECT))
 
     subject_id, draft = _resolve_key(conn, draft, extract_context, embedder, cfg)
     if subject_id is not None:
-        draft = canonical_value(conn, context.store_id, subject_id, draft, judge, cfg)
+        draft = canonical_value(conn, extract_context.store_id, subject_id, draft, judge, cfg)
     request = to_propose_request(draft, extract_context, lambda _name: subject_id)
     flags = tuple(f.rule_id for f in gate.flags)
     outcome = repo.propose(conn, request.model_copy(update={"gate_flags": flags}))

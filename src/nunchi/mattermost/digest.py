@@ -7,12 +7,12 @@ transaction as the capture; the cursor only saves reading work."""
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import httpx
 
-from nunchi.capture import CaptureContext, Created, capture
+from nunchi.capture import CaptureContext, CaptureResult, Created, capture_all
 from nunchi.db import Pool, request_tx
 from nunchi.domain.models import SourceRef
 from nunchi.embed import Embedder
@@ -181,7 +181,7 @@ def _digest_channel(
             report.failed += 1
             break
         done.append(window)
-        if outcome != "claimed":
+        if isinstance(outcome, tuple):
             spent += 1
             report.windows += 1
             _count(report, outcome)
@@ -193,12 +193,12 @@ def _digest_channel(
     return spent
 
 
-def _count(report: DigestReport, outcome: object) -> None:
-    if isinstance(outcome, Created):
-        report.created += 1
-        report.conflicts += outcome.conflict_with is not None
-    else:
-        report.stored_nothing += 1
+def _count(report: DigestReport, results: tuple[CaptureResult, ...]) -> None:
+    """created and conflicts count per memory; stored_nothing counts windows that made none."""
+    created = [r for r in results if isinstance(r, Created)]
+    report.created += len(created)
+    report.conflicts += sum(r.conflict_with is not None for r in created)
+    report.stored_nothing += not created
 
 
 def _capture_window(  # noqa: PLR0913, PLR0917
@@ -210,7 +210,7 @@ def _capture_window(  # noqa: PLR0913, PLR0917
     channel_id: str,
     window: Window,
     names: dict[str, str],
-) -> object:
+) -> tuple[CaptureResult, ...] | Literal["claimed"]:
     speakers = tuple(sorted({names.get(p["user_id"], p["user_id"]) for p in window.posts}))
     refs = tuple(
         SourceRef(
@@ -230,4 +230,4 @@ def _capture_window(  # noqa: PLR0913, PLR0917
         if claimed is None or not claimed[0]:
             return "claimed"
         text = render(window, names, d.limits.max_chars)
-        return capture(conn, d.extractor, text, context, d.embedder)
+        return capture_all(conn, d.extractor, text, context, d.embedder)

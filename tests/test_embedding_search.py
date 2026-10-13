@@ -64,9 +64,9 @@ class RecordingExtractor:
     def __init__(self) -> None:
         self.candidates: list[str] = []
 
-    def extract(self, source_text: str, context: ExtractContext) -> ProposalDraft | None:
+    def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]:
         self.candidates = [c.title for c in context.candidates]
-        return None
+        return ()
 
 
 @pytest.mark.db

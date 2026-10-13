@@ -103,5 +103,10 @@ class ExtractionError(Exception):
         self.detail = detail
 
 
+MAX_DRAFTS = 5
+
+
 class Extractor(Protocol):
-    def extract(self, source_text: str, context: ExtractContext) -> ProposalDraft | None: ...
+    """Zero to MAX_DRAFTS drafts, one per durable item the source states."""
+
+    def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]: ...
