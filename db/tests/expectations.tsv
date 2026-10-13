@@ -10,7 +10,8 @@ T1	= 0	pass
 T2	propose ok	pass
 T3	(ok)	fail
 T4	rows = 0	pass
-T5	rows = 1	pass
+T5	-> 42501	fail
+T5b	= active/active/v2	fail
 T6	rows = 0	pass
 T7	(ok)	pass
 T7b	= true	pass
@@ -214,3 +215,34 @@ G4g	= one_curator/proposed	fail
 F6c	= provisional	fail
 N10n	= 0/1	fail
 B6a	= 0	fail
+G3a	= wrong_clicker/proposed/v1	fail
+G3b	= active/active/v2	fail
+G3c	= duplicate:active/active/v2/1	fail
+G3d	= unknown_nonce	fail
+G3e	= active/superseded/v2/active/v2	fail
+G3f	= stale/0	fail
+G3g	= self_review	fail
+G3h	= not_curator	fail
+G3i	= pending_quorum:1/2/proposed/v1	fail
+G3j	-> %quorum not met: 1 of 2%	fail
+G3k	= active/active/v2	fail
+G3l	-> %quorum not met: 0 of 1%	fail
+G3q	-> %separation of duties%	fail
+G3r	= comment/proposed/v1/1	fail
+G3s	= expired	fail
+G3t	= mismatch	fail
+G3u	= rejected/rejected/v2	fail
+G4b	= rejected/rejected/v2/retract	fail
+G4c	= -9/1/1/true	fail
+G4d	= one_curator/proposed	fail
+G3v	= wrong_clicker	fail
+G3w	= pending_quorum:1/2/pending_quorum:1/2/proposed/v1	fail
+G3x	= pending_quorum:1/2	fail
+G4a	= active/active/v2/confirm/confirm	fail
+G4h	= rejected/rejected/v2	fail
+G4i	= -4/1/1/false	fail
+G4j	= pending_quorum:1/2	fail	first approval from a then-current curator
+G3y	= pending_quorum:1/2/proposed/v1	fail	an approval by a since-revoked curator does not count toward the quorum
+G4k	-> %quorum not met: 1 of 2%	fail	direct UPDATE cannot reach active on a revoked curator's approval
+G4l	= pending_quorum:1/2	fail	second memory, first current curator
+G3z	= active/active/v2	fail	two current curators reach quorum

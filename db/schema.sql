@@ -176,40 +176,59 @@ CREATE TABLE memory_version (
   UNIQUE (memory_id, version, op)
 );
 
+-- 승인 카드: nonce 1개 = (memory, 수신 curator) 1장. 클릭은 nonce 로만 들어오고 decide() 만 읽고 쓴다 (app_rw 권한 없음).
+CREATE TABLE approval_card (
+  nonce uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  memory_id uuid NOT NULL REFERENCES memory (id),
+  version_at_issue integer NOT NULL,
+  issued_to uuid NOT NULL REFERENCES principal (id),
+  platform text NOT NULL,
+  channel_id text,
+  message_ts text,
+  issued_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL DEFAULT now() + interval '14 days',
+  consumed_at timestamptz,
+  outcome text
+);
+
 -- 리뷰 기록 (사람 승인 / 리뷰 에이전트 주석)
 CREATE TABLE review (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   memory_id uuid NOT NULL REFERENCES memory (id),
   reviewer_id uuid NOT NULL REFERENCES principal (id),
-  verdict text NOT NULL CHECK (verdict IN ('approve', 'reject', 'comment')),
+  verdict text NOT NULL CHECK (verdict IN ('approve', 'reject', 'comment', 'confirm', 'retract')),
   note text,
-  at timestamptz NOT NULL DEFAULT now()
+  at timestamptz NOT NULL DEFAULT now(),
+  via_agent_id uuid REFERENCES principal (id),
+  card_nonce uuid REFERENCES approval_card (nonce)
 );
 
 -- 상태 기계: 허용되는 (from, to) 전이는 이 표가 전부다. memory_bu 는 이 표를 한 번 조회할 뿐 분기하지 않는다.
--- op = 그 전이가 버전 기록에 남기는 op, by_role = curator(요청 컨텍스트의 사용자) 또는 system(컨텍스트 없는 워커/소유자)
+-- op = 그 전이가 버전 기록에 남기는 op, by_role = curator(요청 컨텍스트의 사용자) 또는 system(컨텍스트 없는 워커/소유자),
+-- reviewed = 전이마다 review 행(verdict = op)이 정족수만큼 있어야 하는가 (정족수와 직무 분리는 memory_bu 가 본다)
 CREATE TYPE transition_role AS ENUM ('curator', 'system');
 CREATE TABLE memory_transition (
   from_status memory_status NOT NULL,
   to_status memory_status NOT NULL,
   op memory_op NOT NULL,
   by_role transition_role NOT NULL,
+  reviewed boolean NOT NULL DEFAULT false,
   PRIMARY KEY (from_status, to_status)
 );
-INSERT INTO memory_transition (from_status, to_status, op, by_role) VALUES
-('proposed', 'provisional', 'auto_activate', 'system'),
-('proposed', 'active', 'approve', 'curator'),
-('proposed', 'rejected', 'reject', 'curator'),
-('provisional', 'active', 'confirm', 'curator'),
-('provisional', 'rejected', 'retract', 'curator'),
-('provisional', 'superseded', 'supersede', 'curator'),
-('provisional', 'deleted', 'delete', 'curator'),
-('active', 'superseded', 'supersede', 'curator'),
-('active', 'expired', 'expire', 'system'),
-('active', 'deleted', 'delete', 'curator'),
-('superseded', 'deleted', 'delete', 'curator'),
-('expired', 'deleted', 'delete', 'curator'),
-('rejected', 'deleted', 'delete', 'curator');
+INSERT INTO memory_transition (from_status, to_status, op, by_role, reviewed) VALUES
+('proposed', 'provisional', 'auto_activate', 'system', false),
+('proposed', 'active', 'approve', 'curator', true),
+('proposed', 'rejected', 'reject', 'curator', true),
+('provisional', 'active', 'confirm', 'curator', true),
+('provisional', 'rejected', 'retract', 'curator', true),
+('provisional', 'superseded', 'supersede', 'curator', false),
+('provisional', 'deleted', 'delete', 'curator', false),
+('active', 'superseded', 'supersede', 'curator', false),
+('active', 'expired', 'expire', 'system', false),
+('active', 'deleted', 'delete', 'curator', false),
+('superseded', 'deleted', 'delete', 'curator', false),
+('expired', 'deleted', 'delete', 'curator', false),
+('rejected', 'deleted', 'delete', 'curator', false);
 
 -- 등급 -> 최초 상태와 승인 정족수. INSERT 정책, 등급 트리거, 버전 기록이 모두 이 표 하나를 본다.
 CREATE TABLE approval_tier_rule (
@@ -223,7 +242,7 @@ INSERT INTO approval_tier_rule (tier, initial_status, approvals_needed) VALUES
 ('one_curator', 'proposed', 1),
 ('two_curators', 'proposed', 2);
 
--- 제안자 신뢰: (저자, store) 별 점수. risk_tier() 가 읽는다. 갱신 트리거는 승인 함수와 함께 들어온다.
+-- 제안자 신뢰: (저자, store) 별 점수. risk_tier() 가 읽고, memory_aw 가 trust_rule 표대로 갱신한다.
 CREATE TABLE proposer_trust (
   principal_id uuid NOT NULL REFERENCES principal (id),
   store_id uuid NOT NULL REFERENCES store (id),
@@ -235,6 +254,21 @@ CREATE TABLE proposer_trust (
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (principal_id, store_id)
 );
+
+-- 비대칭 점수: 승인/확인 +1, 반려 -5, 회수 -10 (이미 노출된 것이라 반려의 두 배) + 30일 강등. 전이의 op 마다 한 행이다.
+CREATE TABLE trust_rule (
+  op memory_op PRIMARY KEY,
+  points integer NOT NULL,
+  approved integer NOT NULL,
+  rejected integer NOT NULL,
+  retracted integer NOT NULL,
+  demote_days integer NOT NULL
+);
+INSERT INTO trust_rule (op, points, approved, rejected, retracted, demote_days) VALUES
+('approve', 1, 1, 0, 0, 0),
+('confirm', 1, 1, 0, 0, 0),
+('reject', -5, 0, 1, 0, 0),
+('retract', -10, 0, 0, 1, 30);
 
 -- 버전/리뷰 테이블은 수정·삭제 금지. 예외: memory_version.snapshot 을 NULL 로 만드는 redact 만 허용
 -- (snapshot 을 뺀 모든 컬럼이 동일해야 함. 컬럼이 추가돼도 자동으로 비교 대상에 포함)
@@ -618,11 +652,41 @@ BEGIN
   RETURN NEW;
 END $$;
 
+-- 정족수: 이 전이를 뒷받침하는 review(verdict = 전이의 op)의 서로 다른 비저자 reviewer 수와 필요한 수.
+-- 결정 시점에 reviewer(와 via_agent)가 지금도 그 store 의 curator 인 review 만 센다: 역할을 잃은 curator 의 이전 승인은 세지 않는다.
+-- 다른 사람의 grant 를 읽어야 해서 SECURITY DEFINER 이고, 호출자가 그 store 의 curator 일 때만 0 이상을 돌려준다(그 외는 0).
+-- 활성화(to = active)는 등급의 approvals_needed, 반려/회수는 1.
+CREATE FUNCTION app_sec.quorum(p_mem memory, p_to memory_status) RETURNS TABLE (have integer, needed integer)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT
+    (
+      SELECT count(DISTINCT v.reviewer_id)::integer FROM review AS v, memory AS m
+      WHERE
+        m.id = p_mem.id
+        AND m.store_id IN (SELECT app_sec.my_stores('curator'))
+        AND v.memory_id = m.id
+        AND v.verdict = (SELECT t.op::text FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = p_to)
+        AND v.reviewer_id NOT IN (m.created_by, coalesce(m.on_behalf_of, m.created_by))
+        AND EXISTS (
+          SELECT 1 FROM store_grant AS g
+          WHERE g.store_id = m.store_id AND g.tenant_id = m.tenant_id AND g.role = 'curator' AND g.principal_id IN (SELECT app_sec.closure(v.reviewer_id))
+        )
+        AND (
+          v.via_agent_id IS NULL OR EXISTS (
+            SELECT 1 FROM store_grant AS g
+            WHERE g.store_id = m.store_id AND g.tenant_id = m.tenant_id AND g.role = 'curator' AND g.principal_id IN (SELECT app_sec.closure(v.via_agent_id))
+          )
+        )
+    ),
+    CASE WHEN p_to = 'active' THEN (SELECT r.approvals_needed FROM approval_tier_rule AS r WHERE r.tier = p_mem.tier)::integer ELSE 1 END
+$$;
+
 -- UPDATE: 불변 컬럼, origin 단방향, memory_transition 표, 본문 편집 범위, 버전 증가, 삭제 시 본문 제거
 CREATE FUNCTION app_sec.memory_before_update() RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   tr memory_transition;
+  q record;
 BEGIN
   IF (NEW.id, NEW.tenant_id, NEW.store_id, NEW.kind, NEW.created_by, NEW.on_behalf_of, NEW.created_at, NEW.session_ref, NEW.tier)
      IS DISTINCT FROM
@@ -639,6 +703,15 @@ BEGIN
     END IF;
     IF (tr.by_role = 'curator') <> (app_sec.ctx_user() IS NOT NULL) THEN
       RAISE EXCEPTION 'transition % -> % is for the % role', OLD.status, NEW.status, tr.by_role USING ERRCODE = '42501';
+    END IF;
+    IF tr.reviewed THEN
+      IF app_sec.ctx_user() IN (OLD.created_by, coalesce(OLD.on_behalf_of, OLD.created_by)) THEN
+        RAISE EXCEPTION 'separation of duties: the proposer cannot review' USING ERRCODE = '42501';
+      END IF;
+      SELECT * INTO q FROM app_sec.quorum(OLD, NEW.status);
+      IF q.have < q.needed THEN
+        RAISE EXCEPTION 'quorum not met: % of % reviews', q.have, q.needed USING ERRCODE = '42501';
+      END IF;
     END IF;
   END IF;
   IF (NEW.title, NEW.body, NEW.source_refs) IS DISTINCT FROM (OLD.title, OLD.body, OLD.source_refs)
@@ -717,23 +790,36 @@ END $$;
 CREATE FUNCTION app_sec.memory_after_write() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
-  op memory_op;
+  v_op memory_op;
   actor uuid := coalesce(app_sec.ctx_user(), app_sec.ctx_agent(), NEW.created_by);
   why text := current_setting('app.reason', true);
 BEGIN
-  op := CASE
+  v_op := CASE
     WHEN TG_OP = 'INSERT' THEN 'propose'
     WHEN NEW.status = OLD.status THEN 'edit'
     ELSE (SELECT t.op FROM memory_transition AS t WHERE t.from_status = OLD.status AND t.to_status = NEW.status)
   END;
-  PERFORM app_sec.write_version(NEW, op, actor, why);
+  PERFORM app_sec.write_version(NEW, v_op, actor, why);
+  -- 제안자 신뢰는 전이의 op 마다 trust_rule 한 행으로 갱신한다 (규칙이 없는 op 는 아무 행도 만들지 않는다)
+  INSERT INTO proposer_trust AS pt (principal_id, store_id, points, approved, rejected, retracted, demoted_until)
+  SELECT
+    NEW.created_by, NEW.store_id, r.points, r.approved, r.rejected, r.retracted,
+    CASE WHEN r.demote_days > 0 THEN now() + make_interval(days => r.demote_days) END
+  FROM trust_rule AS r WHERE r.op = v_op
+  ON CONFLICT (principal_id, store_id) DO UPDATE SET
+    points = pt.points + excluded.points,
+    approved = pt.approved + excluded.approved,
+    rejected = pt.rejected + excluded.rejected,
+    retracted = pt.retracted + excluded.retracted,
+    demoted_until = coalesce(excluded.demoted_until, pt.demoted_until),
+    updated_at = now();
   IF TG_OP = 'INSERT' AND EXISTS (
     SELECT 1 FROM approval_tier_rule AS r
     WHERE r.tier = NEW.tier AND r.initial_status = NEW.status AND r.initial_status <> 'proposed'
   ) THEN
     PERFORM app_sec.write_version(NEW, 'auto_activate', actor, why);
   END IF;
-  IF op = 'delete' THEN
+  IF v_op = 'delete' THEN
     IF OLD.content_hash IS NOT NULL THEN
       INSERT INTO deleted_hash (store_id, content_hash, reason) VALUES (NEW.store_id, OLD.content_hash, coalesce(why, 'delete'))
       ON CONFLICT DO NOTHING;
@@ -749,6 +835,72 @@ CREATE TRIGGER memory_bi2_hash BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNC
 CREATE TRIGGER memory_bi3_tier BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_tier();
 CREATE TRIGGER memory_bu2_hash BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
 CREATE TRIGGER memory_aw AFTER INSERT OR UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_after_write();
+
+-- 승인 함수: 카드 nonce 로만 승인/반려/의견. 멱등(소비된 nonce), 낙관적 잠금(expected_version), 클릭자 = 수신자.
+-- 거절 사유는 위에서부터 첫 일치 하나만 반환하고 review 행도 버전도 남기지 않는다. 처리되면 review 를 쓰고 memory 를 UPDATE 하며
+-- 정족수와 직무 분리의 최종 판정은 memory_bu 가 한다. verdict 는 approve/confirm(→ active), reject/retract(→ rejected), comment 이고
+-- review 에는 현재 상태에서 그 전이의 op 로 기록한다 (proposed 의 approve 는 approve, provisional 의 approve 는 confirm).
+CREATE FUNCTION app_sec.decide(
+  p_nonce uuid, p_memory uuid, p_expected_version integer, p_verdict text, p_reason text DEFAULT null
+) RETURNS text
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  me uuid := app_sec.ctx_user();
+  c approval_card;
+  m memory;
+  tr memory_transition;
+  q record;
+  refusal text;
+  target memory_status;
+  v_outcome text;
+BEGIN
+  IF me IS NULL THEN
+    RAISE EXCEPTION 'no user context' USING ERRCODE = '28000';
+  END IF;
+  IF p_verdict NOT IN ('approve', 'confirm', 'reject', 'retract', 'comment') THEN
+    RAISE EXCEPTION 'unknown verdict %', p_verdict USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO c FROM approval_card WHERE nonce = p_nonce FOR UPDATE;
+  SELECT * INTO m FROM memory WHERE id = c.memory_id FOR UPDATE;
+  refusal := CASE
+    WHEN c.nonce IS NULL THEN 'unknown_nonce'
+    WHEN c.issued_to <> me THEN 'wrong_clicker'
+    WHEN c.consumed_at IS NOT NULL THEN 'duplicate:' || c.outcome
+    WHEN c.memory_id <> p_memory THEN 'mismatch'
+    WHEN c.expires_at < now() THEN 'expired'
+    WHEN NOT EXISTS (
+      SELECT 1 FROM app_sec.my_store_roles() AS r WHERE r.store_id = m.store_id AND r.role = 'curator'
+    ) THEN 'not_curator'
+    WHEN m.version <> p_expected_version THEN 'stale'
+    WHEN me IN (m.created_by, coalesce(m.on_behalf_of, m.created_by)) THEN 'self_review'
+  END;
+  IF refusal IS NOT NULL THEN
+    RETURN refusal;
+  END IF;
+
+  target := CASE p_verdict WHEN 'approve' THEN 'active' WHEN 'confirm' THEN 'active' WHEN 'reject' THEN 'rejected' WHEN 'retract' THEN 'rejected' END;
+  SELECT * INTO tr FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = target;
+  IF target IS NOT NULL AND NOT found THEN
+    RAISE EXCEPTION 'illegal transition % -> %', m.status, target;
+  END IF;
+  INSERT INTO review (memory_id, reviewer_id, verdict, note, via_agent_id, card_nonce)
+  VALUES (m.id, me, coalesce(tr.op::text, p_verdict), p_reason, app_sec.ctx_agent(), p_nonce);
+  PERFORM set_config('app.reason', coalesce(p_reason, ''), true);
+
+  v_outcome := CASE WHEN target IS NULL THEN 'comment' ELSE target::text END;
+  IF target IS NOT NULL THEN
+    SELECT * INTO q FROM app_sec.quorum(m, target);
+    IF q.have < q.needed THEN
+      v_outcome := 'pending_quorum:' || q.have || '/' || q.needed;
+    ELSE
+      UPDATE memory SET status = 'superseded', valid_to = coalesce(m.valid_from, current_date)
+      WHERE id = m.supersedes_id AND status IN ('active', 'provisional') AND target = 'active';
+      UPDATE memory SET status = target WHERE id = m.id AND version = p_expected_version;
+    END IF;
+  END IF;
+  UPDATE approval_card SET consumed_at = now(), outcome = v_outcome WHERE nonce = p_nonce;
+  RETURN v_outcome;
+END $$;
 
 -- 체인 검증. 호출자의 RLS 가 적용되므로 보이는 버전만 검증한다 (없거나 못 보면 NULL)
 CREATE FUNCTION app_sec.verify_chain(p_mem uuid) RETURNS boolean LANGUAGE sql
@@ -830,6 +982,8 @@ GRANT EXECUTE ON FUNCTION app_sec.resolve_principal(uuid, principal_kind, text) 
 GRANT EXECUTE ON FUNCTION app_sec.ctx_user() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_agent() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_tenant() TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.decide(uuid, uuid, integer, text, text) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.quorum(memory, memory_status) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_store_roles() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_stores(store_role) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.search(text, uuid[], memory_status[]) TO app_rw;
