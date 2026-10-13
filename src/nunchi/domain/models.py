@@ -61,6 +61,12 @@ class SourceRef(Frozen):
     inherit_acl: bool = False
 
 
+def check_sources(kind: MemoryKind, source_refs: tuple[SourceRef, ...]) -> None:
+    if kind is not MemoryKind.NOTE and not source_refs:
+        msg = "source_refs is required unless kind is note"
+        raise ValueError(msg)
+
+
 class ProposeRequest(Frozen):
     """What a caller may say. The server owns origin, author, delegate, tenant, status, version."""
 
@@ -73,9 +79,7 @@ class ProposeRequest(Frozen):
 
     @model_validator(mode="after")
     def _only_notes_may_lack_sources(self) -> Self:
-        if self.kind is not MemoryKind.NOTE and not self.source_refs:
-            msg = "source_refs is required unless kind is note"
-            raise ValueError(msg)
+        check_sources(self.kind, self.source_refs)
         return self
 
 
