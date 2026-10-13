@@ -58,7 +58,7 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 | 베이스 `pr-size.sh` | 베이스의 스크립트로 헤드의 크기를 센다. 헤드가 스크립트를 `exit 0`으로 바꿔도 소용없다. |
 | 베이스 `migrations-immutable.sh` | 베이스의 스크립트로 베이스의 마이그레이션이 헤드에서 그대로인지 본다. |
 | 베이스 `check-commits.sh` | 커밋 제목 규칙, 머지 커밋 금지, AI 표기 금지를 베이스의 스크립트로 검사한다. |
-| `expectations-guard.sh` | `expectations.tsv`에서 행을 지우면 실패한다. 단 같은 PR이 `db/tests/*.sql`에서 그 테스트(출력 줄이 따옴표 뒤 id와 공백으로 시작하는 SQL)도 지웠으면 허용하고 무엇이 지워졌는지 출력한다. 베이스에서 `on_vulnerable = fail`이던 행을 다른 값으로 바꾸는 것도 실패다. |
+| `expectations-guard.sh` | `expectations.tsv`에서 행을 지우면 실패한다. 단 같은 PR이 `db/tests/*.sql`에서 그 테스트(주석이 아닌 줄에서 따옴표 바로 뒤에 정확히 그 id 토큰이 오는 문자열, 즉 `db-test.sh`가 출력 줄의 첫 토큰으로 읽는 것)도 지웠으면 허용하고 무엇이 지워졌는지 출력한다. `X1a`를 지울 때 `X1ab`는 남아 있어도 무방하고, 주석에 적힌 `'X1a'`는 존재로 치지 않으며, id 뒤가 공백이 아니라 탭이어도 존재로 친다. 헤드의 레지스트리가 없거나, 형식이 틀린 id(`T1`, `X3a`, `F11` 꼴이 아닌 것)나 중복 id가 있어도 실패한다. 베이스에서 `on_vulnerable = fail`이던 행을 다른 값으로 바꾸는 것도 실패다. |
 
 ### 헤드를 실행하지 않는다는 불변식
 
@@ -69,7 +69,7 @@ nunchi의 CI는 `.github/workflows/ci.yml` 하나다. 모든 PR(대상 브랜치
 - `run:`의 모든 줄은 읽기 전용 git(`fetch`, `diff`, `ls-tree`, `cat-file`, `log`, `rev-parse`, `show`, `rev-list`, `merge-base`)이거나 베이스 체크아웃의 `scripts/ci/<이름>.sh`다. 명령 연결(`;`, `&&`, `|`), 치환(`$(…)`, 백틱), 리다이렉션은 허용하지 않는다.
 - PR 번호와 SHA는 `env:`로만 넘기고 `run:` 본문에 `${{ }}`를 쓰지 않는다.
 
-`scripts/ci/gate-integrity-lint.sh`가 위 규칙을 YAML에서 기계로 검사하고, `gate-integrity-lint-selftest.sh`가 규칙마다 위반하는 변형 워크플로를 만들어 거부되는지 증명한다. 둘 다 `ci.yml`의 `workflow-lint` job에서 돈다. `expectations-guard.sh`와 `gate-files-report.sh`의 동작은 `gate-integrity-selftest.sh`가 임시 저장소에서 증명한다.
+`scripts/ci/gate-integrity-lint.sh`가 위 규칙을 YAML에서 기계로 검사하고, `gate-integrity-lint-selftest.sh`가 규칙마다 위반하는 변형 워크플로를 만들어 거부되는지(그리고 기대한 이유로 거부되는지) 증명한다. 린트는 따옴표로 감싼 키(`"uses":`), 흐름 매핑과 시퀀스(`{}`와 단어 목록 제외), 앵커, 별칭, 태그, `shell:`, `defaults:`를 거부하고, 파일 어디에 있든 `${{ }}` 표현식은 `github.event.pull_request.number`, `...base.sha`, `!cancelled()` 셋만 허용한다(env의 head 유래 값 차단). `run`의 git 옵션은 읽기 전용 허용 목록(`--no-tags`, `--name-only`, `--numstat`, `--diff-filter=` 등)만 쓸 수 있어 `--output`(파일 쓰기), `--upload-pack`, `--ext-diff`와 이들의 약어가 막힌다. 둘 다 `ci.yml`의 `workflow-lint` job에서 돈다. `expectations-guard.sh`와 `gate-files-report.sh`의 동작은 `gate-integrity-selftest.sh`가 임시 저장소에서 증명한다.
 
 zizmor의 `dangerous-triggers`는 `pull_request_target` 자체를 경고한다. 위 불변식이 그 위험을 막으므로 `.github/zizmor.yml`에서 이 워크플로 한 곳(`gate-integrity.yml:3`, `on:` 블록)만 제외한다. 다른 워크플로나 다른 규칙은 제외하지 않는다.
 
