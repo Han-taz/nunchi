@@ -94,6 +94,8 @@ class ProposeRequest(Frozen):
     supersedes_id: UUID | None = None
     subject_id: UUID | None = None
     attribute: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    gate_flags: tuple[str, ...] = ()
+    """Rule ids the write gate raised. Set by server code only; the REST route resets it."""
 
     @model_validator(mode="after")
     def _only_notes_may_lack_sources(self) -> Self:

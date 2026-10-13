@@ -85,8 +85,8 @@ def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
             sql.SQL(
                 "INSERT INTO memory"
                 " (store_id, kind, title, body, source_refs, supersedes_id,"
-                " subject_id, attribute, on_behalf_of)"
-                " VALUES (%s, %s::memory_kind, %s, %s, %s, %s, %s, %s,"
+                " subject_id, attribute, gate_result, on_behalf_of)"
+                " VALUES (%s, %s::memory_kind, %s, %s, %s, %s, %s, %s, %s,"
                 " CASE WHEN app_sec.ctx_agent() IS NOT NULL THEN app_sec.ctx_user() END)"
                 " RETURNING id"
             ),
@@ -99,6 +99,7 @@ def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
                 req.supersedes_id,
                 req.subject_id,
                 req.attribute,
+                Jsonb({"flags": list(req.gate_flags)}),
             ),
         ).fetchall()
         if rows:
@@ -110,6 +111,22 @@ def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
         ).fetchone()
     assert live is not None  # noqa: S101 - the trigger returned NULL only because this row matched
     return ProposeOutcome(kind="reconfirmed", memory_id=live[0])
+
+
+def decide(
+    conn: Conn, memory_id: UUID, nonce: UUID | None, verdict: str, expected_version: int
+) -> str:
+    """app_sec.decide's raw answer: an outcome ('active', 'rejected', 'pending_quorum:n/m') or a
+    refusal ('stale', 'self_review', 'not_curator', 'duplicate:<outcome>', ...)."""
+    if nonce is None:
+        issued = conn.execute("SELECT app_sec.issue_card(%s)", (memory_id,)).fetchone()
+        assert issued is not None  # noqa: S101 - a SELECT of a function always returns one row
+        nonce = issued[0]  # type: ignore[assignment]
+    row = conn.execute(
+        "SELECT app_sec.decide(%s, %s, %s, %s)", (nonce, memory_id, expected_version, verdict)
+    ).fetchone()
+    assert row is not None  # noqa: S101 - a SELECT of a function always returns one row
+    return str(row[0])
 
 
 def history(conn: Conn, memory_id: UUID) -> list[MemoryVersion]:
