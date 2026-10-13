@@ -512,7 +512,7 @@ CREATE FUNCTION t.exec_list(r text DEFAULT 'app_rw') RETURNS text LANGUAGE sql A
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.add_entity_alias,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.entity_matches,app_sec.issue_card,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.verify_chain,public.principal_closure');
+  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.entity_matches,app_sec.issue_card,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.quorum,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
 SELECT t.eq('P3d nunchi_worker executes exactly the four worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
@@ -1229,6 +1229,23 @@ SELECT t.err('G7k a non-curator confirms', $q$UPDATE room_binding SET confirmed_
 SELECT t.err('G7l the curator confirms a room with no membership snapshot', $q$UPDATE room_binding SET confirmed_by = t.g5(5), confirmed_at = now() WHERE channel_id = 'C5NEW1'$q$, '23514');
 SELECT t.err('G7m a confirmed binding cannot swap its confirmer', $q$UPDATE room_binding SET confirmed_by = t.g5(2) WHERE channel_id = 'C5PUB'$q$, 'P0001');
 SELECT t.err('G7n a binding cannot be lowered from connect to public', $q$UPDATE room_binding SET kind = 'public' WHERE channel_id = 'C5CON'$q$, 'P0001');
+
+-- G9a–f) 채널 다이제스트 스위치와 커서: 스위치는 curator 만, 켜는 순간 커서는 지금으로, 커서는 contributor 이상이 앞으로만, 기본은 꺼짐
+BEGIN;
+SELECT t.eq('G9a a binding starts with the digest off and the cursor at zero', $q$SELECT digest_enabled || '/' || digest_cursor FROM room_binding WHERE channel_id = 'C5PUB'$q$, 'false/0');
+SELECT t.ctx(t.g5(3), NULL);
+SELECT t.err('G9b a reader switches the digest on', $q$SELECT app_sec.set_digest(t.g5b('C5PUB'), true)$q$, '42501');
+SELECT t.ctx(t.g5(2), NULL);
+SELECT t.err('G9c a contributor switches the digest on', $q$SELECT app_sec.set_digest(t.g5b('C5PUB'), true)$q$, '42501');
+SELECT t.ctx(t.g5(5), NULL);
+SELECT t.err('G9d the curator switches the digest on', $q$SELECT app_sec.set_digest(t.g5b('C5PUB'), true)$q$, 'ok');
+SELECT t.eq('G9e enabling starts the cursor at now, not at the channel history', $q$SELECT (digest_enabled AND digest_cursor > 1700000000000)::text FROM room_binding WHERE channel_id = 'C5PUB'$q$, 'true');
+SELECT t.ctx(t.g5(2), NULL);
+SELECT t.err('G9f a contributor moves the cursor', $q$SELECT app_sec.advance_digest(t.g5b('C5PUB'), 5)$q$, 'ok');
+SELECT t.eq('G9g the cursor never moves backwards', $q$SELECT (digest_cursor > 1700000000000)::text FROM room_binding WHERE channel_id = 'C5PUB'$q$, 'true');
+SELECT t.ctx(t.g5(3), NULL);
+SELECT t.err('G9h a reader moves the cursor', $q$SELECT app_sec.advance_digest(t.g5b('C5PUB'), 9999999999999)$q$, '42501');
+ROLLBACK;
 
 -- G6a–g) 신원: SCIM 으로 이은 활성 사용자만, 같은 Slack id 를 두 번 이을 수 없고, 앱은 표를 직접 읽지 못한다
 DO $do$ BEGIN

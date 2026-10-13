@@ -656,6 +656,8 @@ CREATE TABLE room_binding (
   confirmed_by uuid,
   confirmed_at timestamptz,
   revoked_at timestamptz,
+  digest_enabled boolean NOT NULL DEFAULT false,
+  digest_cursor bigint NOT NULL DEFAULT 0,
   CONSTRAINT binding_store_same_tenant FOREIGN KEY (tenant_id, store_id) REFERENCES store (tenant_id, id),
   CONSTRAINT binding_bound_by_same_tenant FOREIGN KEY (tenant_id, bound_by) REFERENCES principal (tenant_id, id),
   CONSTRAINT binding_confirmed_by_same_tenant
@@ -740,6 +742,41 @@ BEGIN
 END $$;
 CREATE TRIGGER room_binding_guard BEFORE INSERT OR UPDATE ON room_binding
 FOR EACH ROW EXECUTE FUNCTION app_sec.room_binding_guard();
+
+-- 채널 다이제스트 (U23): 바인딩마다 켜고 끄는 스위치(digest_enabled)와 읽은 곳까지의 커서(digest_cursor, Mattermost create_at 밀리초).
+-- app_rw 는 room_binding 에 쓰지 못하므로 아래 두 함수로만 바꾼다. 스위치는 그 store 의 curator 만, 커서는 contributor 이상(봇)만 만진다.
+-- 켜는 순간 커서를 지금으로 맞춘다: 켜기 전 대화는 읽지 않는다 (비용 상한).
+CREATE FUNCTION app_sec.set_digest(p_binding uuid, p_enabled boolean) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF app_sec.ctx_user() IS NULL THEN
+    RAISE EXCEPTION 'no user context' USING ERRCODE = '28000';
+  END IF;
+  UPDATE room_binding SET
+    digest_enabled = p_enabled,
+    digest_cursor = CASE WHEN p_enabled AND NOT digest_enabled
+      THEN greatest(digest_cursor, (extract(epoch FROM clock_timestamp()) * 1000)::bigint) ELSE digest_cursor END
+  WHERE id = p_binding AND tenant_id = app_sec.ctx_tenant() AND confirmed_by IS NOT NULL AND revoked_at IS NULL
+    AND store_id IN (SELECT app_sec.my_stores('curator'));
+  IF NOT found THEN
+    RAISE EXCEPTION 'not a curator of a live binding' USING ERRCODE = '42501';
+  END IF;
+END $$;
+
+-- 커서는 앞으로만 간다 (되돌리는 호출은 무시).
+CREATE FUNCTION app_sec.advance_digest(p_binding uuid, p_cursor bigint) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF app_sec.ctx_user() IS NULL THEN
+    RAISE EXCEPTION 'no user context' USING ERRCODE = '28000';
+  END IF;
+  UPDATE room_binding SET digest_cursor = greatest(digest_cursor, p_cursor)
+  WHERE id = p_binding AND tenant_id = app_sec.ctx_tenant() AND digest_enabled AND revoked_at IS NULL
+    AND store_id IN (SELECT app_sec.my_stores('contributor'));
+  IF NOT found THEN
+    RAISE EXCEPTION 'not a contributor of an enabled binding' USING ERRCODE = '42501';
+  END IF;
+END $$;
 
 -- Slack user.id -> principal. SCIM 으로 이은 활성 사용자만 돌려주고 그 밖에는 NULL 이다 (begin_request 이전, 컨텍스트 없이 쓴다).
 CREATE FUNCTION app_sec.resolve_identity(p_tenant uuid, p_platform text, p_platform_user_id text) RETURNS uuid
@@ -1671,3 +1708,5 @@ GRANT EXECUTE ON FUNCTION app_sec.entity_matches(text, integer) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.attribute_matches(uuid, uuid, text, integer) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.memory_as_of(uuid, uuid, text, date) TO app_rw;
 GRANT EXECUTE ON FUNCTION principal_closure(uuid) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.set_digest(uuid, boolean) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.advance_digest(uuid, bigint) TO app_rw;
