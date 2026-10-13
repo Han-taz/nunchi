@@ -15,17 +15,18 @@ from uuid import UUID
 import psycopg
 
 from eval import score
-from eval.corpus import Message, Query, load_messages, load_queries
+from eval.corpus import Message, Query, load_messages, load_queries, window_groups
 from eval.db import CONTRIBUTOR, CURATORS, STORE, fresh_database, superuser_url
 from eval.embedding import embed_documents
 from eval.oracle import ConceptEmbedder, OracleExtractor, OracleJudge
 from eval.score import Outcome
 from nunchi.capture import (
     CaptureContext,
+    CaptureResult,
     Created,
     Reconfirmed,
     Rejected,
-    capture,
+    capture_all,
 )
 from nunchi.config import SEARCH_RRF_K, SEARCH_VECTOR_FLOOR, Settings
 from nunchi.db import Conn, Pool, open_pool, request_tx
@@ -54,44 +55,80 @@ def _describe(conn: Conn, outcome_id: UUID) -> tuple[str, UUID | None, UUID | No
     return str(row[0]), row[1], row[2]  # type: ignore[return-value]
 
 
-def replay_one(
+def replay_group(
     pool: Pool,
     extractor: Extractor,
-    msg: Message,
+    group: list[Message],
     embedder: Embedder | None = None,
     judge: ValueJudge | None = None,
-) -> Outcome:
+) -> list[Outcome]:
+    """One capture of the window's text; its results line up with the gold items in order. A gold
+    item with no result is skipped, and a result with no gold item is a false positive."""
+    msg = group[0]
     context = CaptureContext(
         store_id=STORE,
         origin=MemoryOrigin.EXTERNAL,
         source_refs=(SourceRef(uri=f"https://eval.invalid/{msg.id}", system="slack"),),
         today=msg.today,
+        window=msg.group is not None,
     )
     try:
         with request_tx(pool, CONTRIBUTOR, None) as conn:
-            result = capture(conn, extractor, msg.filled, context, embedder, judge=judge)
-            if isinstance(result, Created | Reconfirmed):
-                db_kind, subject_id, conflict = _describe(conn, result.memory_id)
+            results = capture_all(conn, extractor, msg.filled, context, embedder, judge=judge)
+            described = {
+                i: _describe(conn, r.memory_id)
+                for i, r in enumerate(results)
+                if isinstance(r, Created | Reconfirmed)
+            }
     except ExtractionError:
-        return Outcome(message=msg, result="error")
-    if isinstance(result, Created):
+        return [Outcome(message=m, result="error") for m in group]
+    surplus = [
+        msg.model_copy(update={"remember": False, "memory": None}) for _ in results[len(group) :]
+    ]
+    paired = zip([*group, *surplus], results, strict=False)
+    outcomes = [_outcome(pool, m, r, described.get(i)) for i, (m, r) in enumerate(paired)]
+    outcomes += [Outcome(message=m, result="skipped") for m in group[len(results) :]]
+    return outcomes
+
+
+def replay(
+    pool: Pool,
+    extractor: Extractor,
+    messages: list[Message],
+    embedder: Embedder | None = None,
+    judge: ValueJudge | None = None,
+) -> list[Outcome]:
+    return [
+        o
+        for group in window_groups(messages)
+        for o in replay_group(pool, extractor, group, embedder, judge)
+    ]
+
+
+def _outcome(
+    pool: Pool,
+    msg: Message,
+    result: CaptureResult,
+    described: tuple[str, UUID | None, UUID | None] | None,
+) -> Outcome:
+    if isinstance(result, Created) and described is not None:
         verdict = _approve(pool, result) if result.status is MemoryStatus.PROPOSED else "active"
         return Outcome(
             message=msg,
             result="created",
             memory_id=result.memory_id,
-            db_kind=db_kind,
-            subject_id=subject_id,
-            conflicted=conflict is not None,
+            db_kind=described[0],
+            subject_id=described[1],
+            conflicted=described[2] is not None,
             verdict=verdict,
         )
-    if isinstance(result, Reconfirmed):
+    if isinstance(result, Reconfirmed) and described is not None:
         return Outcome(
             message=msg,
             result="reconfirmed",
             memory_id=result.memory_id,
-            db_kind=db_kind,
-            subject_id=subject_id,
+            db_kind=described[0],
+            subject_id=described[1],
         )
     return Outcome(message=msg, result="rejected" if isinstance(result, Rejected) else "skipped")
 
@@ -148,7 +185,7 @@ def run_eval(  # noqa: PLR0913, PLR0917 - one run's inputs
     with fresh_database(admin_url) as app_url:
         pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
         try:
-            outcomes = [replay_one(pool, extractor, m, embedder, judge) for m in messages]
+            outcomes = replay(pool, extractor, messages, embedder, judge)
             if embedder is not None:
                 with psycopg.connect(superuser_url(admin_url, app_url)) as admin:
                     embed_documents(admin, embedder, "title+body")
@@ -163,6 +200,7 @@ def run_eval(  # noqa: PLR0913, PLR0917 - one run's inputs
         "messages": len(messages),
         "queries": len(queries),
         "extraction": score.extraction(outcomes),
+        "item_recall": score.item_recall(outcomes),
         "kind_accuracy": score.kind_accuracy(outcomes),
         "relation_accuracy": score.relation_accuracy(outcomes),
         "fragmentation": score.fragmentation(outcomes, entity_rows),
@@ -184,7 +222,9 @@ def table(report: dict[str, Any]) -> str:
     )
     rows = [
         ("extraction precision", ex["precision"]),
-        ("extraction recall", ex["recall"]),
+        ("extraction recall (per item)", ex["recall"]),
+        ("multi-item window recall", report["item_recall"]["multi"]),
+        ("single-item recall", report["item_recall"]["single"]),
         ("kind accuracy", report["kind_accuracy"]),
         ("same detection", rel["same"]),
         ("update detection", rel["update"]),
@@ -197,7 +237,7 @@ def table(report: dict[str, Any]) -> str:
         ("search recall@1", srch["recall@1"]),
         ("search recall@5", srch["recall@5"]),
     ]
-    head = f"{report['messages']} messages, {report['queries']} queries"
+    head = f"{report['messages']} gold items, {report['queries']} queries"
     return "\n".join([head, *(f"{name:<28}{value}" for name, value in rows)])
 
 

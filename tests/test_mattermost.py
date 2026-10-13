@@ -107,14 +107,14 @@ class CountingExtractor:
         self.fail = False
         self.skip = False
 
-    def extract(self, source_text: str, context: ExtractContext) -> ProposalDraft | None:
+    def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]:
         self.calls += 1
         if self.fail:
             raise ExtractionError(FailureReason.API, "down")
         if self.skip:
-            return None
+            return ()
         text = source_text.strip()
-        return ProposalDraft(
+        draft = ProposalDraft(
             kind=MemoryKind.PROCEDURE,
             title=text.splitlines()[0],
             body=text,
@@ -123,6 +123,7 @@ class CountingExtractor:
             source_refs=context.source_refs,
             origin=context.origin,
         )
+        return (draft,)
 
 
 World = tuple[Deps, FakeServer, CountingExtractor]

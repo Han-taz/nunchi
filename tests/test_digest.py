@@ -94,8 +94,9 @@ class WindowExtractor:
     def __init__(self) -> None:
         self.seen: list[tuple[str, ExtractContext]] = []
         self.fail = False
+        self.also: tuple[ProposalDraft, ...] = ()
 
-    def extract(self, source_text: str, context: ExtractContext) -> ProposalDraft | None:
+    def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]:
         self.seen.append((source_text, context))
         if self.fail:
             raise ExtractionError(FailureReason.API, "down")
@@ -103,8 +104,8 @@ class WindowExtractor:
             (v for v in ("금지", "허용") if f"금요일 배포 {v}로 합의" in source_text), None
         )
         if value is None:
-            return None
-        return ProposalDraft(
+            return ()
+        draft = ProposalDraft(
             kind=MemoryKind.DECISION,
             title=f"금요일 배포 {value}",
             body=source_text,
@@ -114,6 +115,8 @@ class WindowExtractor:
             source_refs=context.source_refs,
             origin=context.origin,
         )
+        also = (d.model_copy(update={"source_refs": context.source_refs}) for d in self.also)
+        return (draft, *also)
 
 
 World = tuple[Digest, FakeMattermost, WindowExtractor, str]
@@ -216,6 +219,30 @@ def test_a_window_with_a_decision_creates_one_memory_and_a_rerun_creates_none(wo
         conn.execute("UPDATE room_binding SET digest_cursor = 0 WHERE channel_id = %s", (ROOM,))
     assert run_digest(digest) == DigestReport()
     assert (len(extractor.seen), len(rows(url))) == (1, 1)
+
+
+@pytest.mark.db
+def test_a_window_settling_three_things_counts_three_created_memories(world: World) -> None:
+    digest, fake, extractor, url = world
+    fake.posts = list(DECISION)
+    extractor.also = tuple(
+        ProposalDraft(
+            kind=MemoryKind.DECISION,
+            title=f"배포 {attribute} {value}",
+            subject_name="배포",
+            attribute=attribute,
+            value=value,
+            origin=MemoryOrigin.EXTERNAL,
+        )
+        for attribute, value in (("점검 시간", "새벽 2시"), ("롤백 담당", "정하늘"))
+    )
+
+    assert run_digest(digest) == DigestReport(windows=1, created=3)
+    assert sorted(title for title, *_ in rows(url)) == [
+        "금요일 배포 금지",
+        "배포 롤백 담당 정하늘",
+        "배포 점검 시간 새벽 2시",
+    ]
 
 
 @pytest.mark.db
@@ -360,10 +387,8 @@ def test_the_window_instruction_reaches_the_extractor_prompt() -> None:
         window=True,
     )
     assert "source: conversation window" in render_user_content("a: b", context)
-    assert (
-        "A conversation window may contain zero, one or several durable items; decisions only"
-        " when the group agreed; ignore debate before agreement." in SYSTEM_PROMPT
-    )
+    assert "List every durable item the group agreed on" in SYSTEM_PROMPT
+    assert "Skip debate before agreement. One entry per subject and attribute" in SYSTEM_PROMPT
 
 
 @pytest.mark.db

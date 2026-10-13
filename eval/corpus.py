@@ -28,6 +28,8 @@ class Message(BaseModel):
     """One captured message and what a perfect pipeline does with it.
 
     `memory` names the gold memory the message states; `updates` names the gold memory it replaces.
+    A conversation window that settles several things is one row per gold item with the same text
+    and the same `group`; the rows are adjacent in file order.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -44,6 +46,7 @@ class Message(BaseModel):
     updates: str | None
     why: str | None = None
     secret: bool = False
+    group: str | None = None
 
     @property
     def filled(self) -> str:
@@ -73,3 +76,14 @@ def load_messages(limit: int | None = None) -> list[Message]:
 def load_queries() -> list[Query]:
     lines = (CORPUS_DIR / "queries.jsonl").read_text().splitlines()
     return [Query.model_validate_json(line) for line in lines]
+
+
+def window_groups(messages: list[Message]) -> list[list[Message]]:
+    """Rows that share a group are one window; every other row is its own."""
+    out: list[list[Message]] = []
+    for m in messages:
+        if m.group is not None and out and out[-1][0].group == m.group:
+            out[-1].append(m)
+        else:
+            out.append([m])
+    return out

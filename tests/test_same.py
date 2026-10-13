@@ -84,16 +84,20 @@ class Say:
         draft_value = value
 
         class Ex:
-            def extract(self, source_text: str, context: ExtractContext) -> ProposalDraft:
-                return ProposalDraft(
-                    kind=kind,
-                    title=source_text,
-                    body=source_text,
-                    subject_name="A사",
-                    attribute=attribute,
-                    value=draft_value,
-                    source_refs=context.source_refs,
-                    origin=context.origin,
+            def extract(
+                self, source_text: str, context: ExtractContext
+            ) -> tuple[ProposalDraft, ...]:
+                return (
+                    ProposalDraft(
+                        kind=kind,
+                        title=source_text,
+                        body=source_text,
+                        subject_name="A사",
+                        attribute=attribute,
+                        value=draft_value,
+                        source_refs=context.source_refs,
+                        origin=context.origin,
+                    ),
                 )
 
         with request_tx(self.pool, USER, None) as conn:

@@ -29,9 +29,9 @@ class Scripted:
         self.entity_id: UUID | None = None
         self.body: str = ""
 
-    def extract(self, source_text: str, context: ExtractContext) -> ProposalDraft:
+    def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]:
         self.seen = context
-        return ProposalDraft(
+        draft = ProposalDraft(
             kind=MemoryKind.FACT,
             title=self.body,
             body=self.body,
@@ -41,6 +41,7 @@ class Scripted:
             source_refs=context.source_refs,
             origin=context.origin,
         )
+        return (draft,)
 
 
 def say(  # noqa: PLR0913, PLR0917 - a spoken fact is five values

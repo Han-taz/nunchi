@@ -67,7 +67,7 @@ class Script:
                 "type": "message",
                 "role": "assistant",
                 "model": MODEL,
-                "content": [{"type": "text", "text": json.dumps(self.reply)}],
+                "content": [{"type": "text", "text": json.dumps({"items": [self.reply]})}],
                 "stop_reason": "end_turn",
                 "stop_sequence": None,
                 "usage": {"input_tokens": 1, "output_tokens": 1},

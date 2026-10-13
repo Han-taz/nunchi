@@ -12,7 +12,7 @@ from eval import score
 from eval.corpus import Message, Query
 from eval.db import fresh_database, superuser_url
 from eval.embedding import VARIANTS, CachingEmbedder, embed_documents
-from eval.run import replay_one, run_search
+from eval.run import replay, run_search
 from eval.score import Outcome
 from nunchi.config import Settings
 from nunchi.db import open_pool
@@ -36,9 +36,7 @@ def run_sweep(  # noqa: PLR0913, PLR0917 - one run's inputs
     with fresh_database(admin_url) as app_url:
         pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
         try:
-            outcomes: list[Outcome] = [
-                replay_one(pool, extractor, m, cached, judge) for m in messages
-            ]
+            outcomes: list[Outcome] = replay(pool, extractor, messages, cached, judge)
             rows.append(_row(pool, queries, outcomes, None, "trigram", None, None))
             with psycopg.connect(superuser_url(admin_url, app_url)) as admin:
                 for variant in VARIANTS:

@@ -11,27 +11,21 @@ def reply_for(user_content: str) -> dict[str, object]:
     source = user_content.split("<source>\n", 1)[1].rsplit("\n</source>", 1)[0].strip()
     match = OWNER.match(source)
     if match is None:
-        return {
-            "relation": "not_worth",
-            "relation_id": None,
-            "kind": "note",
-            "title": "-",
-            "body": None,
-            "subject_name": None,
-            "attribute": None,
-            "value": None,
-            "valid_from": None,
-        }
+        return {"items": []}
     return {
-        "relation": "new",
-        "relation_id": None,
-        "kind": "fact",
-        "title": source,
-        "body": source,
-        "subject_name": match["subject"],
-        "attribute": "담당자",
-        "value": match["name"],
-        "valid_from": None,
+        "items": [
+            {
+                "relation": "new",
+                "relation_id": None,
+                "kind": "fact",
+                "title": source,
+                "body": source,
+                "subject_name": match["subject"],
+                "attribute": "담당자",
+                "value": match["name"],
+                "valid_from": None,
+            }
+        ]
     }
 
 
