@@ -4,7 +4,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-export POSTGRES_PASSWORD=e2e-postgres APP_RW_PASSWORD=e2e-app-rw DEV_ISSUER=https://dev-idp.test
+export POSTGRES_PASSWORD=e2e-postgres APP_RW_PASSWORD=e2e-app-rw WORKER_PASSWORD=e2e-worker DEV_ISSUER=https://dev-idp.test
+export NUNCHI_WORKER_DATABASE_URL=postgres://nunchi_worker:e2e-worker@postgres:5432/postgres
 export MCP_PORT="${MCP_PORT:-18000}" API_PORT="${API_PORT:-18080}"
 compose=(docker compose -f deploy/compose.yml -f deploy/compose.e2e.yml)
 

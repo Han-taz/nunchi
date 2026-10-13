@@ -49,6 +49,7 @@ services:
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD}
       APP_RW_PASSWORD: ${APP_RW_PASSWORD}
+      WORKER_PASSWORD: ${WORKER_PASSWORD}
     volumes:
       - ./seed.sql:/seed.sql:ro
     entrypoint:
@@ -56,7 +57,8 @@ services:
       - -ec
       - >-
         psql -h postgres -U postgres -v ON_ERROR_STOP=1
-        -c "ALTER ROLE app_rw PASSWORD '$$APP_RW_PASSWORD'" -f /seed.sql
+        -c "ALTER ROLE app_rw PASSWORD '$$APP_RW_PASSWORD'"
+        -c "ALTER ROLE nunchi_worker LOGIN PASSWORD '$$WORKER_PASSWORD'" -f /seed.sql
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -92,5 +94,5 @@ services:
     <<: *app
     command: ["python", "-m", "nunchi.worker", "--every", "3600"]
     environment:
-      NUNCHI_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      NUNCHI_DATABASE_URL: ${NUNCHI_WORKER_DATABASE_URL}
     restart: unless-stopped
