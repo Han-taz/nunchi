@@ -16,7 +16,7 @@ from nunchi.auth.identity import Identity
 from nunchi.auth.tokens import MAX_TOKEN_CHARS, IssuerConfig, OidcSettings, TokenVerifier
 from nunchi.db import Pool
 from tests import jwt_support as j
-from tests.conftest import AGENT, AGENT_NO_GRANT, OTHER, STORE, TENANT, USER
+from tests.conftest import AGENT, AGENT_NO_GRANT, API_SUBJECT, OTHER, STORE, TENANT, USER
 
 OTHER_TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000c2")
 pytestmark = pytest.mark.db
@@ -81,12 +81,16 @@ def test_propose_history_dependents(client: TestClient) -> None:
     res = propose(client, h)
     assert res.status_code == 201
     created = res.json()
+    assert set(created) == {"id", "outcome"}
+    assert created["outcome"] == "created"
     assert res.headers["location"] == f"/v1/memories/{created['id']}"
-    assert (created["status"], created["origin"], created["created_by"]) == (
+    got = client.get(f"/v1/memories/{created['id']}", headers=h).json()
+    assert (got["status"], got["origin"], got["created_by"]) == (
         "provisional",
         "internal",
         str(USER),
     )
+    assert (got["subject_id"], got["attribute"]) == (None, None)
     hist = client.get(f"/v1/memories/{created['id']}/history", headers=h).json()
     assert [(v["version"], v["op"]) for v in hist] == [(1, "propose"), (1, "auto_activate")]
     child = propose(
@@ -95,6 +99,8 @@ def test_propose_history_dependents(client: TestClient) -> None:
         kind="fact",
         title="child",
         source_refs=[{"uri": f"memory://{created['id']}"}],
+        subject_id=str(API_SUBJECT),
+        attribute="owner",
     )
     assert child.status_code == 201
     deps = client.get(f"/v1/memories/{created['id']}/dependents", headers=h).json()
@@ -103,10 +109,33 @@ def test_propose_history_dependents(client: TestClient) -> None:
     assert client.get(f"/v1/memories/{uuid.uuid4()}/dependents", headers=h).status_code == 404
 
 
+def test_propose_same_key_and_value_reconfirms(client: TestClient) -> None:
+    h = as_user(USER)
+    fact = {
+        "kind": "fact",
+        "title": "Infra owner",
+        "body": "Kim",
+        "source_refs": [{"uri": "https://example.com/org"}],
+        "subject_id": str(API_SUBJECT),
+        "attribute": "Owner",
+    }
+    first = propose(client, h, **fact)
+    again = propose(client, h, **fact)
+    assert (first.status_code, first.json()["outcome"]) == (201, "created")
+    assert (again.status_code, again.json()) == (
+        200,
+        {"id": first.json()["id"], "outcome": "reconfirmed"},
+    )
+    got = client.get(f"/v1/memories/{first.json()['id']}", headers=h).json()
+    assert (got["subject_id"], got["attribute"]) == (str(API_SUBJECT), "owner")
+    assert got["last_confirmed_at"] is not None
+
+
 def test_propose_rejections(client: TestClient) -> None:
     h = as_user(USER)
     assert propose(client, h, origin="external").status_code == 422
     assert propose(client, h, kind="fact").status_code == 422
+    assert propose(client, h, subject_id=str(API_SUBJECT)).status_code == 422
     assert propose(client, as_user(OTHER)).status_code == 403
     assert propose(client, as_user(USER, AGENT)).status_code == 403
     assert propose(client, h, supersedes_id=str(uuid.uuid4())).status_code == 404

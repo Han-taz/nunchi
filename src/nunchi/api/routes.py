@@ -1,8 +1,9 @@
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response
+from pydantic import BaseModel
 
 from nunchi.api.deps import Runner, runner
 from nunchi.api.problems import ApiError
@@ -17,6 +18,12 @@ from nunchi.domain.models import (
     SearchHit,
     StoreRole,
 )
+
+
+class ProposeOutcomeBody(BaseModel):
+    id: UUID
+    outcome: Literal["created", "reconfirmed"]
+
 
 router = APIRouter(prefix="/v1")
 
@@ -61,11 +68,12 @@ def get_memory(memory_id: UUID, run: Run) -> Memory:
     return _visible(run, memory_id)
 
 
-@router.post("/memories", status_code=HTTPStatus.CREATED)
-def propose(body: ProposeRequest, run: Run, response: Response) -> Memory:
-    memory = run(lambda c: repo.propose(c, body))
-    response.headers["Location"] = f"/v1/memories/{memory.id}"
-    return memory
+@router.post("/memories", responses={HTTPStatus.CREATED: {"model": ProposeOutcomeBody}})
+def propose(body: ProposeRequest, run: Run, response: Response) -> ProposeOutcomeBody:
+    outcome = run(lambda c: repo.propose(c, body))
+    response.status_code = HTTPStatus.CREATED if outcome.kind == "created" else HTTPStatus.OK
+    response.headers["Location"] = f"/v1/memories/{outcome.memory_id}"
+    return ProposeOutcomeBody(id=outcome.memory_id, outcome=outcome.kind)
 
 
 @router.get("/memories/{memory_id}/history")

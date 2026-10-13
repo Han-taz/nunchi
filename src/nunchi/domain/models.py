@@ -147,6 +147,9 @@ class Memory(MemorySummary):
     version: int
     created_at: datetime
     updated_at: datetime
+    subject_id: UUID | None
+    attribute: str | None
+    last_confirmed_at: datetime
 
 
 class ProposeOutcome(Frozen):
