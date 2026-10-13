@@ -39,11 +39,15 @@ class GateResult:
         return {
             "verdict": self.verdict.value,
             "flags": [
-                {"rule": f.rule_id, "kind": f.kind.value, "action": f.action.value,
-                 "message": f.message}
+                {
+                    "rule": f.rule_id,
+                    "kind": f.kind.value,
+                    "action": f.action.value,
+                    "message": f.message,
+                }
                 for f in self.flags
             ],
-        }  # fmt: skip
+        }
 
 
 def _hit(rule: Rule, text: str) -> bool:
