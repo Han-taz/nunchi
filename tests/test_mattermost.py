@@ -86,7 +86,7 @@ class FakeServer:
             return httpx.Response(201, json={"id": "dm" * 13})
         if path == "/posts" and request.method == "POST":
             self.dms.append(body)
-            return httpx.Response(201, json={})
+            return httpx.Response(201, json={"id": CARD_POST})
         if path == "/posts/" + CARD_POST:
             return httpx.Response(200, json={"id": CARD_POST, "props": self.dms[-1]["props"]})
         if path == "/teams/" + TEAM:
