@@ -75,6 +75,8 @@ class SourceRef(Frozen):
     uri: Annotated[str, Field(min_length=1, max_length=2048)]
     system: str | None = None
     inherit_acl: bool = False
+    workspace_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    channel_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 def check_sources(kind: MemoryKind, source_refs: tuple[SourceRef, ...]) -> None:
