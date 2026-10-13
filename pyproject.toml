@@ -78,8 +78,7 @@ exclude_also = ["if __name__ == .__main__.:"]
 known_first_party = ["nunchi"]
 
 [tool.deptry.per_rule_ignores]
-# psycopg-binary: the C accelerator selected by the [binary] extra. uvicorn: the ASGI server,
-# started as `uvicorn --factory nunchi.api.serve:create`. Neither is imported.
+# never imported: psycopg-binary (the [binary] extra), uvicorn (`uvicorn --factory nunchi.api.serve:create`)
 DEP002 = ["psycopg-binary", "uvicorn"]
 
 [tool.mutmut]
