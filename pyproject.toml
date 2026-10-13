@@ -9,12 +9,14 @@ dependencies = [
   "psycopg-pool>=3.2",
   "pydantic>=2.9",
   "pydantic-settings>=2.6",
+  "anthropic>=1.13.0",
 ]
 
 [dependency-groups]
 dev = [
   "deptry>=0.21",
   "diff-cover>=9.2",
+  "httpx2>=2.13.1",
   "hypothesis>=6.120",
   "mutmut>=3.2",
   "mypy>=1.13",
