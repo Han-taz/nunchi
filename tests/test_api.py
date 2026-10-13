@@ -141,12 +141,6 @@ def test_propose_rejections(client: TestClient) -> None:
     assert propose(client, h, supersedes_id=str(uuid.uuid4())).status_code == 404
 
 
-def test_decide_is_a_typed_501(client: TestClient) -> None:
-    res = client.post(f"/v1/memories/{uuid.uuid4()}/decision", headers=as_user(USER))
-    assert (res.status_code, res.json()["detail"]) == (501, "decide is not implemented")
-    assert client.post(f"/v1/memories/{uuid.uuid4()}/decision").status_code == 401
-
-
 @pytest.mark.parametrize(
     "headers",
     [

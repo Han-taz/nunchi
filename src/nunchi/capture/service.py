@@ -120,7 +120,8 @@ def capture(
         ),
         lambda name: _resolve_or_create(conn, name),
     )
-    outcome = repo.propose(conn, request)
+    flags = tuple(f.rule_id for f in gate.flags)
+    outcome = repo.propose(conn, request.model_copy(update={"gate_flags": flags}))
     if outcome.kind == "reconfirmed":
         return Reconfirmed(memory_id=outcome.memory_id)
     row = conn.execute(
@@ -132,5 +133,5 @@ def capture(
         tier=str(row[0]),
         status=MemoryStatus(str(row[1])),
         conflict_with=row[2],
-        flags=tuple(f.rule_id for f in gate.flags),
+        flags=flags,
     )
