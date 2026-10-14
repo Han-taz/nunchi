@@ -41,7 +41,8 @@ from nunchi.gate.rules import Action
 _CANDIDATES = 5
 _QUERY_CHARS = 500
 _QUERY_LINES = 8
-_LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL, MemoryStatus.CHALLENGER)
+# search folds an open challenger into its live row, so asking for it too would list it twice
+_LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL)
 
 
 class CaptureContext(Frozen):
