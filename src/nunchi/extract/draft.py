@@ -52,13 +52,23 @@ class Candidate(Frozen):
     value: str | None = None
 
 
+class VocabEntry(Frozen):
+    """One attribute of a subject: the key memories are stored under, its name, and the question
+    it answers. Two statements are about one topic exactly when they share a key."""
+
+    key: str
+    label: str
+    question: str
+
+
 class EntityContext(Frozen):
-    """An entity the store already knows, offered to the extractor so it reuses the id."""
+    """An entity the store already knows, offered to the extractor so it reuses the id. Its
+    vocabulary lists the attributes the extractor may pick a key from."""
 
     id: UUID
     name: str
     aliases: tuple[str, ...] = ()
-    attributes: tuple[str, ...] = ()
+    vocabulary: tuple[VocabEntry, ...] = ()
 
 
 class ProposalDraft(Frozen):
@@ -70,6 +80,10 @@ class ProposalDraft(Frozen):
     subject_name: str | None = None
     subject_entity_id: UUID | None = None
     attribute: str | None = None
+    """The key of a vocabulary entry, or the key proposed for a new one."""
+    attribute_label: str | None = None
+    attribute_question: str | None = None
+    """Set with a proposed key: the name and the question the new attribute answers."""
     value: Annotated[str, Field(min_length=1, max_length=200)] | None = None
     source_refs: tuple[SourceRef, ...] = ()
     valid_from: date | None = None

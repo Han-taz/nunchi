@@ -4,7 +4,7 @@ import pytest
 
 from nunchi.capture import CaptureContext, Created, Reconfirmed, capture
 from nunchi.capture.resolve import ResolveConfig
-from nunchi.capture.same import numbers_conflict, strip_honorific
+from nunchi.capture.same import free_attribute, numbers_conflict, strip_honorific
 from nunchi.db import Pool, request_tx
 from nunchi.domain.models import MemoryKind, MemoryOrigin, SourceRef
 from nunchi.extract import ExtractContext, ProposalDraft, ValueJudge
@@ -68,9 +68,7 @@ class FakeJudge:
         self.topic = topic
         self.asked: list[tuple[str, str]] = []
 
-    def same_topic(
-        self, first: str, second: str, first_title: str = "", second_title: str = ""
-    ) -> bool:
+    def same_question(self, first: str, second: str) -> bool:
         return self.topic
 
     def same(self, first: str, second: str, first_title: str = "", second_title: str = "") -> bool:
@@ -218,7 +216,7 @@ def test_short_paraphrase_reconfirms_when_the_judge_says_same(world: Pool) -> No
     again = say("v1.0 범위에서 제외", attribute="v1.0 포함 여부")
     assert isinstance(again, Reconfirmed)
     assert again.memory_id == first.memory_id
-    assert stored(world) == [("v1.0 포함 여부", "v1.0에서 제거")]
+    assert stored(world) == [("v1-0-포함-여부", "v1.0에서 제거")]
     assert judge.asked == [("v1.0 범위에서 제외", "v1.0에서 제거")]
 
 
@@ -240,9 +238,7 @@ def test_a_paraphrase_of_the_open_challenger_reconfirms_the_challenger(world: Po
         ) -> bool:
             return ("읽기" in first) == ("읽기" in second)
 
-        def same_topic(
-            self, first: str, second: str, first_title: str = "", second_title: str = ""
-        ) -> bool:
+        def same_question(self, first: str, second: str) -> bool:
             return True
 
     say = Say(world, ByWord())
@@ -263,21 +259,21 @@ def test_same_decision_under_another_attribute_lands_on_the_existing_key(world: 
     again = say("Mattermost API 팀 멤버십 조회", attribute="_user_teams 조회 방식")
     assert isinstance(again, Reconfirmed)
     assert again.memory_id == first.memory_id
-    assert stored(world) == [("팀 정보 출처", "mattermost 팀 멤버십")]
+    assert stored(world) == [("팀-정보-출처", "mattermost 팀 멤버십")]
 
 
 @pytest.mark.db
 def test_other_attribute_with_a_different_decision_stays_a_new_key(world: Pool) -> None:
-    say = Say(world, FakeJudge(False))
+    say = Say(world, FakeJudge(False, topic=False))
     say("Mattermost 팀 멤버십", attribute="팀 정보 출처")
     other = say("Mattermost API 팀 멤버십 조회", attribute="_user_teams 조회 방식")
     assert isinstance(other, Created)
-    assert [a for a, _ in stored(world)] == ["팀 정보 출처", "_user_teams 조회 방식"]
+    assert [a for a, _ in stored(world)] == ["팀-정보-출처", "user_teams-조회-방식"]
 
 
 @pytest.mark.db
-def test_unrelated_values_under_another_attribute_never_reach_the_judge(world: Pool) -> None:
-    judge = FakeJudge(True)
+def test_values_of_another_question_never_reach_the_value_judge(world: Pool) -> None:
+    judge = FakeJudge(True, topic=False)
     say = Say(world, judge)
     say("이민수", attribute="담당자")
     say("매월 1일", attribute="정산일")
@@ -291,3 +287,14 @@ def test_title_glued_to_a_word_is_not_a_person(world: Pool) -> None:
     other = say("영업팀장", attribute="담당")
     assert isinstance(other, Created)
     assert other.conflict_with == first.memory_id
+
+
+@pytest.mark.db
+def test_free_attribute_skips_the_names_open_rows_hold_and_numbers_the_last(world: Pool) -> None:
+    Say(world)("이민수")
+    with request_tx(world, USER, None) as conn:
+        row = conn.execute("SELECT subject_id FROM memory WHERE attribute = '담당자'").fetchone()
+        assert row is not None
+        subject = row[0]
+        assert free_attribute(conn, STORE, subject, ["담당자", " 새 이름 "]) == "새 이름"  # type: ignore[arg-type]
+        assert free_attribute(conn, STORE, subject, ["담당자"]) == "담당자 (2)"  # type: ignore[arg-type]

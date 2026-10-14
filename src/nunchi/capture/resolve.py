@@ -16,6 +16,7 @@ from uuid import UUID
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from nunchi.capture.vocab import load
 from nunchi.db import Conn
 from nunchi.embed import Embedder, EmbedError
 from nunchi.extract import EntityContext
@@ -40,12 +41,10 @@ class ResolveConfig(BaseSettings):
 
     trigram_min: float = Field(0.6, ge=0, le=1)
     subject_cosine_min: float = Field(0.80, ge=0, le=1)
-    attribute_cosine_min: float = Field(0.80, ge=0, le=1)
-    reuse_trigram_min: float = Field(0.3, ge=0, le=1)
-    reuse_candidates: int = Field(3, ge=1)
     scan_limit: int = Field(200, ge=1)
     context_entities: int = Field(10, ge=1)
     context_min: float = Field(0.5, ge=0, le=1)
+    context_vocabulary: int = Field(12, ge=1)
 
 
 # Business attributes that mean one thing under many names, by match_key. Seeded so day one is right
@@ -122,31 +121,18 @@ def resolve_subject(conn: Conn, name: str, embedder: Embedder | None, cfg: Resol
     return hit
 
 
-def resolve_attribute(  # noqa: PLR0913, PLR0917 - the key (store, subject), the name and the two knobs
-    conn: Conn,
-    store_id: UUID,
-    subject_id: UUID,
-    attribute: str,
-    embedder: Embedder | None,
-    cfg: ResolveConfig,
-) -> str:
-    """The subject's existing live attribute that `attribute` denotes, else `attribute` itself."""
+def resolve_attribute(conn: Conn, store_id: UUID, subject_id: UUID, attribute: str) -> str:
+    """The subject's live attribute that `attribute` spells again (the same words in other
+    spacing or case, or a seeded synonym), else `attribute` itself. Whether a different wording
+    asks the same question is the vocabulary's call (nunchi.capture.vocab), not a name match."""
     rows = _rows(
         conn,
-        "SELECT attribute, sim FROM app_sec.attribute_matches(%s, %s, %s, %s)",
-        (store_id, subject_id, attribute, cfg.scan_limit),
+        "SELECT attribute FROM app_sec.attribute_matches(%s, %s, %s, 200)",
+        (store_id, subject_id, attribute),
     )
-    if not rows:
-        return attribute
     key = match_key(attribute)
-    same = next((r[0] for r in rows if r[1] >= 1.0 or match_key(r[0]) == key), None)
-    if same is None:
-        group = _synonym_group(key)
-        same = next((r[0] for r in rows if group and match_key(r[0]) in group), None)
-    if same is None and rows[0][1] >= cfg.trigram_min:
-        same = rows[0][0]
-    if same is None:
-        same = _nearest(embedder, attribute, {r[0]: r[0] for r in rows}, cfg.attribute_cosine_min)
+    group = _synonym_group(key)
+    same = next((r[0] for r in rows if match_key(r[0]) == key or match_key(r[0]) in group), None)
     return same or attribute
 
 
@@ -170,17 +156,17 @@ def known_entities(
         conn,
         "SELECT e.id, e.canonical_name,"
         " array(SELECT a.alias_norm FROM entity_alias AS a WHERE a.entity_id = e.id"
-        "  ORDER BY a.alias_norm LIMIT 6),"
-        " array(SELECT DISTINCT m.attribute FROM memory AS m WHERE m.subject_id = e.id"
-        "  AND m.store_id = %s AND m.status IN ('active', 'provisional')"
-        " AND m.attribute IS NOT NULL ORDER BY m.attribute LIMIT 8)"
+        "  ORDER BY a.alias_norm LIMIT 6)"
         " FROM entity AS e WHERE e.id = ANY(%s)",
-        (store_id, ids),
+        (ids,),
     )
     by_id = {r[0]: r for r in found}
     return tuple(
         EntityContext(
-            id=i, name=by_id[i][1], aliases=tuple(by_id[i][2]), attributes=tuple(by_id[i][3])
+            id=i,
+            name=by_id[i][1],
+            aliases=tuple(by_id[i][2]),
+            vocabulary=load(conn, store_id, i)[: cfg.context_vocabulary],
         )
         for i in ids
         if i in by_id

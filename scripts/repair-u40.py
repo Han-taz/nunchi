@@ -28,7 +28,7 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 import psycopg
@@ -37,7 +37,14 @@ from psycopg.types.json import Jsonb
 
 from nunchi.capture.same import free_attribute
 from nunchi.db import bind_identity
-from nunchi.extract import ValueJudge, build_judge
+from nunchi.extract import build_judge
+
+
+class ValueJudge(Protocol):
+    def same_topic(
+        self, first: str, second: str, first_title: str = "", second_title: str = ""
+    ) -> bool: ...
+
 
 PAIRS = (
     "SELECT r.id AS rid, r.store_id, r.subject_id, r.attribute, r.status::text AS rstatus,"
