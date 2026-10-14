@@ -21,8 +21,7 @@ def draft(title: str, value: str = "값") -> ProposalDraft:
     [
         "로그인 페이지 OAuth URL을 /auth/mattermost/authorize로 수정 필요",
         "S2 간격 토큰은 foundation.md 용어(spacing-xs~2xl)로 통일 필요",
-        "배포 스크립트를 정리해야 한다",
-        "다음 주에 마이그레이션을 할 예정",
+        "OAuth 콜백 경로 확인해야 합니다",
         "백엔드 로그아웃 엔드포인트 구현 완료 (POST /auth/mattermost/logout)",
         "docs/design/foundation.md 머지 완료, §6 스타일 방식 기준 문서",
         "로그인 라우터를 푸시했다",
@@ -34,8 +33,8 @@ def test_todos_and_status_claims_are_not_worth_keeping(title: str) -> None:
     assert not_worth(draft(title)) is True
 
 
-def test_a_status_claim_in_the_value_is_not_worth_keeping() -> None:
-    assert not_worth(draft("로그아웃 엔드포인트", "구현 완료")) is True
+def test_a_status_claim_in_the_value_alone_is_kept() -> None:
+    assert not_worth(draft("로그아웃 엔드포인트", "구현 완료")) is False
 
 
 @pytest.mark.parametrize(
@@ -46,7 +45,17 @@ def test_a_status_claim_in_the_value_is_not_worth_keeping() -> None:
         "Cloudflare beacon은 v1.0에서 제거",
         "마이그레이션 완료일은 3월 31일",
         "PR 머지 후 릴리즈 태그를 단다",
+        "API 키는 서버에서만 사용해야 한다",
+        "DB는 Postgres 사용 필요",
+        "작업 현황 대시보드는 v1.0에서 제외",
+        "배포 스크립트를 정리해야 한다",
+        "타임아웃 기본값은 5초로 수정했다",
     ],
 )
 def test_decisions_and_facts_stay(title: str) -> None:
     assert not_worth(draft(title)) is False
+
+
+@pytest.mark.parametrize("value", ["5초로 수정했다", "추가했음", "푸시했다"])
+def test_the_value_is_never_scanned(value: str) -> None:
+    assert not_worth(draft("타임아웃 기본값", value)) is False

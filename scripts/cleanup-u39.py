@@ -83,7 +83,7 @@ def build_plan(rows: list[dict[str, Any]], judge: ValueJudge | None) -> list[Act
     plan: list[Action] = []
     gone: set[Any] = set()
     for row in rows:
-        if not_worth_text(row["title"], row["value"]):
+        if not_worth_text(row["title"]):
             plan.append(Action("reject", row, None, "todo or status claim"))
             gone.add(row["id"])
     left = [r for r in rows if r["id"] not in gone]

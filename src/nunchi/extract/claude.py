@@ -48,8 +48,9 @@ Describe each entry as follows. Pick relation:
 remembering: chit-chat or social talk; transient logistics such as meeting times or who is out \
 today; progress or status reports ("X worked on Y, tests pass", "작업 현황", updates in the \
 "했습니다/통과했습니다" style, "구현 완료", "푸시했다", "머지했다", PR or branch announcements) \
-that go stale as soon as the work moves on; a todo or request for work to be done ("~수정 필요", \
-"~해야 한다", "~할 예정"), because it states no decision; debate that has not reached a decision; \
+that go stale as soon as the work moves on; a todo naming a concrete fix \
+("~수정 필요", "~구현 필요", "~확인 필요"), because it states no decision (a policy such as \
+"~해야 한다" is a decision, keep it); debate that has not reached a decision; \
 a personal matter or an evaluation of a person; \
 something already well documented at its source, where a link is enough.
 - same_as when a candidate already states the same value for the same subject and attribute. A \

@@ -1,34 +1,27 @@
 """Statements that are never memories, however the extractor labelled them.
 
-Todos ("수정 필요", "할 예정"), status claims ("구현 완료", "머지했다", "작업 현황") and PR
-announcements go stale as the work moves, and one stored claim was false. The extractor prompt says
-so; this is the server's own check on the draft's title and value."""
+Only a title that is plainly a concrete todo, a completed-work report or a PR announcement is
+dropped. A policy ("서버에서만 사용해야 한다") or a decision ("Postgres 사용 필요", "작업 현황
+대시보드는 v1.0에서 제외") is kept, and the value is never scanned."""
 
 import re
 
 from nunchi.extract import ProposalDraft
 
-_TODO = re.compile(
-    r"(?:필요|해야\s?(?:함|한다|합니다|됨|된다)|할\s?예정|예정이다|예정입니다)[\s.!)\]]*$"
-)
-_STATUS = re.compile(
-    r"(?:구현|머지|푸시|배포|작업|적용|반영|수정|추가|연동)\s?(?:완료|했(?:다|습니다|어요|음))"
-    r"|(?:푸시|머지)(?:했|됐|되었)"
-    r"|(?:작업|진행)\s?현황"
-)
-_PR = re.compile(
-    r"\bPR\s?#?\d+.{0,20}(?:올렸|올립니다|열었|오픈|리뷰\s?(?:요청|부탁))", re.IGNORECASE
+_END = r"[\s.!)\]]*$"
+_RULES = (
+    re.compile(rf"(?:수정|구현|확인|추가|통일)\s?필요{_END}"),
+    re.compile(rf"(?:수정|구현|확인|추가|반영)해야\s?(?:함|합니다){_END}"),
+    re.compile(r"(?:구현|머지|반영)\s?완료(?!일|조건|기준)"),
+    re.compile(r"푸시\s?(?:했|완료)"),
+    re.compile(r"작업\s?현황\s*(?:\([\w.\-]+\))?\s*$"),
+    re.compile(r"\bPR\s?(?:#\d+\s?)?올렸", re.IGNORECASE),
 )
 
 
-def not_worth_text(title: str, value: str | None) -> bool:
-    return bool(
-        _TODO.search(title.strip())
-        or _STATUS.search(title)
-        or _PR.search(title)
-        or (value is not None and _STATUS.search(value))
-    )
+def not_worth_text(title: str) -> bool:
+    return any(rule.search(title.strip()) for rule in _RULES)
 
 
 def not_worth(draft: ProposalDraft) -> bool:
-    return not_worth_text(draft.title, draft.value)
+    return not_worth_text(draft.title)

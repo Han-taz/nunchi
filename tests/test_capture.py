@@ -274,6 +274,17 @@ def test_a_window_with_one_known_item_reconfirms_it_and_creates_two(
 
 
 @pytest.mark.db
+def test_a_todo_the_extractor_labelled_new_is_skipped_but_a_policy_is_kept(world: Pool) -> None:
+    todo = fact(title="OAuth URL을 /auth/authorize로 수정 필요")
+    policy = fact(title="API 키는 서버에서만 사용해야 한다", attribute="키 정책")
+    before = counts(world)
+    results = run_window(world, todo, policy)
+    assert results[0] == Skipped()
+    assert isinstance(results[1], Created)
+    assert counts(world)[0] == before[0] + 1
+
+
+@pytest.mark.db
 def test_a_chit_chat_window_stores_nothing(world: Pool) -> None:
     before = counts(world)
     chat = fact(relation="not_worth", kind="note", title="lunch", subject_name=None, attribute=None)
