@@ -1,12 +1,12 @@
 """MCP tools over the memory repo. Search returns titles, get returns one body, so an
 agent spends tokens only on what it opens. `remember` captures a fact through the shared pipeline
-and `decide` lets a human curator approve or reject; agents may not decide.
-Each call runs in request_tx as the caller, so row-level security decides what is
+and `decide` confirms or retracts a live memory with evidence; any contributor, agents included,
+may call it. Each call runs in request_tx as the caller, so row-level security decides what is
 visible; nothing here filters by caller."""
 
 from collections.abc import Awaitable, Callable
 from datetime import date
-from typing import Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import anyio.to_thread
@@ -17,14 +17,14 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.server import Settings as FastMcpSettings
 from mcp.server.transport_security import TransportSecuritySettings
-from psycopg.rows import dict_row
+from pydantic import Field
 
 from nunchi.auth.identity import authenticate
 from nunchi.auth.tokens import AuthError, TokenVerifier
 from nunchi.capture import CaptureContext, capture
 from nunchi.db import Conn, Pool, request_tx
 from nunchi.domain import repo
-from nunchi.domain.models import MemoryKind, MemoryOrigin, MemoryStatus, SourceRef
+from nunchi.domain.models import LABELS, MemoryKind, MemoryOrigin, MemoryStatus, SourceRef
 from nunchi.embed import Embedder
 from nunchi.extract import ExtractionError, Extractor, ValueJudge, build_extractor, build_judge
 
@@ -116,7 +116,10 @@ def build_server(  # noqa: PLR0913, PLR0917 - the optional services are injected
         kinds: list[MemoryKind] | None = None,
         statuses: list[MemoryStatus] | None = None,
     ) -> list[dict[str, Any]]:
-        """Find memories by words. Returns titles and keys only; call `get` for a body."""
+        """Find memories by words. Returns titles and keys only; call `get` for a body. A row
+        labelled 미확정 has no agreement behind it yet: say so when you cite it and do not change
+        rules on it alone. `pending_change` is an open proposal to replace the value; it is not
+        true yet."""
 
         def work(conn: Conn) -> list[dict[str, Any]]:
             hits = repo.search(
@@ -127,16 +130,7 @@ def build_server(  # noqa: PLR0913, PLR0917 - the optional services are injected
                 tuple(statuses or _DEFAULT_STATUSES),
                 embedder=embedder,
             )
-            with conn.cursor(row_factory=dict_row) as cur:
-                keys = {
-                    r["id"]: r
-                    for r in cur.execute(
-                        "SELECT id, subject_id, attribute, last_confirmed_at FROM memory"
-                        " WHERE id = ANY(%s)",
-                        ([h.id for h in hits],),
-                    )
-                }
-            return [{**h.model_dump(mode="json"), **_json_row(keys[h.id])} for h in hits]
+            return [h.model_dump(mode="json") for h in hits]
 
         return await run(ctx, work)
 
@@ -149,13 +143,21 @@ def build_server(  # noqa: PLR0913, PLR0917 - the optional services are injected
             if memory is None:
                 msg = "memory not found"
                 raise ToolError(msg)
-            return _present(memory.id, memory.title, memory.body, memory.origin, memory.status)
+            return {
+                **_present(memory.id, memory.title, memory.body, memory.origin, memory.status),
+                "version": memory.version,
+                "label": LABELS.get(memory.status),
+                "basis": memory.basis.value if memory.basis else None,
+                "promote_at": memory.promote_at.isoformat() if memory.promote_at else None,
+                "evidence": repo.evidence_summary(conn, memory.id).model_dump(mode="json"),
+            }
 
         return await run(ctx, work)
 
     @mcp.tool()
     async def history(ctx: Context, memory_id: UUID) -> list[dict[str, Any]]:  # type: ignore[type-arg]
-        """The audit trail of one memory, oldest first."""
+        """The audit trail of one memory, oldest first. Each version lists the messages (link,
+        author, time) that caused it."""
         return await run(
             ctx, lambda c: [v.model_dump(mode="json") for v in repo.history(c, memory_id)]
         )
@@ -168,7 +170,8 @@ def build_server(  # noqa: PLR0913, PLR0917 - the optional services are injected
         attribute: str,
         on: date,
     ) -> dict[str, Any] | None:
-        """The memory for (subject, attribute) that was valid on a date, or null."""
+        """The memory for (subject, attribute) that was valid on a date, or null. Open proposals and
+        rejected rows were never valid, so they never come back."""
 
         def work(conn: Conn) -> dict[str, Any] | None:
             with conn.cursor() as cur:
@@ -182,6 +185,7 @@ def build_server(  # noqa: PLR0913, PLR0917 - the optional services are injected
             assert memory is not None  # noqa: S101 - memory_as_of ran under the same RLS
             return {
                 **_present(memory.id, memory.title, memory.body, memory.origin, memory.status),
+                "label": LABELS.get(memory.status),
                 "valid_from": memory.valid_from.isoformat() if memory.valid_from else None,
                 "valid_to": memory.valid_to.isoformat() if memory.valid_to else None,
             }
@@ -231,6 +235,25 @@ def _add_write_tools(
 
         return await run(ctx, work)
 
+    @mcp.tool()
+    async def decide(
+        ctx: Context,  # type: ignore[type-arg]
+        memory_id: UUID,
+        verdict: Literal["confirm", "retract"],
+        expected_version: int,
+        source_refs: Annotated[list[SourceRef], Field(min_length=1, max_length=50)],
+    ) -> dict[str, Any]:
+        """Confirm or retract a live memory (provisional, challenger or active). Pass the version
+        you read with `get` and source_refs, the links that justify the verdict. Confirming a
+        memory you already stand behind only reconfirms it; a second person is needed to make it
+        active. Returns applied (new status), reconfirmed, or refused (stale, not_live)."""
+        return await run(
+            ctx,
+            lambda c: repo.decide(c, memory_id, verdict, expected_version, source_refs).model_dump(
+                mode="json"
+            ),
+        )
+
 
 def _present(mid: UUID, title: str, body: str | None, origin: Any, status: Any) -> dict[str, Any]:  # noqa: ANN401
     return {
@@ -238,12 +261,4 @@ def _present(mid: UUID, title: str, body: str | None, origin: Any, status: Any) 
         "title": title,
         "notice": NOTICE,
         "data": _wrap(body, origin.value, status.value),
-    }
-
-
-def _json_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "subject_id": str(row["subject_id"]) if row["subject_id"] else None,
-        "attribute": row["attribute"],
-        "last_confirmed_at": row["last_confirmed_at"].isoformat(),
     }

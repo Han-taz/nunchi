@@ -145,10 +145,32 @@ class MemorySummary(Frozen):
     title: str
 
 
+LABELS: dict[MemoryStatus, str] = {
+    MemoryStatus.PROVISIONAL: "미확정",
+    MemoryStatus.CHALLENGER: "변경 제안 (미확정)",
+}
+
+
+class PendingChange(Frozen):
+    """The open challenger of a live row's key (design v1.3 8)."""
+
+    id: UUID
+    title: str
+    value: str | None
+    promote_at: datetime | None
+
+
 class SearchHit(MemorySummary):
     score: float
     stale: bool
     last_confirmed_at: datetime
+    subject_id: UUID | None
+    attribute: str | None
+    basis: PromotionBasis | None
+    promote_at: datetime | None
+    flags: int
+    label: str | None
+    pending_change: PendingChange | None
 
 
 class Memory(MemorySummary):
@@ -167,6 +189,8 @@ class Memory(MemorySummary):
     attribute: str | None
     last_confirmed_at: datetime
     value: str | None
+    basis: PromotionBasis | None
+    promote_at: datetime | None
 
 
 class ProposeOutcome(Frozen):
@@ -182,9 +206,35 @@ class ProposeOutcome(Frozen):
     conflict_with: UUID | None = None
 
 
+class Evidence(Frozen):
+    """One message behind a transition: its permalink, who said it and when."""
+
+    uri: str | None
+    author_name: str | None
+    said_at: datetime | None
+    basis: PromotionBasis
+
+
 class MemoryVersion(Frozen):
     version: int
     op: MemoryOp
     actor_id: UUID
     reason: str | None
     at: datetime
+    evidence: tuple[Evidence, ...]
+
+
+class EvidenceSummary(Frozen):
+    count: int
+    distinct_authors: int
+    last_said_at: datetime | None
+
+
+class DecideOutcome(Frozen):
+    """What app_sec.decide did. applied: the verdict changed the row, status is its new state.
+    reconfirmed: the caller already stands behind the row (or it is active), only the evidence grew.
+    refused: stale (expected_version is old) or not_live (no such live row you may decide)."""
+
+    outcome: Literal["applied", "reconfirmed", "refused"]
+    status: MemoryStatus | None
+    reason: Literal["stale", "not_live"] | None = None

@@ -70,7 +70,7 @@ async def story(directory: Path, url: str) -> None:
                 for t in (await writer.list_tools()).tools
                 if t.name in {"remember", "decide"}
             ),
-            ["remember"],
+            ["decide", "remember"],
         )
 
         first = await call(
