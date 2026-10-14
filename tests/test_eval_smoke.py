@@ -181,10 +181,10 @@ def test_sweep_scores_trigram_then_every_embed_text_floor_and_k(admin_url: str) 
     assert grid[9] == ("title+body", 0.2, 20)
     assert grid[-1] == ("title+body", 0.5, 60)
     # Equal scores break ties by random row id, so recall wobbles by a query or two between runs.
-    # The ten multi-item windows add distractors to the same queries: the first 110 messages alone
-    # still score 0.62 and 0.667.
-    assert rows[0]["recall@1"] == pytest.approx(0.55, abs=0.05)
-    assert rows[0]["recall@5"] == pytest.approx(0.62, abs=0.05)
+    # Nothing approves a proposal any more, so a restated value sits next to the old one as a
+    # distractor: ten runs gave recall@1 0.500 or 0.524 and recall@5 0.643 or 0.667.
+    assert rows[0]["recall@1"] == pytest.approx(0.51, abs=0.02)
+    assert rows[0]["recall@5"] == pytest.approx(0.655, abs=0.02)
     assert sweep_table(rows).splitlines()[1].split()[:3] == ["trigram", "-", "-"]
 
 
