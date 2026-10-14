@@ -23,6 +23,8 @@ from nunchi.domain.models import (
 )
 from nunchi.embed import Embedder, embed_query
 
+NOTE_DEDUPE_DAYS = 14
+
 _MEMORY_COLUMNS = sql.SQL(
     "id, store_id, kind, status, title, body, source_refs, origin, supersedes_id,"
     " created_by, on_behalf_of, valid_from, valid_to, version, created_at, updated_at,"
@@ -92,7 +94,16 @@ def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
     status and version, and a lineage walk sets origin. Only the delegate is spelled out because the
     policy requires on_behalf_of = the user exactly when an agent is present.
     A same-key same-value proposal is a reconfirm: the trigger returns NULL, RETURNING yields no
-    row, and the live row's id is looked up under the same request context."""
+    row, and the live row's id is looked up under the same request context.
+    A keyless note has no such key, so a near-duplicate of a recent note in the same store is
+    reconfirmed by app_sec.reconfirm_duplicate_note instead of stored again."""
+    if req.kind is MemoryKind.NOTE and req.subject_id is None:
+        duplicate = conn.execute(
+            "SELECT app_sec.reconfirm_duplicate_note(%s, %s, %s, %s)",
+            (req.store_id, req.title, req.body, NOTE_DEDUPE_DAYS),
+        ).fetchone()
+        if duplicate is not None and duplicate[0] is not None:
+            return ProposeOutcome(kind="reconfirmed", memory_id=duplicate[0])
     with conn.cursor() as cur:
         rows = cur.execute(
             sql.SQL(

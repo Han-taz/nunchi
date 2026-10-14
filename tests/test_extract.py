@@ -520,3 +520,8 @@ def test_an_entity_id_that_was_not_offered_is_dropped(claimed: str) -> None:
 
 def test_the_default_model_is_haiku() -> None:
     assert MODEL == "claude-haiku-5-5"
+
+
+def test_the_prompt_lists_progress_and_status_reports_as_not_worth_remembering() -> None:
+    assert 'progress or status reports ("X worked on Y, tests pass", "작업 현황"' in SYSTEM_PROMPT
+    assert "PR or branch announcements) that go stale" in SYSTEM_PROMPT

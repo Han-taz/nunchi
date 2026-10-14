@@ -386,3 +386,4 @@ G10c	(ok)	fail	contributor replaces members
 G10d	= U5X1=false,U5X2=true	fail	snapshot equals the new list
 G10e	-> 42501	fail	unknown binding refused
 G11a	= false	fail	an unissued card cannot be marked sent
+G12a	= NULL	fail	no absorb outside contributor stores
