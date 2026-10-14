@@ -1,7 +1,14 @@
 from nunchi.extract.claude import ClaudeExtractor, build_extractor
+from nunchi.extract.consensus import (
+    DECISION_MARKERS,
+    WindowPost,
+    confirm_consensus,
+    render_numbered,
+)
 from nunchi.extract.draft import (
     MAX_DRAFTS,
     Candidate,
+    Consensus,
     EntityContext,
     ExtractContext,
     ExtractionError,
@@ -16,10 +23,12 @@ from nunchi.extract.null import NullExtractor
 from nunchi.extract.request import UnknownSubjectError, to_propose_request
 
 __all__ = [
+    "DECISION_MARKERS",
     "MAX_DRAFTS",
     "Candidate",
     "ClaudeExtractor",
     "ClaudeJudge",
+    "Consensus",
     "EntityContext",
     "ExtractContext",
     "ExtractionError",
@@ -31,7 +40,10 @@ __all__ = [
     "RelationKind",
     "UnknownSubjectError",
     "ValueJudge",
+    "WindowPost",
     "build_extractor",
     "build_judge",
+    "confirm_consensus",
+    "render_numbered",
     "to_propose_request",
 ]

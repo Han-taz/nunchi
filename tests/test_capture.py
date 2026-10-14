@@ -20,8 +20,14 @@ from nunchi.capture import (
     capture_all,
 )
 from nunchi.db import Pool, request_tx
-from nunchi.domain.models import MemoryOrigin, MemoryStatus, SourceRef
-from nunchi.extract import ClaudeExtractor
+from nunchi.domain.models import MemoryKind, MemoryOrigin, MemoryStatus, SourceRef
+from nunchi.extract import (
+    ClaudeExtractor,
+    ExtractContext,
+    ProposalDraft,
+    Relation,
+    RelationKind,
+)
 from nunchi.extract.claude import MODEL
 from tests.conftest import STORE, TENANT, USER
 from tests.test_repo import SUBJECT
@@ -97,6 +103,30 @@ def test_new_fact_creates_entity_alias_and_memory(world: Pool) -> None:
             (result.memory_id,),
         ).fetchone()
     assert row == ("A사", "담당자")
+
+
+class _Retracting:
+    def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]:
+        return (
+            ProposalDraft(
+                kind=MemoryKind.FACT,
+                title="A사 담당자는 이OO",
+                subject_name="A사",
+                attribute="담당자",
+                value="이OO",
+                origin=context.origin,
+                relation=Relation(kind=RelationKind.RETRACTS, target_id=UUID(int=9)),
+            ),
+        )
+
+
+@pytest.mark.db
+def test_a_retraction_is_skipped_and_stores_nothing_until_remember_takes_it(world: Pool) -> None:
+    before = counts(world)
+    with request_tx(world, USER, None) as conn:
+        result = capture(conn, _Retracting(), "[0] a: 그거 아니야", CTX)
+    assert result == Skipped()
+    assert counts(world) == before
 
 
 def seed_live_fact(fresh_db: str) -> UUID:

@@ -14,6 +14,7 @@ from nunchi.domain.models import MemoryKind, MemoryOrigin, ProposeRequest, Sourc
 from nunchi.extract import (
     Candidate,
     ClaudeExtractor,
+    Consensus,
     EntityContext,
     ExtractContext,
     ExtractionError,
@@ -51,7 +52,7 @@ ENTITY = EntityContext(
 CTX_ENTITY = CTX.model_copy(update={"entities": (ENTITY,)})
 
 
-def reply(**over: str | bool | None) -> dict[str, Any]:
+def reply(**over: str | bool | list[int] | None) -> dict[str, Any]:
     base: dict[str, Any] = {
         "relation": "new",
         "relation_id": None,
@@ -525,3 +526,43 @@ def test_the_default_model_is_haiku() -> None:
 def test_the_prompt_lists_progress_and_status_reports_as_not_worth_remembering() -> None:
     assert 'progress or status reports ("X worked on Y, tests pass", "작업 현황"' in SYSTEM_PROMPT
     assert "PR or branch announcements) that go stale" in SYSTEM_PROMPT
+
+
+def test_a_window_item_carries_the_models_consensus_claim_and_evidence() -> None:
+    claim = reply(consensus="agreed", evidence=[2, 0, 0, -1])
+    (draft,) = replying(message(wire(claim))).extract("[0] a: x", CTX)
+    assert (draft.consensus, draft.evidence) == (Consensus.AGREED, (0, 2))
+
+
+def test_a_reply_without_a_claim_is_the_weaker_one_and_the_schema_demands_both() -> None:
+    (draft,) = replying(message(wire(reply()))).extract("x", CTX)
+    assert (draft.consensus, draft.evidence) == (Consensus.STATED, ())
+    assert {"consensus", "evidence"} <= set(ITEM_SCHEMA["required"])
+    assert ITEM_SCHEMA["properties"]["consensus"] == {
+        "type": "string",
+        "enum": ["agreed", "stated"],
+    }
+    assert ITEM_SCHEMA["properties"]["evidence"] == {"type": "array", "items": {"type": "integer"}}
+
+
+def test_a_retraction_points_at_a_candidate_and_copies_its_key() -> None:
+    model_says = reply(
+        kind="fact", relation="retracts", relation_id=str(CAND.id), subject_name="x", attribute="y"
+    )
+    (draft,) = replying(message(wire(model_says))).extract("[0] a: 그거 아니야", CTX_WITH)
+    assert draft.relation == Relation(kind=RelationKind.RETRACTS, target_id=CAND.id)
+    assert (draft.subject_name, draft.attribute) == ("A사", "담당자")
+    assert "retracts" in ITEM_SCHEMA["properties"]["relation"]["enum"]
+
+
+def test_a_retraction_without_an_id_is_malformed() -> None:
+    with pytest.raises(ExtractionError) as err:
+        replying(message(wire(reply(relation="retracts")))).extract("x", CTX_WITH)
+    assert err.value.reason is FailureReason.MALFORMED
+
+
+def test_the_prompt_teaches_numbered_posts_retraction_and_the_claim() -> None:
+    assert '"[n] speaker: text" line per post, numbered from 0' in SYSTEM_PROMPT
+    assert "retracts when the message takes back what a candidate states" in SYSTEM_PROMPT
+    assert 'consensus is "agreed" when at least two different people' in SYSTEM_PROMPT
+    assert "an unproven one is lowered" in SYSTEM_PROMPT

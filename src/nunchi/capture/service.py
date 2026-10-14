@@ -18,6 +18,7 @@ from nunchi.extract import (
     ExtractContext,
     Extractor,
     ProposalDraft,
+    RelationKind,
     ValueJudge,
     to_propose_request,
 )
@@ -174,6 +175,10 @@ def _capture_draft(  # noqa: PLR0913, PLR0917
     cfg: ResolveConfig,
     judge: ValueJudge | None,
 ) -> CaptureResult:
+    if draft.relation.kind is RelationKind.RETRACTS:
+        return (
+            Skipped()
+        )  # remember() takes the retraction row in U35; until then it is not a memory
     gate = evaluate_pair(source_text, f"{draft.title}\n{draft.body or ''}")
     if gate.verdict is Verdict.REJECT:
         return Rejected(reasons=tuple(f.rule_id for f in gate.flags if f.action is Action.REJECT))

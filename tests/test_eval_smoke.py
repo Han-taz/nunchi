@@ -13,13 +13,21 @@ from eval.oracle import GOLD_VALUES, WINDOW_VALUES, ConceptEmbedder, OracleExtra
 from eval.run import main, replay_group, run_eval, run_window_eval, table
 from eval.score import Outcome
 from eval.sweep import run_sweep, sweep_table
-from eval.windows import load_windows, replay_windows, window_messages, window_metrics
+from eval.windows import (
+    Check,
+    CheckedExtractor,
+    consensus_metrics,
+    load_windows,
+    replay_windows,
+    window_messages,
+    window_metrics,
+)
 
 from nunchi.config import Settings
 from nunchi.db import open_pool
-from nunchi.domain.models import MemoryOrigin
+from nunchi.domain.models import MemoryKind, MemoryOrigin
 from nunchi.embed import PromptName
-from nunchi.extract import ExtractContext
+from nunchi.extract import Candidate, Consensus, ExtractContext, RelationKind
 
 
 def test_corpus_labels_are_consistent() -> None:
@@ -304,6 +312,28 @@ def test_window_corpus_without_an_approval_path_is_recorded_literally(
     assert report["duplicate_per_key"]["rate"] == 0.143
     assert report["wrongly_active"] == {"active": 0, "wrong": 0, "rate": None}
     assert report["retraction_recall"] == {"retractions": 2, "retracted": 0, "recall": 0.0}
+    assert report["consensus_check"] == {
+        "items": 13,
+        "claimed_agreed": 4,
+        "lowered": 0,
+        "verified_agreed": 4,
+        "wrongly_agreed": {"count": 0, "rate": 0.0},
+        "missed_agreed": {"count": 0, "gold_agreed": 4},
+    }
+    noisy = run_window_eval(
+        admin_url,
+        OracleExtractor(window_messages(windows), noisy=True),
+        windows,
+        judge=OracleJudge(),
+    )
+    assert noisy["consensus_check"] == {
+        "items": 13,
+        "claimed_agreed": 13,
+        "lowered": 9,
+        "verified_agreed": 4,
+        "wrongly_agreed": {"count": 0, "rate": 0.0},
+        "missed_agreed": {"count": 0, "gold_agreed": 4},
+    }
     argv = ["--db", admin_url, "--extractor", "noisy", "--windows", "--out-dir", str(tmp_path)]
     assert main(argv) == 0
     assert "live style rows (wm01)    3" in capsys.readouterr().out
@@ -330,3 +360,71 @@ def test_the_clock_ticks_on_each_new_day_and_once_after_the_last(admin_url: str)
         "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-08",
         "2026-08-09", "2026-08-10", "2026-08-11", "2026-08-12",
     ]  # fmt: skip
+
+
+def _window_draft_context() -> ExtractContext:
+    return ExtractContext(
+        origin=MemoryOrigin.EXTERNAL, today=date(2026, 8, 5), store_id=UUID(int=1)
+    )
+
+
+def test_the_windows_are_numbered_and_gold_carries_the_claim() -> None:
+    windows = {w.id: w for w in load_windows()}
+    live = windows["w-live-style-1"]
+    assert live.text.splitlines()[2] == "[2] seoyeon.lee: 동의합니다. 그걸로 확정해요"
+    claims = {w.id: [(g.consensus, g.evidence) for g in w.gold] for w in windows.values()}
+    assert claims["w-live-style-1"] == [("agreed", (0, 1, 2))]
+    assert claims["w-live-style-4"] == [("stated", (0,)), ("stated", (1,))]
+    assert claims["w-declare-end"] == [("stated", (0,))]
+
+
+def test_the_fake_copies_the_gold_claim_and_the_noisy_one_overclaims() -> None:
+    windows = load_windows()
+    messages = window_messages(windows)
+    end = next(w for w in windows if w.id == "w-declare-end")
+    for noisy, expected in ((False, Consensus.STATED), (True, Consensus.AGREED)):
+        (draft,) = OracleExtractor(messages, noisy=noisy).extract(end.text, _window_draft_context())
+        assert (draft.consensus, draft.evidence) == (expected, (0,))
+
+
+def test_the_fake_retracts_the_candidate_that_holds_the_retracted_value() -> None:
+    windows = load_windows()
+    retract = next(w for w in windows if w.id == "w-retract-1")
+    freeze = Candidate(
+        id=UUID(int=7), kind=MemoryKind.DECISION, title="코드 프리즈", subject_name="릴리즈 1.0",
+        attribute="코드 프리즈", value="12/18",
+    )  # fmt: skip
+    ctx = _window_draft_context().model_copy(update={"candidates": (freeze,)})
+    oracle = OracleExtractor(window_messages(windows))
+    (draft,) = oracle.extract(retract.text, ctx)
+    assert (draft.relation.kind, draft.relation.target_id) == (RelationKind.RETRACTS, UUID(int=7))
+    assert (draft.consensus, draft.evidence) == (Consensus.AGREED, (0, 1))
+    assert oracle.extract(retract.text, _window_draft_context()) == ()
+
+
+def test_the_checked_extractor_lowers_a_claim_the_window_does_not_prove() -> None:
+    windows = load_windows()
+    stated = next(w for w in windows if w.id == "w-stated-1")
+    checked = CheckedExtractor(OracleExtractor(window_messages(windows), noisy=True), stated)
+    (draft,) = checked.extract(stated.text, _window_draft_context())
+    assert draft.consensus is Consensus.STATED
+    assert checked.checks == [Check(claimed=Consensus.AGREED, verified=Consensus.STATED)]
+
+
+def test_consensus_metrics_count_by_hand() -> None:
+    windows = load_windows()
+    agreed, stated = Consensus.AGREED, Consensus.STATED
+    checks = {
+        "w-live-style-1": [Check(claimed=agreed, verified=agreed)],
+        "w-agree-1": [Check(claimed=agreed, verified=stated)],
+        "w-stated-1": [Check(claimed=agreed, verified=agreed)],
+        "w-timer-1": [Check(claimed=stated, verified=stated)],
+    }
+    assert consensus_metrics(windows, checks) == {
+        "items": 4,
+        "claimed_agreed": 3,
+        "lowered": 1,
+        "verified_agreed": 2,
+        "wrongly_agreed": {"count": 1, "rate": 0.5},
+        "missed_agreed": {"count": 1, "gold_agreed": 2},
+    }
