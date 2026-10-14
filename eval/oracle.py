@@ -142,7 +142,7 @@ class OracleExtractor:
         if not gold.remember or gold.kind is None or gold.memory is None:
             return None
         text = _wording(gold) if self._noisy else self._first[gold.memory]
-        return ProposalDraft(
+        draft = ProposalDraft(
             kind=gold.kind,
             title=text[:_TITLE_CHARS],
             body=text,
@@ -152,6 +152,28 @@ class OracleExtractor:
             source_refs=context.source_refs,
             origin=context.origin,
             **self._claim(gold),
+        )
+        return draft if self._noisy else self._reuse_key(draft, gold.memory, context)
+
+    def _reuse_key(
+        self, draft: ProposalDraft, memory: str, context: ExtractContext
+    ) -> ProposalDraft:
+        """What the prompt tells a model to do: when a candidate already states this memory's
+        value, copy its subject and attribute and point at it. Noisy extractors skip this; their
+        drifting keys are the case the run measures without the help."""
+        spellings = {v.lower() for v in (ALL_VALUES[memory], *WINDOW_VARIANTS.get(memory, ()))}
+        same = next(
+            (c for c in context.candidates if c.value is not None and c.value.lower() in spellings),
+            None,
+        )
+        if same is None or same.subject_name is None:
+            return draft
+        return draft.model_copy(
+            update={
+                "subject_name": same.subject_name,
+                "attribute": same.attribute,
+                "relation": Relation(kind=RelationKind.SAME_AS, target_id=same.id),
+            }
         )
 
     def _claim(self, gold: Message) -> dict[str, object]:

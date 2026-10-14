@@ -135,6 +135,3 @@ class Mattermost:
         response = self._http.post("/users/ids", json=user_ids)
         response.raise_for_status()
         return {u["id"]: User(u["username"], bool(u.get("is_bot"))) for u in response.json()}
-
-    def usernames(self, user_ids: list[str]) -> dict[str, str]:
-        return {i: u.name for i, u in self.users(user_ids).items()}

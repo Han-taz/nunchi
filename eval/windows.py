@@ -4,7 +4,7 @@ that table, the replay outcomes and the status of every row the run left behind.
 
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -14,7 +14,7 @@ from eval.corpus import CORPUS_DIR, START, Message
 from eval.db import CURATORS
 from eval.score import Outcome, _ratio
 from nunchi.db import Pool, request_tx
-from nunchi.domain.models import MemoryKind
+from nunchi.domain.models import Evidence, MemoryKind
 from nunchi.extract import (
     Consensus,
     ExtractContext,
@@ -75,10 +75,29 @@ class Window(BaseModel):
     gold: tuple[Gold, ...]
 
     @property
-    def text(self) -> str:
-        return render_numbered(
-            [WindowPost(author=p.author, text=p.text, bot=p.bot) for p in self.posts]
+    def window_posts(self) -> tuple[WindowPost, ...]:
+        """The posts as the capture path gets them from a platform: each with its own evidence
+        line. Posts are said "now" because the run's clock is the database's."""
+        said = datetime.now(UTC)
+        return tuple(
+            WindowPost(
+                author=p.author,
+                text=p.text,
+                bot=p.bot,
+                ref=Evidence(
+                    uri=f"https://eval.invalid/{self.id}/{i}",
+                    post_id=f"{self.id}.{i}",
+                    author=p.author,
+                    author_name=p.author,
+                    said_at=said,
+                ),
+            )
+            for i, p in enumerate(self.posts)
         )
+
+    @property
+    def text(self) -> str:
+        return render_numbered(self.window_posts)
 
 
 def load_windows() -> list[Window]:
@@ -199,7 +218,7 @@ class CheckedExtractor:
 
     def __init__(self, inner: Extractor, window: Window) -> None:
         self._inner = inner
-        self._posts = [WindowPost(author=p.author, text=p.text, bot=p.bot) for p in window.posts]
+        self._posts = window.window_posts
         self.checks: list[Check] = []
 
     def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]:
