@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -15,18 +15,21 @@ from nunchi.capture import (
     Created,
     Reconfirmed,
     Rejected,
+    Retracted,
     Skipped,
     capture,
     capture_all,
 )
 from nunchi.db import Pool, request_tx
-from nunchi.domain.models import MemoryKind, MemoryOrigin, MemoryStatus, SourceRef
+from nunchi.domain.models import Evidence, MemoryKind, MemoryOrigin, MemoryStatus, SourceRef
 from nunchi.extract import (
     ClaudeExtractor,
+    Consensus,
     ExtractContext,
     ProposalDraft,
     Relation,
     RelationKind,
+    WindowPost,
 )
 from nunchi.extract.claude import MODEL
 from tests.conftest import STORE, TENANT, USER
@@ -121,7 +124,9 @@ class _Retracting:
 
 
 @pytest.mark.db
-def test_a_retraction_is_skipped_and_stores_nothing_until_remember_takes_it(world: Pool) -> None:
+def test_a_retraction_of_a_memory_nobody_offered_is_skipped_and_stores_nothing(
+    world: Pool,
+) -> None:
     before = counts(world)
     with request_tx(world, USER, None) as conn:
         result = capture(conn, _Retracting(), "[0] a: 그거 아니야", CTX)
@@ -287,3 +292,196 @@ def test_a_rejected_item_does_not_stop_the_others_and_a_single_message_keeps_one
     with request_tx(world, USER, None) as conn:
         single = capture_all(conn, extractor(*three_items()), STACK, CTX)
     assert [type(r) for r in single] == [Reconfirmed]
+
+
+def said(n: int, author: str, text: str, *, bot: bool = False) -> WindowPost:
+    return WindowPost(
+        author=f"name-{author}",
+        text=text,
+        bot=bot,
+        ref=Evidence(
+            uri=f"https://mm.example/devshow/pl/{n}",
+            post_id=f"post-{n}",
+            author=author,
+            author_name=f"name-{author}",
+            said_at=datetime(2026, 10, 14, 9, n, tzinfo=UTC),
+        ),
+    )
+
+
+class _Says:
+    """Hands back the drafts it was given and keeps what the server offered it."""
+
+    def __init__(self, *drafts: ProposalDraft) -> None:
+        self.drafts = drafts
+        self.offered: list[ExtractContext] = []
+
+    def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]:
+        self.offered.append(context)
+        return self.drafts
+
+
+def decision(**over: object) -> ProposalDraft:
+    base: dict[str, object] = {
+        "kind": MemoryKind.DECISION,
+        "title": "프론트는 Next.js",
+        "body": "프론트는 Next.js로 합의",
+        "subject_name": "리뉴얼 사이트",
+        "attribute": "프레임워크",
+        "value": "Next.js",
+        "origin": MemoryOrigin.EXTERNAL,
+        "source_refs": (REF,),
+    }
+    return ProposalDraft.model_validate(base | over)
+
+
+def talk(*posts: WindowPost) -> CaptureContext:
+    return WINDOW.model_copy(update={"posts": posts})
+
+
+def run_says(
+    pool: Pool, says: _Says, context: CaptureContext, text: str = "프론트는 Next.js로 합의"
+) -> tuple[CaptureResult, ...]:
+    with request_tx(pool, USER, None) as conn:
+        return capture_all(conn, says, text, context)
+
+
+def evidence_of(fresh_db: str, memory_id: UUID) -> list[tuple[Any, ...]]:
+    with psycopg.connect(fresh_db) as conn:
+        verified = conn.execute("SELECT app_sec.verify_chain(%s)", (memory_id,)).fetchone()
+        rows = conn.execute(
+            "SELECT op, post_id, author, basis FROM memory_evidence WHERE memory_id = %s"
+            " ORDER BY id",
+            (memory_id,),
+        ).fetchall()
+    assert verified == (True,)
+    return rows
+
+
+@pytest.mark.db
+def test_two_people_in_the_cited_posts_make_a_window_item_active_with_both_as_evidence(
+    world: Pool, fresh_db: str
+) -> None:
+    context = talk(said(1, "u1", "프론트는 Next.js로 가죠"), said(2, "u2", "좋아요 Next.js로"))
+    (result,) = run_says(
+        world, _Says(decision(consensus=Consensus.AGREED, evidence=(0, 1))), context
+    )
+    assert isinstance(result, Created)
+    assert (result.status, result.change) == (MemoryStatus.ACTIVE, "created")
+    assert evidence_of(fresh_db, result.memory_id) == [
+        ("propose", "post-1", "u1", "agreed"),
+        ("propose", "post-2", "u2", "agreed"),
+    ]
+
+
+@pytest.mark.db
+def test_an_agreed_claim_the_posts_do_not_prove_is_stored_as_provisional(
+    world: Pool, fresh_db: str
+) -> None:
+    context = talk(said(1, "u1", "프론트는 Next.js로 가죠"), said(2, "u2", "다른 얘기"))
+    (result,) = run_says(
+        world, _Says(decision(consensus=Consensus.AGREED, evidence=(0, 7))), context
+    )
+    assert isinstance(result, Created)
+    assert result.status is MemoryStatus.PROVISIONAL
+    assert evidence_of(fresh_db, result.memory_id) == [("propose", "post-1", "u1", "stated")]
+
+
+@pytest.mark.db
+def test_a_single_message_takes_the_consensus_and_evidence_its_caller_gives(
+    world: Pool, fresh_db: str
+) -> None:
+    first, second = said(1, "u1", "x").ref, said(2, "u2", "x").ref
+    assert first is not None
+    assert second is not None
+    context = CTX.model_copy(update={"consensus": Consensus.AGREED, "evidence": (first, second)})
+    (result,) = run_says(world, _Says(decision()), context)
+    assert isinstance(result, Created)
+    assert result.status is MemoryStatus.ACTIVE
+    assert [r[2] for r in evidence_of(fresh_db, result.memory_id)] == ["u1", "u2"]
+
+
+@pytest.mark.db
+def test_a_second_author_confirms_a_provisional_memory(world: Pool, fresh_db: str) -> None:
+    said_by = {"consensus": Consensus.STATED, "evidence": (0,)}
+    (first,) = run_says(world, _Says(decision(**said_by)), talk(said(1, "u1", "Next.js로 가죠")))
+    (again,) = run_says(world, _Says(decision(**said_by)), talk(said(2, "u2", "저도 Next.js요")))
+    assert isinstance(first, Created)
+    assert first.status is MemoryStatus.PROVISIONAL
+    assert again == Reconfirmed(memory_id=first.memory_id, confirmed=True)
+    assert evidence_of(fresh_db, first.memory_id) == [
+        ("propose", "post-1", "u1", "stated"),
+        ("confirm", "post-2", "u2", "agreed"),
+    ]
+
+
+@pytest.mark.db
+def test_a_retraction_expires_an_active_memory_on_the_cited_post(
+    world: Pool, fresh_db: str
+) -> None:
+    live = seed_live_fact(fresh_db)
+    says = _Says(
+        ProposalDraft(
+            kind=MemoryKind.FACT,
+            title="A사 담당자는 이OO",
+            subject_name="A사",
+            attribute="담당자",
+            value="이OO",
+            origin=MemoryOrigin.EXTERNAL,
+            relation=Relation(kind=RelationKind.RETRACTS, target_id=live),
+            evidence=(1,),
+        )
+    )
+    context = talk(
+        said(1, "u1", "A사 담당자는 이OO입니다"), said(2, "u1", "A사 담당자 그거 아니야")
+    )
+    results = run_says(world, says, context, "A사 담당자 그거 아니야 이OO")
+    assert results == (Retracted(memory_id=live),)
+    assert [c.status for c in says.offered[0].candidates] == [MemoryStatus.ACTIVE]
+    assert evidence_of(fresh_db, live) == [("retract", "post-2", "u1", "stated")]
+    with psycopg.connect(fresh_db) as conn:
+        assert conn.execute("SELECT status FROM memory WHERE id = %s", (live,)).fetchone() == (
+            "expired",
+        )
+
+
+@pytest.mark.db
+def test_a_retraction_citing_no_post_changes_nothing(world: Pool, fresh_db: str) -> None:
+    live = seed_live_fact(fresh_db)
+    says = _Says(
+        ProposalDraft(
+            kind=MemoryKind.FACT,
+            title="A사 담당자는 이OO",
+            subject_name="A사",
+            attribute="담당자",
+            value="이OO",
+            origin=MemoryOrigin.EXTERNAL,
+            relation=Relation(kind=RelationKind.RETRACTS, target_id=live),
+        )
+    )
+    results = run_says(world, says, talk(said(1, "u1", "x")), "A사 담당자 그거 아니야 이OO")
+    assert results == (Skipped(),)
+    with psycopg.connect(fresh_db) as conn:
+        assert conn.execute("SELECT status FROM memory WHERE id = %s", (live,)).fetchone() == (
+            "active",
+        )
+
+
+@pytest.mark.db
+def test_the_challenger_beside_a_live_row_is_offered_as_a_candidate(world: Pool) -> None:
+    run_says(
+        world,
+        _Says(decision(consensus=Consensus.AGREED, evidence=(0, 1))),
+        talk(said(1, "u1", "Next.js"), said(2, "u2", "Next.js")),
+    )
+    run_says(
+        world,
+        _Says(decision(value="Remix", title="프론트는 Remix")),
+        talk(said(3, "u3", "Remix로 바꾸죠")),
+    )
+    probe = _Says()
+    run_says(world, probe, talk(said(4, "u1", "프론트는 Next.js로 합의")))
+    assert [(c.value, c.status) for c in probe.offered[0].candidates] == [
+        ("next.js", MemoryStatus.ACTIVE),
+        ("remix", MemoryStatus.CHALLENGER),
+    ]

@@ -5,7 +5,7 @@ bot flags, comes from the platform's data, so a model cannot invent a second spe
 
 from collections.abc import Sequence
 
-from nunchi.domain.models import Frozen
+from nunchi.domain.models import Evidence, Frozen
 from nunchi.extract.draft import Consensus
 
 DECISION_MARKERS = ("결정", "확정", "합의", "하기로 했", "으로 가기로")
@@ -15,6 +15,7 @@ class WindowPost(Frozen):
     author: str
     text: str
     bot: bool = False
+    ref: Evidence | None = None  # what the platform says about this post; None where it is unknown
 
 
 def render_numbered(posts: Sequence[WindowPost]) -> str:
@@ -41,3 +42,10 @@ def confirm_consensus(
         if declares and answered:
             return Consensus.AGREED
     return Consensus.STATED
+
+
+def evidence_for(numbers: Sequence[int], posts: Sequence[WindowPost]) -> tuple[Evidence, ...]:
+    """The platform data behind the cited post numbers, in window order. A number outside the
+    window, a bot's post and a post with no platform data are dropped."""
+    cited = sorted({i for i in numbers if 0 <= i < len(posts) and not posts[i].bot})
+    return tuple(ref for i in cited if (ref := posts[i].ref) is not None)

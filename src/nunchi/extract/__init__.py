@@ -3,6 +3,7 @@ from nunchi.extract.consensus import (
     DECISION_MARKERS,
     WindowPost,
     confirm_consensus,
+    evidence_for,
     render_numbered,
 )
 from nunchi.extract.draft import (
@@ -44,6 +45,7 @@ __all__ = [
     "build_extractor",
     "build_judge",
     "confirm_consensus",
+    "evidence_for",
     "render_numbered",
     "to_propose_request",
 ]

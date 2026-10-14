@@ -1,6 +1,15 @@
+from datetime import UTC, datetime
+
 import pytest
 
-from nunchi.extract import Consensus, WindowPost, confirm_consensus, render_numbered
+from nunchi.domain.models import Evidence
+from nunchi.extract import (
+    Consensus,
+    WindowPost,
+    confirm_consensus,
+    evidence_for,
+    render_numbered,
+)
 
 A, B = "minji.kim", "junho.park"
 
@@ -82,3 +91,22 @@ def test_evidence_outside_the_window_proves_nothing(evidence: list[int]) -> None
 def test_a_stated_claim_stays_stated_whatever_the_window_shows() -> None:
     posts = [post(A, "12/18로 확정"), post(B, "좋아요")]
     assert confirm_consensus(Consensus.STATED, [0, 1], posts) is Consensus.STATED
+
+
+def test_evidence_for_returns_the_platform_data_of_cited_human_posts_in_window_order() -> None:
+    def ref(n: int) -> Evidence:
+        return Evidence(
+            uri=f"https://mm/pl/{n}",
+            post_id=f"p{n}",
+            author=f"u{n}",
+            said_at=datetime(2026, 10, 14, 9, n, tzinfo=UTC),
+        )
+
+    posts = [
+        WindowPost(author="a", text="x", ref=ref(0)),
+        WindowPost(author="b", text="x", bot=True, ref=ref(1)),
+        WindowPost(author="c", text="x"),
+        WindowPost(author="d", text="x", ref=ref(3)),
+    ]
+
+    assert [e.post_id for e in evidence_for([3, 0, 0, 1, 2, 9, -1], posts)] == ["p0", "p3"]
