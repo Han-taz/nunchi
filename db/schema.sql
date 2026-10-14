@@ -242,7 +242,7 @@ CREATE TABLE memory_evidence (
   UNIQUE (memory_id, op, post_id)
 );
 
--- 승인 카드: nonce 1개 = (memory, 수신 curator) 1장. 읽고 쓰는 함수는 U38 이 지운다 (app_rw 권한 없음).
+-- 승인 카드: nonce 1개 = (memory, 수신 curator) 1장. 읽고 쓰는 함수는 없다 (U38 이 지웠다). app_rw 권한 없음.
 CREATE TABLE approval_card (
   nonce uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   memory_id uuid NOT NULL REFERENCES memory (id),
@@ -1727,42 +1727,6 @@ BEGIN
   RETURN n = 1;
 END $$;
 
--- 승인 카드(DM): 제안자가 부르면 p_platform 의 SCIM 으로 이어진 curator(제안자 제외)마다 카드를 1장 만들고 새 (nonce, 플랫폼 user id) 만 돌려준다. 열린 카드는 건너뛴다.
-CREATE FUNCTION app_sec.issue_dm_cards(p_memory uuid, p_platform text)
-RETURNS TABLE (card_nonce uuid, platform_user_id text)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE
-  me uuid := app_sec.ctx_user();
-  m memory;
-BEGIN
-  IF me IS NULL OR app_sec.ctx_agent() IS NOT NULL THEN
-    RAISE EXCEPTION 'only a human principal may open approvals' USING ERRCODE = '42501';
-  END IF;
-  SELECT * INTO m FROM memory WHERE id = p_memory;
-  IF NOT found OR m.status <> 'proposed' OR me NOT IN (m.created_by, coalesce(m.on_behalf_of, m.created_by)) THEN
-    RAISE EXCEPTION 'not the proposer of a proposed memory' USING ERRCODE = '42501';
-  END IF;
-  RETURN QUERY
-  WITH curators AS (
-    SELECT i.principal_id, i.platform_user_id AS uid FROM principal_identity AS i
-    INNER JOIN principal AS u ON u.id = i.principal_id AND u.tenant_id = i.tenant_id
-    WHERE i.platform = p_platform AND i.link_quality = 'scim' AND i.tenant_id = m.tenant_id
-      AND u.kind = 'user' AND u.active AND u.id NOT IN (m.created_by, coalesce(m.on_behalf_of, m.created_by))
-      AND EXISTS (SELECT 1 FROM store_grant AS g WHERE g.store_id = m.store_id AND g.role = 'curator' AND g.principal_id IN (SELECT app_sec.closure(u.id)))
-  ),
-  ins AS (
-    INSERT INTO approval_card (memory_id, version_at_issue, issued_to, platform)
-    SELECT m.id, m.version, c.principal_id, p_platform FROM curators AS c
-    WHERE NOT EXISTS (
-      SELECT 1 FROM approval_card AS a
-      WHERE a.memory_id = m.id AND a.issued_to = c.principal_id AND a.version_at_issue = m.version
-        AND a.consumed_at IS NULL AND a.expires_at > now()
-    )
-    RETURNING approval_card.nonce, approval_card.issued_to
-  )
-  SELECT ins.nonce, c.uid FROM ins INNER JOIN curators AS c ON c.principal_id = ins.issued_to;
-END $$;
-
 -- ── 앱 접속 역할 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──
 GRANT USAGE ON SCHEMA public TO app_rw;
 -- 주체/권한/감사 테이블은 읽기 전용이다. 버전은 memory 트리거, 삭제 해시는 삭제 트리거, 권한과 주체는 별도 관리 역할이 쓴다
@@ -1771,7 +1735,7 @@ GRANT SELECT ON entity, entity_alias TO app_rw;
 -- principal.external_id(IdP subject, SCIM id)는 숨긴다: 컬럼 단위 GRANT 에서 뺀다. SELECT * 는 42501 이다.
 -- 필요한 조회는 SECURITY DEFINER 함수(app_sec.resolve_principal)로 낸다.
 GRANT SELECT (id, tenant_id, kind, display_name, active) ON principal TO app_rw;
-GRANT SELECT ON memory_version, memory_evidence, review, deleted_hash, room_binding, source_system TO app_rw;
+GRANT SELECT ON memory_version, memory_evidence, deleted_hash, room_binding, source_system TO app_rw;
 GRANT SELECT, UPDATE ON memory TO app_rw;  -- 쓰기는 app_sec.remember() 뿐이다: INSERT 권한이 없다
 
 -- 함수 실행 권한은 허용 목록뿐이다. 내부 함수(write_version, content_hmac, is_deleted_content, 트리거 함수)는
@@ -1786,7 +1750,6 @@ GRANT EXECUTE ON FUNCTION app_sec.ctx_user() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_agent() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_tenant() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.claim_inbound_event(text) TO app_rw;
-GRANT EXECUTE ON FUNCTION app_sec.issue_dm_cards(uuid, text) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_store_roles() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_stores(store_role) TO app_rw;
 GRANT EXECUTE ON FUNCTION
@@ -1810,58 +1773,6 @@ GRANT EXECUTE ON FUNCTION app_sec.set_digest(uuid, boolean) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.advance_digest(uuid, bigint) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.replace_room_members(uuid, text[], text[]) TO app_rw;
 
--- 제안 카드 발송 대기열 (U26): 제안자(봇 포함)가 부르면 카드가 아직 한 장도 없는 자기 proposed 메모리마다 issue_dm_cards 를 불러 카드를 만들고,
--- 아직 메신저로 보내지 않은(message_ts 없음) 열린 카드를 돌려준다. 보낸 뒤 record_card_sent 로 표시하면 다시 나오지 않는다.
-CREATE FUNCTION app_sec.pending_dm_cards(p_platform text)
-RETURNS TABLE (card_nonce uuid, memory_id uuid, version integer, platform_user_id text)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE
-  me uuid := app_sec.ctx_user();
-  r record;
-BEGIN
-  IF me IS NULL OR app_sec.ctx_agent() IS NOT NULL THEN
-    RAISE EXCEPTION 'only a human principal may open approvals' USING ERRCODE = '42501';
-  END IF;
-  FOR r IN
-    SELECT m.id FROM memory AS m
-    WHERE m.status = 'proposed' AND me IN (m.created_by, coalesce(m.on_behalf_of, m.created_by))
-      AND NOT EXISTS (SELECT 1 FROM approval_card AS a WHERE a.memory_id = m.id AND a.version_at_issue = m.version)
-    ORDER BY m.created_at
-  LOOP
-    PERFORM app_sec.issue_dm_cards(r.id, p_platform);
-  END LOOP;
-  RETURN QUERY
-  SELECT a.nonce, a.memory_id, a.version_at_issue, i.platform_user_id
-  FROM approval_card AS a
-  INNER JOIN memory AS m ON m.id = a.memory_id
-  INNER JOIN principal_identity AS i ON i.principal_id = a.issued_to AND i.platform = p_platform AND i.tenant_id = m.tenant_id
-  WHERE a.platform = p_platform AND a.message_ts IS NULL AND a.consumed_at IS NULL AND a.expires_at > now()
-    AND m.status = 'proposed' AND a.version_at_issue = m.version
-    AND me IN (m.created_by, coalesce(m.on_behalf_of, m.created_by))
-  ORDER BY a.issued_at, a.nonce;
-END $$;
-
--- 보낸 카드 표시: 카드를 낸 제안자만, 아직 표시되지 않은 카드에 한 번 기록한다.
-CREATE FUNCTION app_sec.record_card_sent(p_nonce uuid, p_channel text, p_ts text)
-RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE
-  me uuid := app_sec.ctx_user();
-  n integer;
-BEGIN
-  IF me IS NULL OR app_sec.ctx_agent() IS NOT NULL THEN
-    RAISE EXCEPTION 'only a human principal may open approvals' USING ERRCODE = '42501';
-  END IF;
-  UPDATE approval_card AS a SET channel_id = p_channel, message_ts = p_ts
-  FROM memory AS m
-  WHERE a.nonce = p_nonce AND a.message_ts IS NULL AND m.id = a.memory_id
-    AND me IN (m.created_by, coalesce(m.on_behalf_of, m.created_by));
-  GET DIAGNOSTICS n = ROW_COUNT;
-  RETURN n = 1;
-END $$;
-
-GRANT EXECUTE ON FUNCTION app_sec.pending_dm_cards(text) TO app_rw;
-GRANT EXECUTE ON FUNCTION app_sec.record_card_sent(uuid, text, text) TO app_rw;
 -- 중복 note 흡수 (U27): note 는 키가 없어 같은 보고가 몇 분 간격으로 두 번 저장됐다. 같은 store 의 최근 p_days 일 안에 확인된 note 중
 -- 제목+본문 trigram 유사도가 0.9 이상이거나, 제목이 같고 본문 유사도가 0.7 이상인 행이 있으면 새 행 없이 그 행을 reconfirm 하고 id 를 돌려준다. 없으면 NULL.
 -- 호출자가 그 store 의 contributor 일 때만 판정한다(아니면 NULL 을 돌려 remember() 가 거절하게 둔다).
