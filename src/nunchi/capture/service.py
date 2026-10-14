@@ -3,6 +3,8 @@
 Every call runs on one request_tx connection, so the candidate search, the entity write and the
 proposal share a transaction: an error anywhere stores nothing."""
 
+import re
+from collections.abc import Sequence
 from datetime import date
 from typing import Literal
 from uuid import UUID
@@ -11,15 +13,26 @@ from nunchi.capture.resolve import ResolveConfig, known_entities, resolve_attrib
 from nunchi.capture.same import canonical_value
 from nunchi.db import Conn
 from nunchi.domain import repo
-from nunchi.domain.models import Frozen, MemoryOrigin, MemoryStatus, SourceRef
+from nunchi.domain.models import (
+    Evidence,
+    Frozen,
+    MemoryOrigin,
+    MemoryStatus,
+    SearchHit,
+    SourceRef,
+)
 from nunchi.embed import Embedder
 from nunchi.extract import (
     Candidate,
+    Consensus,
     ExtractContext,
     Extractor,
     ProposalDraft,
     RelationKind,
     ValueJudge,
+    WindowPost,
+    confirm_consensus,
+    evidence_for,
     to_propose_request,
 )
 from nunchi.gate import Verdict, evaluate_pair
@@ -27,6 +40,8 @@ from nunchi.gate.rules import Action
 
 _CANDIDATES = 5
 _QUERY_CHARS = 500
+_QUERY_LINES = 8
+# search folds an open challenger into its live row, so asking for it too would list it twice
 _LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL)
 
 
@@ -36,6 +51,12 @@ class CaptureContext(Frozen):
     source_refs: tuple[SourceRef, ...] = ()
     today: date
     window: bool = False
+    posts: tuple[WindowPost, ...] = ()
+    """The window's posts in the order the extractor saw them. A draft's evidence numbers index
+    this, and its platform data comes from here, never from the model."""
+    consensus: Consensus = Consensus.STATED
+    evidence: tuple[Evidence, ...] = ()
+    """A single message has no numbers to cite: its caller says who agreed and which posts."""
 
 
 class Skipped(Frozen):
@@ -53,6 +74,7 @@ class Created(Frozen):
     outcome: Literal["created"] = "created"
     memory_id: UUID
     status: MemoryStatus
+    change: Literal["created", "challenged", "superseded"] = "created"
     conflict_with: UUID | None = None
     flags: tuple[str, ...] = ()
 
@@ -60,39 +82,66 @@ class Created(Frozen):
 class Reconfirmed(Frozen):
     outcome: Literal["reconfirmed"] = "reconfirmed"
     memory_id: UUID
+    confirmed: bool = False
+    """True when another person's statement made a provisional row active."""
 
 
-CaptureResult = Skipped | Rejected | Created | Reconfirmed
+class Retracted(Frozen):
+    outcome: Literal["retracted"] = "retracted"
+    memory_id: UUID
+
+
+CaptureResult = Skipped | Rejected | Created | Reconfirmed | Retracted
+
+
+_NUMBER_AND_AUTHOR = re.compile(r"(?m)^\[\d+\] [^:\n]*: ")
 
 
 def _candidates(
     conn: Conn, source_text: str, store_id: UUID, embedder: Embedder | None
 ) -> tuple[tuple[Candidate, ...], tuple[UUID, ...]]:
-    """The candidate memories and the entity ids they are about."""
-    hits = repo.search(conn, source_text[:_QUERY_CHARS], [store_id], None, _LIVE, embedder=embedder)
-    hits = hits[:_CANDIDATES]
+    """The candidate memories, each live row followed by the challenger beside it, and the entity
+    ids they are about. Each of the newest lines is searched on its own, without its `[n] author:`
+    prefix, so a one-line retraction is not diluted by the rest of the window."""
+    found: dict[UUID, SearchHit] = {}
+    for line in _NUMBER_AND_AUTHOR.sub("", source_text).splitlines()[-_QUERY_LINES:] or [""]:
+        for hit in repo.search(
+            conn, line[:_QUERY_CHARS], [store_id], None, _LIVE, embedder=embedder
+        ):
+            if hit.id not in found or found[hit.id].score < hit.score:
+                found[hit.id] = hit
+    hits = sorted(found.values(), key=lambda h: (-h.score, str(h.id)))[:_CANDIDATES]
     if not hits:
         return (), ()
     rows = conn.execute(
         "SELECT m.id, m.kind, m.title, left(coalesce(m.body, ''), 300), e.canonical_name,"
-        " m.attribute, m.subject_id, m.value FROM memory AS m"
-        " LEFT JOIN entity AS e ON e.id = m.subject_id WHERE m.id = ANY(%s)",
-        ([h.id for h in hits],),
+        " m.attribute, m.subject_id, m.value, m.status, m.conflict_with FROM memory AS m"
+        " LEFT JOIN entity AS e ON e.id = m.subject_id"
+        " WHERE m.id = ANY(%s) OR (m.status = 'challenger' AND m.conflict_with = ANY(%s))",
+        ([h.id for h in hits], [h.id for h in hits]),
     ).fetchall()
     by_id = {r[0]: r for r in rows}
-    subjects: tuple[UUID, ...] = tuple(dict.fromkeys(r[6] for r in rows if r[6] is not None))  # type: ignore[misc]
-    return tuple(
-        Candidate(
-            id=h.id,
-            kind=by_id[h.id][1],
-            title=by_id[h.id][2],
-            body_excerpt=by_id[h.id][3],
-            subject_name=by_id[h.id][4],
-            attribute=by_id[h.id][5],
-            value=by_id[h.id][7],
-        )
+    challenger = {r[9]: r for r in rows if r[8] == MemoryStatus.CHALLENGER}
+    ordered = [
+        by_id[i]
         for h in hits
         if h.id in by_id
+        for i in (h.id, challenger.get(h.id, (None,))[0])
+        if i in by_id
+    ][:_CANDIDATES]
+    subjects: tuple[UUID, ...] = tuple(dict.fromkeys(r[6] for r in ordered if r[6] is not None))  # type: ignore[misc]
+    return tuple(
+        Candidate(
+            id=r[0],
+            kind=r[1],
+            status=r[8],
+            title=r[2],
+            body_excerpt=r[3],
+            subject_name=r[4],
+            attribute=r[5],
+            value=r[7],
+        )
+        for r in ordered
     ), subjects
 
 
@@ -148,7 +197,7 @@ def capture_all(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the option
     if not drafts:
         return (Skipped(),)
     return tuple(
-        _capture_draft(conn, draft, source_text, extract_context, embedder, cfg, judge)
+        _capture_draft(conn, draft, source_text, context, extract_context, embedder, cfg, judge)
         for draft in drafts
     )
 
@@ -166,19 +215,30 @@ def capture(  # noqa: PLR0913, PLR0917 - the pipeline inputs plus the optional s
     return capture_all(conn, extractor, source_text, context, embedder, resolve, judge)[0]
 
 
+def _verdict(
+    draft: ProposalDraft, context: CaptureContext
+) -> tuple[Consensus, tuple[Evidence, ...]]:
+    """What the server believes about the draft. A window's claim is checked against its posts
+    and lowered to `stated` unless they prove it; a single message takes its caller's word."""
+    if not context.window:
+        return context.consensus, context.evidence
+    verified = confirm_consensus(draft.consensus, draft.evidence, context.posts)
+    return verified, evidence_for(draft.evidence, context.posts)
+
+
 def _capture_draft(  # noqa: PLR0913, PLR0917
     conn: Conn,
     draft: ProposalDraft,
     source_text: str,
+    context: CaptureContext,
     extract_context: ExtractContext,
     embedder: Embedder | None,
     cfg: ResolveConfig,
     judge: ValueJudge | None,
 ) -> CaptureResult:
+    consensus, evidence = _verdict(draft, context)
     if draft.relation.kind is RelationKind.RETRACTS:
-        return (
-            Skipped()
-        )  # remember() takes the retraction row in U35; until then it is not a memory
+        return _retract(conn, draft, extract_context, evidence)
     gate = evaluate_pair(source_text, f"{draft.title}\n{draft.body or ''}")
     if gate.verdict is Verdict.REJECT:
         return Rejected(reasons=tuple(f.rule_id for f in gate.flags if f.action is Action.REJECT))
@@ -188,12 +248,27 @@ def _capture_draft(  # noqa: PLR0913, PLR0917
         draft = canonical_value(conn, extract_context.store_id, subject_id, draft, judge, cfg)
     request = to_propose_request(draft, extract_context, lambda _name: subject_id)
     flags = tuple(f.rule_id for f in gate.flags)
-    outcome = repo.remember(conn, request.model_copy(update={"gate_flags": flags}))
+    outcome = repo.remember(
+        conn, request.model_copy(update={"gate_flags": flags}), consensus.value, evidence
+    )
     if outcome.kind in ("confirmed", "reconfirmed"):
-        return Reconfirmed(memory_id=outcome.memory_id)
+        return Reconfirmed(memory_id=outcome.memory_id, confirmed=outcome.kind == "confirmed")
     return Created(
         memory_id=outcome.memory_id,
         status=outcome.status,
+        change="created" if outcome.kind == "created" else outcome.kind,
         conflict_with=outcome.conflict_with,
         flags=flags,
     )
+
+
+def _retract(
+    conn: Conn, draft: ProposalDraft, extract_context: ExtractContext, evidence: Sequence[Evidence]
+) -> CaptureResult:
+    """Only a memory this server offered as a candidate can be retracted, and only on the word of
+    a post: with none cited nobody is on record as having said it."""
+    target = draft.relation.target_id
+    if target is None or target not in {c.id for c in extract_context.candidates} or not evidence:
+        return Skipped()
+    outcome = repo.retract(conn, extract_context.store_id, target, evidence)
+    return Retracted(memory_id=outcome.memory_id)

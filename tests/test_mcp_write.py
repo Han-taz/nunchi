@@ -141,7 +141,11 @@ def test_new_then_reconfirm_then_conflict(url: str, script: Script) -> None:
     assert first["status"] == "provisional"
 
     again = remember(url, script, "이OO")
-    assert again == {"outcome": "reconfirmed", "memory_id": first["memory_id"]}
+    assert again == {
+        "outcome": "reconfirmed",
+        "memory_id": first["memory_id"],
+        "confirmed": False,
+    }
 
     changed = remember(url, script, "박OO")
     assert (changed["outcome"], changed["conflict_with"]) == ("created", first["memory_id"])

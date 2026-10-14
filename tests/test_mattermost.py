@@ -3,13 +3,14 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import psycopg
 import pytest
 
-from nunchi.capture import Created, Reconfirmed, Rejected, Skipped
+from nunchi.capture import Created, Reconfirmed, Rejected, Retracted, Skipped
 from nunchi.db import Pool
 from nunchi.domain.models import MemoryKind, MemoryStatus
 from nunchi.extract import ExtractContext, ExtractionError, FailureReason, ProposalDraft
@@ -32,6 +33,8 @@ CURATOR = "k" * 26
 CONFIDENTIAL = "f" * 26
 STRANGER = "x" * 26
 TEXT = "배포는 금요일에 하지 않는다"
+POSTED_MS = 1_700_000_000_000
+NAMES = {REACTOR: "minji.kim", CURATOR: "yuna.choi"}
 CHANNELS: dict[str, dict[str, Any]] = {
     PUBLIC: {"type": "O", "team_id": TEAM},
     SHARED: {"type": "O", "team_id": TEAM, "shared": True},
@@ -50,6 +53,7 @@ def post(
         "message": message,
         "root_id": root,
         "user_id": user,
+        "create_at": POSTED_MS,
     }
 
 
@@ -61,6 +65,7 @@ POSTS: dict[str, dict[str, Any]] = {
     "w" * 26: post("w" * 26, "n" * 26, TEXT),
     "m" * 26: post("m" * 26, PUBLIC, "@nunchi 스테이징은 매일 초기화된다"),
     "e" * 26: post("e" * 26, CONFIDENTIAL, TEXT),
+    "b" * 26: post("b" * 26, PUBLIC, "봇이 한 말", user=BOT),
 }
 
 
@@ -68,8 +73,9 @@ class FakeServer:
     def __init__(self) -> None:
         self.ephemerals: list[dict[str, Any]] = []
         self.paths: list[str] = []
+        self.users_down = False
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
+    def __call__(self, request: httpx.Request) -> httpx.Response:  # noqa: PLR0911
         path = request.url.path.removeprefix("/api/v4")
         self.paths.append(path)
         assert request.headers["Authorization"] == "Bearer tok"
@@ -84,6 +90,12 @@ class FakeServer:
                 return httpx.Response(
                     200, json={"id": path.removeprefix(prefix)} | table[path.removeprefix(prefix)]
                 )
+        if path == "/users/ids":
+            if self.users_down:
+                return httpx.Response(500, json={})
+            return httpx.Response(
+                200, json=[{"id": i, "username": NAMES[i]} for i in body if i in NAMES]
+            )
         if path == "/users/me":
             return httpx.Response(500, json={})
         return httpx.Response(404, json={})
@@ -251,7 +263,7 @@ def test_a_failed_capture_does_not_burn_the_event(world: World, fresh_db: str) -
     handle_event(deps, reaction())
     assert [e["post"]["message"] for e in server.ephemerals] == [
         "저장 안 함: 내용을 정리하지 못했습니다. 다시 시도해 주세요",
-        "저장됨",
+        "저장됨: 기간 안에 이의가 없으면 확정됩니다. 다른 분이 같은 내용을 말하면 바로 확정됩니다",
     ]
     assert len(memories(fresh_db)) == 1
 
@@ -375,20 +387,77 @@ def test_client_builds_permalinks(world: World) -> None:
 
 def test_each_capture_result_has_its_reply_text() -> None:
     mid = uuid.UUID(int=1)
-    created = Created(memory_id=mid, status=MemoryStatus.PROVISIONAL)
+    provisional = Created(memory_id=mid, status=MemoryStatus.PROVISIONAL)
+    agreed = Created(memory_id=mid, status=MemoryStatus.ACTIVE)
     assert [
         _reply(Skipped()),
         _reply(Rejected(reasons=("secret",))),
         _reply(Reconfirmed(memory_id=mid)),
-        _reply(created),
-        _reply(created.model_copy(update={"conflict_with": mid})),
+        _reply(Reconfirmed(memory_id=mid, confirmed=True)),
+        _reply(Retracted(memory_id=mid)),
+        _reply(provisional),
+        _reply(agreed),
+        _reply(provisional.model_copy(update={"change": "challenged", "conflict_with": mid})),
+        _reply(agreed.model_copy(update={"change": "superseded", "conflict_with": mid})),
     ] == [
         "저장 안 함: 오래 남길 내용이 아니라고 판단했습니다",
         "거부: 비밀값이 들어 있습니다",
         "이미 알고 있음 (재확인했습니다)",
-        "저장됨",
-        "충돌: 기존 값과 다름 → 큐레이터 검토",
+        "다른 분의 말로 확정됐습니다",
+        "철회했습니다",
+        "저장됨: 기간 안에 이의가 없으면 확정됩니다. 다른 분이 같은 내용을 말하면 바로 확정됩니다",
+        "저장됨: 두 분이 동의한 내용이라 바로 확정했습니다",
+        "기존 값과 달라 대기 중: 다른 분이 동의하거나 기간 안에 이의가 없으면 바뀝니다",
+        "기존 값을 새 값으로 바꿨습니다",
     ]
+
+
+def evidence(fresh_db: str) -> list[tuple[Any, ...]]:
+    with psycopg.connect(fresh_db) as conn:
+        return conn.execute(
+            "SELECT op, post_id, author, author_name, said_at, basis FROM memory_evidence"
+            " ORDER BY id"
+        ).fetchall()
+
+
+@pytest.mark.db
+def test_a_pin_by_someone_else_is_two_voices_and_the_memory_is_active(
+    world: World, fresh_db: str
+) -> None:
+    deps, server, _ = world
+    handle_event(deps, reaction(user=CURATOR))
+    assert [(m[0], m[1]) for m in memories(fresh_db)] == [(TEXT, "active")]
+    said = datetime.fromtimestamp(POSTED_MS / 1000, UTC)
+    rows = evidence(fresh_db)
+    assert [r[:4] + r[5:] for r in rows] == [
+        ("propose", "p" * 26, REACTOR, "minji.kim", "agreed"),
+        ("propose", f"{'p' * 26}:{CURATOR}", CURATOR, "yuna.choi", "agreed"),
+    ]
+    assert rows[0][4] == said
+    assert [e["post"]["message"] for e in server.ephemerals] == [
+        "저장됨: 두 분이 동의한 내용이라 바로 확정했습니다"
+    ]
+
+
+@pytest.mark.db
+def test_a_pin_by_the_author_is_one_voice_even_when_names_cannot_be_looked_up(
+    world: World, fresh_db: str
+) -> None:
+    deps, server, _ = world
+    server.users_down = True
+    handle_event(deps, reaction())
+    assert [(m[0], m[1]) for m in memories(fresh_db)] == [(TEXT, "provisional")]
+    assert [(r[0], r[2], r[3], r[5]) for r in evidence(fresh_db)] == [
+        ("propose", REACTOR, None, "stated")
+    ]
+
+
+@pytest.mark.db
+def test_pinning_the_bots_own_post_is_not_agreement(world: World, fresh_db: str) -> None:
+    deps, _, _ = world
+    handle_event(deps, reaction("b" * 26, user=CURATOR))
+    assert [(m[0], m[1]) for m in memories(fresh_db)] == [("봇이 한 말", "provisional")]
+    assert [(r[2], r[5]) for r in evidence(fresh_db)] == [(BOT, "stated")]
 
 
 @pytest.mark.db

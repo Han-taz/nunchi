@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from nunchi.domain.models import Frozen, MemoryKind, MemoryOrigin, SourceRef
+from nunchi.domain.models import Frozen, MemoryKind, MemoryOrigin, MemoryStatus, SourceRef
 
 
 class RelationKind(StrEnum):
@@ -44,6 +44,7 @@ class Candidate(Frozen):
 
     id: UUID
     kind: MemoryKind
+    status: MemoryStatus | None = None
     title: str
     body_excerpt: Annotated[str, Field(max_length=300)] = ""
     subject_name: str | None = None

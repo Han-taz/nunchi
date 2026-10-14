@@ -13,6 +13,15 @@ _BINDABLE = {"O": "public", "P": "private"}
 
 
 @dataclass(frozen=True)
+class User:
+    """A Mattermost account as the platform reports it. `bot` is the platform's own flag, so no
+    one can claim to be a person by writing like one."""
+
+    name: str
+    bot: bool
+
+
+@dataclass(frozen=True)
 class RoomFacts:
     """What a channel means for binding and provenance. kind is None for DMs and group messages:
     they are never bindable. A shared channel (Mattermost's Slack Connect) is external."""
@@ -122,7 +131,10 @@ class Mattermost:
         body = self._get(f"/posts/{root_id}/thread")
         return list(body["posts"].values())
 
-    def usernames(self, user_ids: list[str]) -> dict[str, str]:
+    def users(self, user_ids: list[str]) -> dict[str, User]:
         response = self._http.post("/users/ids", json=user_ids)
         response.raise_for_status()
-        return {u["id"]: u["username"] for u in response.json()}
+        return {u["id"]: User(u["username"], bool(u.get("is_bot"))) for u in response.json()}
+
+    def usernames(self, user_ids: list[str]) -> dict[str, str]:
+        return {i: u.name for i, u in self.users(user_ids).items()}
