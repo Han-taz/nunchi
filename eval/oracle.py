@@ -108,6 +108,12 @@ class OracleJudge:
         a, b = self._group.get(first.casefold()), self._group.get(second.casefold())
         return a is not None and a == b
 
+    def same_topic(
+        self, first: str, second: str, first_title: str = "", second_title: str = ""
+    ) -> bool:
+        """The gold corpus never puts an off-topic draft under an occupied key."""
+        return True
+
 
 class OracleExtractor:
     """Returns the gold key, the gold value and a body for each gold memory, and copies the gold

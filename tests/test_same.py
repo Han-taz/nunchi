@@ -63,9 +63,15 @@ def test_numbers_that_conflict_are_different_answers(a: str, b: str, conflict: b
 class FakeJudge:
     """Says what it is told and records what it was asked."""
 
-    def __init__(self, answer: bool = True) -> None:
+    def __init__(self, answer: bool = True, topic: bool = True) -> None:
         self.answer = answer
+        self.topic = topic
         self.asked: list[tuple[str, str]] = []
+
+    def same_topic(
+        self, first: str, second: str, first_title: str = "", second_title: str = ""
+    ) -> bool:
+        return self.topic
 
     def same(self, first: str, second: str, first_title: str = "", second_title: str = "") -> bool:
         self.asked.append((first, second))
@@ -233,6 +239,11 @@ def test_a_paraphrase_of_the_open_challenger_reconfirms_the_challenger(world: Po
             self, first: str, second: str, first_title: str = "", second_title: str = ""
         ) -> bool:
             return ("읽기" in first) == ("읽기" in second)
+
+        def same_topic(
+            self, first: str, second: str, first_title: str = "", second_title: str = ""
+        ) -> bool:
+            return True
 
     say = Say(world, ByWord())
     live = say("Mattermost API로 조회", attribute="조회 방식")
