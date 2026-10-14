@@ -1581,7 +1581,8 @@ GRANT EXECUTE ON FUNCTION app_sec.mark_expired() TO nunchi_worker;
 GRANT EXECUTE ON FUNCTION app_sec.stale_memories(integer) TO nunchi_worker;
 
 -- 워커 전용 (v1.3 §7.2): 시각이 지난 provisional 과 challenger 를 active 로 올린다.
--- digest 바인딩이 있는 기억은 그 바인딩의 digest_cursor(Mattermost create_at 밀리초)가 promote_at 을 지났을 때만 올린다: digest 가 밀리면 아직 읽지 못한 반박이 있을 수 있다.
+-- digest 바인딩이 있는 기억은 그 바인딩의 digest_cursor(Mattermost create_at 밀리초)가 promote_at 을 지났을 때만 올린다:
+-- digest 가 밀리면 아직 읽지 못한 반박이 있을 수 있다.
 -- 바인딩의 digest 가 꺼져 있거나 바인딩 출처가 없는 기억(MCP, 📌)은 시각만 본다. 출처가 external 인 기억은 시간으로 올리지 않는다 (결정 1).
 -- p_now 는 테스트와 eval 이 시계를 넘기는 데 쓴다. 이미 올린 행은 다시 걸리지 않으므로 몇 번을 불러도 같은 상태가 된다.
 -- 교체는 이전 행을 먼저 superseded 로 옮긴 뒤 challenger 를 active 로 올린다 (결정 3). valid_to 는 DB 의 오늘(current_date)이다.
