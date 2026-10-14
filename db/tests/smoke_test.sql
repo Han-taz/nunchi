@@ -68,6 +68,42 @@ BEGIN
   RETURN 'active';
 END $$;
 
+-- t_propose = 현재 요청 컨텍스트로 note 하나를 쓴다. 새 스키마는 app_sec.remember(), v1.0 스키마는 INSERT 다 (T 시험이 두 스키마에서 같은 일을 하게 한다).
+CREATE FUNCTION t.propose(p_title text, p_body text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  r record;
+  u uuid := nullif(current_setting('app.user_id', true), '')::uuid;
+  a uuid := nullif(current_setting('app.agent_id', true), '')::uuid;
+BEGIN
+  IF to_regprocedure('app_sec.remember(uuid,memory_kind,text,text,jsonb,uuid,text,text,jsonb,text,jsonb,uuid)') IS NOT NULL THEN
+    EXECUTE 'SELECT * FROM app_sec.remember($1, ''note'', $2, $3, ''[]'', NULL, NULL, NULL, ''{}'', ''stated'', ''[]'', NULL)'
+      INTO r USING '00000000-0000-0000-0000-00000000f001'::uuid, p_title, p_body;
+    RETURN r.r_outcome;
+  END IF;
+  INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', p_title, p_body, '[]', coalesce(a, u), CASE WHEN a IS NULL THEN NULL ELSE u END);
+  RETURN 'created';
+END $$;
+
+-- t_rems = note 하나를 쓰고 (새 스키마는 remember, v1.0 은 INSERT), 새 행에 대한 식 하나를 돌려준다 (volatile 이라 같은 문장 안에서 새 행을 본다)
+CREATE FUNCTION t.rems(p_body text, p_refs jsonb, p_expr text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  r record; v text; rid uuid;
+  u uuid := nullif(current_setting('app.user_id', true), '')::uuid;
+  a uuid := nullif(current_setting('app.agent_id', true), '')::uuid;
+BEGIN
+  IF to_regprocedure('app_sec.remember(uuid,memory_kind,text,text,jsonb,uuid,text,text,jsonb,text,jsonb,uuid)') IS NOT NULL THEN
+    SELECT * INTO r FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'p', p_body, p_refs, NULL, NULL, NULL, '{}', 'stated', '[]', NULL);
+    rid := r.r_id;
+  ELSE
+    INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+    VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', 'p', p_body, p_refs, coalesce(a, u), CASE WHEN a IS NULL THEN NULL ELSE u END)
+    RETURNING id INTO rid;
+  END IF;
+  EXECUTE format('SELECT (%s)::text FROM memory WHERE id = %L', p_expr, rid) INTO v;
+  RETURN v;
+END $$;
+
 CREATE FUNCTION t.ctx(u uuid, a uuid) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
   IF u IS NOT NULL AND to_regprocedure('app_sec.begin_request(uuid,uuid)') IS NOT NULL THEN
@@ -149,19 +185,20 @@ SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
 SELECT 'T1 alice sees hr rows = ' || count(*) FROM memory; COMMIT;
 
--- 2) 영업봇이 Alice 대리로 제안 (proposed) → 성공
+-- 2) 영업봇이 Alice 대리로 쓴다 → 성공 (롤백되는 트랜잭션). 이후 시험이 쓰는 고정 id 행은 소유자 권한으로 따로 넣는다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
+SELECT 'T2 propose ok' WHERE t.propose('T2 갱신 담당자 변경', '김OO → 이OO') = 'created';
+ROLLBACK;
+RESET ROLE;
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, on_behalf_of)
 VALUES ('00000000-0000-0000-0000-0000000bb001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001',
- 'fact','A사 갱신 담당자 변경','김OO → 이OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1');
-SELECT 'T2 propose ok'; COMMIT;
+ 'fact', (CASE WHEN to_regclass('entity') IS NULL THEN 'proposed' ELSE 'provisional' END)::memory_status,
+ 'A사 갱신 담당자 변경','김OO → 이OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1');
+SET ROLE app_rw;
 
--- 3) 영업봇이 active 로 바로 쓰기 시도 → 성공하되 트리거가 proposed 로 덮어쓴다
+-- 3) 영업봇은 상태를 고를 수 없다: remember 는 합의 증거로만 상태를 정한다 (stated 는 provisional)
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.eq('T3 bot insert with status=active is stored as status', $q$WITH i AS (
-  INSERT INTO memory (tenant_id, store_id, kind, status, title, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','우회','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')
-  RETURNING status) SELECT status FROM i$q$, 'provisional');
+SELECT t.eq('T3 bot remember has no say over the status: stored as status', $q$SELECT r_status::text FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', '우회', 'x', '[]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, 'provisional');
 COMMIT;
 
 -- 4) Alice(contributor)는 승인 불가 → 0 rows updated
@@ -231,16 +268,14 @@ SELECT t.err('X2c bot omits on_behalf_of', $q$INSERT INTO memory (tenant_id, sto
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','forged','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1')$q$, '42501');
 SELECT t.err('X2d wrong tenant_id', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
   VALUES ('00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-00000000f001','fact','t','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '42501');
-SELECT t.err('X2e honest bot proposal', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','honest','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, 'ok');
+SELECT t.err('X2e honest bot proposal', $q$SELECT t.propose('honest', 'x')$q$, 'ok');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.err('X2f human forges created_by=carol', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by)
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','forged','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000c1')$q$, '42501');
 SELECT t.err('X2g human sets on_behalf_of', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','forged','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000000c1')$q$, '42501');
-SELECT t.err('X2h honest human proposal', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','honest','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1')$q$, 'ok');
+SELECT t.err('X2h honest human proposal', $q$SELECT t.propose('honest', 'x')$q$, 'ok');
 COMMIT;
 
 -- X3) app_rw 는 권한/주체 테이블을 쓸 수 없다 (스스로 curator 부여 불가)
@@ -425,36 +460,30 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
 
 SET ROLE app_rw;
 
--- A7) 서버가 정하는 값: 상태, 내용 해시. 클라이언트가 보낸 status/content_hash 는 무시된다
+-- A7) 서버가 정하는 값: 상태, 내용 해시. remember 에는 status 와 content_hash 를 고를 길이 없다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.eq('F5 client status=active and content_hash are replaced', $q$WITH i AS (
-  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, on_behalf_of, content_hash)
-  VALUES ('00000000-0000-0000-0000-0000000cc001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','F5','본문 F5','[{"uri":"https://crm/1"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','client-hash')
-  RETURNING status, content_hash, body) SELECT status || '/' || (content_hash ~ '^[0-9a-f]{64}$') FROM i$q$, 'provisional/true');
+SELECT t.eq('F5 remember stores the server status and a server content_hash', $q$SELECT t.rems('본문 F5', '[{"uri":"https://crm/1"}]', 'status::text || ''/'' || (content_hash ~ ''^[0-9a-f]{64}$'')::text')$q$, 'provisional/true');
 COMMIT;
+RESET ROLE;
+DO $do$ BEGIN
+  IF to_regclass('entity') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, on_behalf_of)
+  VALUES ('00000000-0000-0000-0000-0000000cc001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001',
+   'fact', (CASE WHEN to_regclass('entity') IS NULL THEN 'proposed' ELSE 'provisional' END)::memory_status,
+   'F5','본문 F5','[{"uri":"https://crm/1"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1');
+END $do$;
+SET ROLE app_rw;
 
 -- 존재 오라클 차단: 못 읽는 행과 없는 행은 같은 오류 (N3)
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.err('F7a supersedes an hr memory (exists, unreadable)', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of, supersedes_id)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000aa001')$q$, '23503');
-SELECT t.err('F7b supersedes a random uuid (absent)', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of, supersedes_id)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-00000000dead')$q$, '23503');
-SELECT t.err('F7h supersedes a readable memory of another store', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of, supersedes_id)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000ff001')$q$, '23503');
-SELECT t.err('F7c memory:// citation of an hr memory', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"memory://00000000-0000-0000-0000-0000000aa001"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23503');
-SELECT t.err('F7d memory:// citation of a random uuid', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"memory://00000000-0000-0000-0000-00000000dead"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23503');
-SELECT t.err('F7e memory:// citation that is not a uuid', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"memory://not-a-uuid"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23503');
-SELECT t.eq('F7f citing an external memory makes the derived memory external (N11)', $q$WITH i AS (
-  INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','x','[{"uri":"memory://00000000-0000-0000-0000-0000000ee001"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')
-  RETURNING origin) SELECT origin::text FROM i$q$, 'external');
-SELECT t.eq('F7g citing an internal memory keeps it internal', $q$WITH i AS (
-  INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','p','y','[{"uri":"memory://00000000-0000-0000-0000-0000000bb001"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')
-  RETURNING origin) SELECT origin::text FROM i$q$, 'internal');
+SELECT t.err('F7a retracts an hr memory (exists, unreadable)', $q$SELECT * FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'p', 'x', '[]', NULL, NULL, NULL, '{}', 'stated', '[]', '00000000-0000-0000-0000-0000000aa001')$q$, 'P0002');
+SELECT t.err('F7b retracts a random uuid (absent)', $q$SELECT * FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'p', 'x', '[]', NULL, NULL, NULL, '{}', 'stated', '[]', '00000000-0000-0000-0000-00000000dead')$q$, 'P0002');
+SELECT t.err('F7h retracts a readable memory of another store', $q$SELECT * FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'p', 'x', '[]', NULL, NULL, NULL, '{}', 'stated', '[]', '00000000-0000-0000-0000-0000000ff001')$q$, 'P0002');
+SELECT t.err('F7c memory:// citation of an hr memory', $q$SELECT * FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'p', 'x', '[{"uri":"memory://00000000-0000-0000-0000-0000000aa001"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23503');
+SELECT t.err('F7d memory:// citation of a random uuid', $q$SELECT * FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'p', 'x', '[{"uri":"memory://00000000-0000-0000-0000-00000000dead"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23503');
+SELECT t.err('F7e memory:// citation that is not a uuid', $q$SELECT * FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'p', 'x', '[{"uri":"memory://not-a-uuid"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23503');
+SELECT t.eq('F7f citing an external memory makes the derived memory external (N11)', $q$SELECT t.rems('x', '[{"uri":"memory://00000000-0000-0000-0000-0000000ee001"}]', 'origin')$q$, 'external');
+SELECT t.eq('F7g citing an internal memory keeps it internal', $q$SELECT t.rems('y', '[{"uri":"memory://00000000-0000-0000-0000-0000000bb001"}]', 'origin')$q$, 'internal');
 ROLLBACK;
 
 -- A3, A4) 감사·삭제 해시·리뷰는 앱이 직접 쓰지 못한다 (N4, N6)
@@ -490,18 +519,14 @@ COMMIT;
 
 -- A4) 삭제된 본문의 공백만 바꾼 재제안은 막힌다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.err('F10 re-propose of deleted content with different whitespace', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again','본문  F5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('F10 re-propose of deleted content with different whitespace', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', '본문  F5', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
 ROLLBACK;
 
 -- A4) 공백 변형 우회: NBSP, 전각 공백, 폭 없는 문자도 삭제된 내용과 같은 해시가 된다 (P4)
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.err('P4a re-propose of deleted content with NBSP', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문\u00a0F5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
-SELECT t.err('P4b re-propose with an ideographic space', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문\u3000F5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
-SELECT t.err('P4c re-propose with a zero-width space', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\u200b5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('P4a re-propose of deleted content with NBSP', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'본문\u00a0F5', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
+SELECT t.err('P4b re-propose with an ideographic space', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'본문\u3000F5', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
+SELECT t.err('P4c re-propose with a zero-width space', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'본문 F\u200b5', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
 ROLLBACK;
 
 -- N6, N4) app_rw 는 내부 함수를 직접 부를 수 없다 (P1, P2)
@@ -778,16 +803,11 @@ COMMIT;
 
 -- N12) 삭제된 본문(F5)을 보이지 않는 문자로 변형해 재제안해도 막힌다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.err('N12a re-propose of deleted content with U+00AD', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\u00ad5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
-SELECT t.err('N12b re-propose of deleted content with U+180E', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\u180e5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
-SELECT t.err('N12c re-propose of deleted content with U+0085', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문\u0085F5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
-SELECT t.err('N12d re-propose of deleted content with U+FEFF', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\ufeff5','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
-SELECT t.err('N12e re-propose of deleted content with U+2060', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'본문 F\u20605','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('N12a re-propose of deleted content with U+00AD', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'본문 F\u00ad5', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
+SELECT t.err('N12b re-propose of deleted content with U+180E', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'본문 F\u180e5', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
+SELECT t.err('N12c re-propose of deleted content with U+0085', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'본문\u0085F5', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
+SELECT t.err('N12d re-propose of deleted content with U+FEFF', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'본문 F\ufeff5', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
+SELECT t.err('N12e re-propose of deleted content with U+2060', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'본문 F\u20605', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
 ROLLBACK;
 RESET ROLE;
 BEGIN;
@@ -801,12 +821,9 @@ DO $do$ BEGIN
 END $do$;
 SET ROLE app_rw;
 SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.err('N12f re-propose of cafe + U+034F + U+0301 (composes to the deleted cafe)', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'cafe\u034f\u0301','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
-SELECT t.err('N12g re-propose of cafe + U+200B + U+0301', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'cafe\u200b\u0301','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
-SELECT t.err('N12h re-propose of the deleted cafe itself', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','again',E'caf\u00e9','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')$q$, '23505');
+SELECT t.err('N12f re-propose of cafe + U+034F + U+0301 (composes to the deleted cafe)', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'cafe\u034f\u0301', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
+SELECT t.err('N12g re-propose of cafe + U+200B + U+0301', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'cafe\u200b\u0301', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
+SELECT t.err('N12h re-propose of the deleted cafe itself', $q$SELECT app_sec.remember('00000000-0000-0000-0000-00000000f001', 'note', 'again', E'caf\u00e9', '[{"uri":"x"}]', NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23505');
 ROLLBACK;
 RESET ROLE;
 -- N12i) 최신 유니코드에서 추가된 Cf 도 지워진다: U+0890 U+0891 U+110BD U+110CD U+13430-1343F 와 U+061C U+08E2 U+FFF9 U+E0001 U+E007F
@@ -814,20 +831,21 @@ SELECT t.eq('N12i content_hmac ignores new Cf characters', $q$SELECT bool_and(ap
   FROM (SELECT unnest(ARRAY[2192, 2193, 69821, 69837, 1564, 2274, 65529, 917505, 917631]) AS c UNION ALL SELECT generate_series(78896, 78911)) AS s$q$, 'true');
 
 -- ═══ 승인 모델 B (B1–B3, B5, B6, B9): 위험 등급, provisional, 전이 표 ═══════════
--- 헬퍼: t.mid(n) = 이 구역의 메모리 id, t.prop = 현재 요청 컨텍스트의 작성자로 제안 하나를 넣는다 (실패는 NOTICE 로만 남겨 mutation gate 가 끝까지 돈다)
+-- 헬퍼: t.mid(n) = 이 구역의 메모리 id, t.prop = 현재 요청 컨텍스트의 작성자로 고정 id 행 하나를 소유자 권한으로 넣는다 (INSERT 트리거는 그대로 돈다. 실패는 NOTICE 로만 남겨 mutation gate 가 끝까지 돈다)
 CREATE FUNCTION t.mid(n int) RETURNS uuid LANGUAGE sql IMMUTABLE AS $$ SELECT ('00000000-0000-0000-0000-0000000a' || lpad(n::text, 4, '0'))::uuid $$;
 CREATE FUNCTION t.prop(
   n int, p_kind memory_kind, p_title text,
-  p_gate jsonb DEFAULT '{"flags":[],"containment":"ok"}', p_sup uuid DEFAULT NULL,
+  p_gate jsonb DEFAULT '{"flags":[],"containment":"ok"}',
   p_src text DEFAULT 'https://crm/acct/A', p_store uuid DEFAULT '00000000-0000-0000-0000-00000000f001'
-) RETURNS void LANGUAGE plpgsql AS $$
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   u uuid := nullif(current_setting('app.user_id', true), '')::uuid;
   a uuid := nullif(current_setting('app.agent_id', true), '')::uuid;
 BEGIN
-  INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of, gate_result, supersedes_id)
-  VALUES (t.mid(n), '00000000-0000-0000-0000-000000000001', p_store, p_kind, p_title, p_title,
-    jsonb_build_array(jsonb_build_object('uri', p_src)), coalesce(a, u), CASE WHEN a IS NULL THEN NULL ELSE u END, p_gate, p_sup);
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, on_behalf_of, gate_result)
+  VALUES (t.mid(n), '00000000-0000-0000-0000-000000000001', p_store, p_kind,
+    (CASE WHEN to_regclass('entity') IS NULL THEN 'proposed' WHEN EXISTS (SELECT 1 FROM store WHERE id = p_store AND kind = 'user') THEN 'active' ELSE 'provisional' END)::memory_status,
+    p_title, p_title, jsonb_build_array(jsonb_build_object('uri', p_src)), coalesce(a, u), CASE WHEN a IS NULL THEN NULL ELSE u END, p_gate);
 EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup % failed: % %', n, SQLSTATE, SQLERRM;
 END $$;
 
@@ -848,30 +866,13 @@ SET ROLE app_rw;
 -- G1) 사람(Alice)의 제안: 등급표 위에서부터 첫 일치 행
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.prop(1, 'fact', 'pangolin 담당자');
-SELECT t.prop(4, 'fact', 'pangolin 정정', p_sup => t.mid(1));
-SELECT t.err('setup 5 client sends status, conflict_with and a gate flag', $q$INSERT INTO memory (id, tenant_id, store_id, kind, status, conflict_with, title, body, source_refs, created_by, gate_result)
-  VALUES (t.mid(5),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active',t.mid(1),'spoof','spoof','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','{"flags":["imperative"]}')$q$, 'ok');
+SELECT t.prop(4, 'fact', 'pangolin 정정');
 SELECT t.prop(6, 'fact', 'cites a provisional', p_src => 'memory://' || t.mid(1));
-SELECT t.prop(7, 'fact', 'containment unverified', p_gate => '{"flags":[],"containment":"unverified"}');
 SELECT t.prop(8, 'fact', 'private note', p_store => '00000000-0000-0000-0000-00000000f0a1');
-SELECT t.prop(9, 'note', 'org note', p_store => '00000000-0000-0000-0000-00000000f0a2');
 SELECT t.prop(13, 'fact', 'cites a user store', p_src => 'memory://' || t.mid(8));
-SELECT t.prop(14, 'fact', 'replaces a decision', p_sup => t.mid(10));
-SELECT t.prop(15, 'fact', 'replaces a curator fact', p_sup => t.mid(11));
-SELECT t.prop(16, 'fact', 'lower authority replaces', p_gate => '{"flags":[],"authority":1}', p_sup => t.mid(12));
-SELECT t.prop(17, 'fact', 'equal authority replaces', p_gate => '{"flags":[],"authority":3}', p_sup => t.mid(12));
-SELECT t.prop(18, 'procedure', 'howto');
 SELECT t.eq('G1a human fact, clean, internal: status/origin/ops', $q$SELECT status || '/' || origin || '/' || (SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id = t.mid(1)) FROM memory WHERE id = t.mid(1)$q$, 'provisional/internal/propose');
-SELECT t.eq('G1g client status=active, conflict_with and a flag: stored status/conflict_with null', $q$SELECT status || '/' || (conflict_with IS NULL) FROM memory WHERE id = t.mid(5)$q$, 'provisional/true');
 SELECT t.eq('G1h cites a provisional memory: status/origin', $q$SELECT status || '/' || origin FROM memory WHERE id = t.mid(6)$q$, 'provisional/external');
-SELECT t.eq('G1j user store, clean: status/ops', $q$SELECT status || '/' || (SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id = t.mid(8)) FROM memory WHERE id = t.mid(8)$q$, 'active/propose');
 SELECT t.eq('G1n cites a user store memory: status/origin', $q$SELECT status || '/' || origin FROM memory WHERE id = t.mid(13)$q$, 'provisional/external');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.prop(2, 'fact', 'agent claim');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.prop(3, 'decision', 'curator decision');
 COMMIT;
 
 -- G1m) 전이는 코드가 아니라 표다
@@ -909,10 +910,11 @@ END $$;
 -- C5PUB 공개 전원 / C5PRV 비공개 1명만 / C5CON Slack Connect 전원 + 외부 1 / C5STALE 전원이지만 스냅샷 2시간 전 / C5EXT 공개 전원 + 외부 1
 CREATE FUNCTION t.g5(n int) RETURNS uuid LANGUAGE sql IMMUTABLE AS $$ SELECT ('00000000-0000-0000-0000-00000000050' || n)::uuid $$;
 CREATE FUNCTION t.g5b(ch text) RETURNS uuid LANGUAGE plpgsql STABLE AS $$ DECLARE r uuid; BEGIN SELECT id INTO r FROM room_binding WHERE channel_id = ch; RETURN r; END $$;
-CREATE FUNCTION t.propr(n int, refs jsonb, p_origin memory_origin DEFAULT 'internal', p_gate jsonb DEFAULT '{"flags":[],"containment":"ok"}') RETURNS void LANGUAGE plpgsql AS $$
+CREATE FUNCTION t.propr(n int, refs jsonb, p_origin memory_origin DEFAULT 'internal', p_gate jsonb DEFAULT '{"flags":[],"containment":"ok"}') RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
-  INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, origin, created_by, gate_result)
-  VALUES (t.mid(n), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000005f1', 'fact', 'g5 ' || n, 'g5 body ' || n, refs, p_origin,
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, origin, created_by, gate_result)
+  VALUES (t.mid(n), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000005f1', 'fact',
+    (CASE WHEN to_regclass('entity') IS NULL THEN 'proposed' ELSE 'provisional' END)::memory_status, 'g5 ' || n, 'g5 body ' || n, refs, p_origin,
     nullif(current_setting('app.user_id', true), '')::uuid, p_gate);
 EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup % failed: % %', n, SQLSTATE, SQLERRM;
 END $$;
@@ -1056,8 +1058,7 @@ SELECT t.eq('G7o fully contained public room: containment/status/origin', $q$SEL
 SELECT t.eq('G1y client raises origin to external on a clean room: origin/status', $q$SELECT origin || '/' || status FROM memory WHERE id = t.mid(208)$q$, 'external/provisional');
 SELECT t.eq('G1z public room with an outside member: origin/status', $q$SELECT origin || '/' || status FROM memory WHERE id = t.mid(209)$q$, 'external/provisional');
 SELECT t.eq('G7p client-supplied gate_result containment is replaced, the rest kept', $q$SELECT (gate_result ->> 'containment') || '/' || (gate_result ->> 'authority') FROM memory WHERE id = t.mid(210)$q$, 'unverified/9');
-SELECT t.err('G1x source room with no live binding for this store', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by)
-  VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000005f1', 'fact', 'unbound', 'unbound', t.slack_ref('C5NOPE'), t.g5(2))$q$, '23503');
+SELECT t.err('G1x source room with no live binding for this store', $q$SELECT app_sec.remember('00000000-0000-0000-0000-0000000005f1', 'fact', 'unbound', 'unbound', t.slack_ref('C5NOPE'), NULL, NULL, NULL, '{}', 'stated', '[]', NULL)$q$, '23503');
 COMMIT;
 RESET ROLE;
 DO $do$ BEGIN IF to_regclass('source_system') IS NOT NULL THEN DELETE FROM source_system; END IF; END $do$;
@@ -1099,61 +1100,39 @@ SELECT t.err('N21j add_entity_alias refuses an unknown entity', $q$SELECT app_se
 SELECT t.eq('N21k entity_matches ranks the exact alias first', $q$SELECT alias_norm || '/' || sim FROM app_sec.entity_matches('A Corp', 3) LIMIT 1$q$, 'a corp/1');
 SELECT t.eq('N21l attribute_matches finds the live attribute of the subject', $q$SELECT attribute || '/' || sim FROM app_sec.attribute_matches('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', '담당자', 5)$q$, '담당자/1');
 SELECT t.eq('N21m attribute_matches shows nothing from a store the caller cannot read', $q$SELECT count(*)::text FROM app_sec.attribute_matches('00000000-0000-0000-0000-00000000f002', '00000000-0000-0000-0000-0000000e0a01', '비밀 속성', 5)$q$, '0');
-SELECT t.err('N23 same key, same value (extra whitespace): no new row', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute)
-  VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','  이OO ','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
-SELECT t.eq('N23a rows for the key/state/last op', $q$SELECT (SELECT count(*) FROM memory WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = '담당자') || '/' || t.state(t.mid(300)) || '/' || t.lastop(t.mid(300))$q$, '1/active/v2/reconfirm');
-SELECT t.eq('N23b last_confirmed_at moved forward', $q$SELECT (last_confirmed_at > '2026-03-01')::text FROM memory WHERE id = t.mid(300)$q$, 'true');
-SELECT t.err('N24 same key, different value', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, valid_from)
-  VALUES (t.mid(301),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','박OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자','2026-09-01')$q$, 'ok');
-SELECT t.eq('N24a conflict_with/status', $q$SELECT (conflict_with = t.mid(300))::text || '/' || status FROM memory WHERE id = t.mid(301)$q$, 'true/proposed');
-SELECT t.eq('N24b the old value is still the only live one', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01','담당자','2026-10-01')$q$, '이OO');
 COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.eq('N25 carol replaces: result/old/new', $q$SELECT d || '/' || t.state(t.mid(300)) || '/' || t.state(t.mid(301)) FROM (SELECT t.approve(t.mid(301)) AS d) AS s$q$, 'active/superseded/v3/active/v2');
-SELECT t.eq('N25b old valid_to / new supersedes old / new valid_from', $q$SELECT (SELECT valid_to FROM memory WHERE id = t.mid(300)) || '/' || (SELECT (supersedes_id = t.mid(300))::text || '/' || valid_from FROM memory WHERE id = t.mid(301))$q$, '2026-09-01/true/2026-09-01');
-COMMIT;
+-- 박OO 로 바뀐 모습의 픽스처 (소유자 권한): 이OO 는 2026-09-01 에 superseded, 박OO 가 그날부터 active. 바뀌는 길은 아래 N5x 시험이 remember() 로 본다
+RESET ROLE;
+DO $do$
+BEGIN
+  IF to_regclass('entity') IS NULL THEN RETURN; END IF;
+  PERFORM set_config('app.op', 'supersede', true);
+  UPDATE memory SET status = 'superseded', valid_to = '2026-09-01' WHERE id = t.mid(300);
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, valid_from, last_confirmed_at, supersedes_id)
+  VALUES (t.mid(301), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active',
+    'A사 담당자', '박OO', '[{"uri":"https://crm/acct/A"}]', '00000000-0000-0000-0000-0000000000a1',
+    '00000000-0000-0000-0000-0000000e0a01', '담당자', '2026-09-01', '2026-09-01', t.mid(300));
+END $do$;
+SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.eq('N26a as of 2026-02-01 (before any value)', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-02-01')$q$, 'NULL');
 SELECT t.eq('N26b as of 2026-08-15', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-08-15')$q$, '이OO');
 SELECT t.eq('N26c as of 2026-09-01 (the switch day)', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-09-01')$q$, '박OO');
 SELECT t.eq('N26d as of 2026-12-31', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01',' 담당자','2026-12-31')$q$, '박OO');
-SELECT t.err('N28 another value arrives for the key', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute)
-  VALUES (t.mid(302),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 기술 담당자','최OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자')$q$, 'ok');
-SELECT t.eq('N28a conflicts with the live 박OO', $q$SELECT (conflict_with = t.mid(301))::text FROM memory WHERE id = t.mid(302)$q$, 'true');
 COMMIT;
+RESET ROLE;
+DO $do$
+BEGIN
+  IF to_regclass('entity') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, conflict_with)
+  VALUES (t.mid(302), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'proposed',
+    'A사 기술 담당자', '최OO', '[{"uri":"https://crm/acct/A"}]', '00000000-0000-0000-0000-0000000000a1',
+    '00000000-0000-0000-0000-0000000e0a01', '담당자', t.mid(301));
+END $do$;
+SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
 SELECT t.err('N28b carol saves it separately by changing the attribute', $q$UPDATE memory SET attribute = ' 기술 담당자' WHERE id = t.mid(302)$q$, 'ok');
 SELECT t.eq('N28c attribute normalized, conflict cleared', $q$SELECT attribute || '/' || coalesce(conflict_with::text, 'NULL') FROM memory WHERE id = t.mid(302)$q$, '기술 담당자/NULL');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
-SELECT t.err('N40 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
-  VALUES (t.mid(310),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 연락처','A사 연락처는 이민수님입니다','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','연락처',' 이민수 ')$q$, 'ok');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.eq('N40a carol approves the first value; value stored normalized', $q$SELECT t.approve(t.mid(310)) || '/' || (SELECT value FROM memory WHERE id = t.mid(310))$q$, 'active/이민수');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
-SELECT t.err('N41 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
-  VALUES (t.mid(311),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','에이사 컨택','에이사 컨택은 이민수님으로 알고 있어요','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','연락처','이민수')$q$, 'ok');
-SELECT t.eq('N41a same key and value in other words: no new row, one reconfirm', $q$SELECT (SELECT count(*) FROM memory WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = '연락처') || '/' || t.lastop(t.mid(310))$q$, '1/reconfirm');
-SELECT t.err('N42 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
-  VALUES (t.mid(312),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 연락처','A사 연락처가 박민수님으로 바뀌었어요','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','연락처','박민수')$q$, 'ok');
-SELECT t.eq('N42a same key, other value: a conflicting proposal', $q$SELECT (conflict_with = t.mid(310))::text || '/' || status FROM memory WHERE id = t.mid(312)$q$, 'true/proposed');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
-SELECT t.err('N43 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
-  VALUES (t.mid(313),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 레거시','레거시 본문','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','레거시',NULL)$q$, 'ok');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.eq('N43a carol approves the value-less legacy row', $q$SELECT t.approve(t.mid(313))$q$, 'active');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
-SELECT t.err('N44 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
-  VALUES (t.mid(314),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 레거시','레거시 본문','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','레거시','아무 값')$q$, 'ok');
-SELECT t.eq('N44a legacy row falls back to the body hash: reconfirm, value backfilled', $q$SELECT (SELECT count(*) FROM memory WHERE attribute = '레거시') || '/' || t.lastop(t.mid(313)) || '/' || (SELECT value FROM memory WHERE id = t.mid(313))$q$, '1/reconfirm/아무 값');
-SELECT t.err('N45 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)
-  VALUES (t.mid(315),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 레거시','다른 본문','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','레거시','다른 값')$q$, 'ok');
-SELECT t.eq('N45a legacy row, other body: conflict as before', $q$SELECT (conflict_with = t.mid(313))::text FROM memory WHERE id = t.mid(315)$q$, 'true');
 COMMIT;
 RESET ROLE;
 SELECT t.err('N22 a second live row for the same key is blocked by the partial unique index', $q$INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute)
@@ -1578,6 +1557,30 @@ SELECT t.eq('N67a decision 2 on expiry too: the challenger became the provisiona
 SET ROLE app_rw;
 
 
+-- 쓰기는 remember() 하나다 (U33f): 옛 INSERT 경로가 없고 challenger 는 쓴 사람에게만 보인다
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.err('N64 app_rw cannot INSERT into memory: remember() is the only way in', $q$INSERT INTO memory (tenant_id, store_id, kind, title, source_refs, created_by) VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', 'direct', '[]', '00000000-0000-0000-0000-0000000005a1')$q$, '42501');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a2', NULL);
+SELECT t.eq('N57d a challenger is visible to its author', $q$SELECT t.rem('n57d', 'a', 'agreed') || ' ' || t.rem('n57d', 'b') || ' ' || (t.ridv('n57d', 'challenger') IS NOT NULL)::text$q$, 'created/active challenged/challenger true');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N57e and invisible to another contributor', $q$SELECT (t.rid('n57d', 'challenger') IS NULL)::text$q$, 'true');
+COMMIT;
+
+-- 값이 없는 옛 행은 본문 해시로 같은 값을 판정하고, 다시 말할 때 값을 채운다 (옛 N43~N45)
+RESET ROLE;
+CREATE FUNCTION t.remb(p_attr text, p_body text, p_value text, p_consensus text DEFAULT 'stated') RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r record;
+BEGIN
+  SELECT * INTO r FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'fact', 'A사 ' || p_attr, p_body, '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000e0a01', p_attr, p_value, '{}', p_consensus, '[]', NULL);
+  RETURN r.r_outcome || '/' || r.r_status;
+END $$;
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N69 no value: the body hash decides, a restatement with a value is the same, another body is a challenger', $q$SELECT t.remb('n69', '본문 69', NULL, 'agreed') || ' ' || t.remb('n69', '본문 69', 'v69') || ' ' || t.remb('n69', '다른 본문', 'w69')$q$, 'created/active reconfirmed/active challenged/challenger');
+SELECT t.eq('N69a the restatement filled in the value', $q$SELECT t.col('n69', 'active', 'value')$q$, 'v69');
+COMMIT;
 RESET ROLE;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;

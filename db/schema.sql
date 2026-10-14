@@ -165,7 +165,7 @@ CREATE TABLE memory (
   version integer NOT NULL DEFAULT 1,              -- 낙관적 잠금
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  conflict_with uuid REFERENCES memory (id),            -- 같은 키의 살아있는 행 (서버 결정: memory_bi2k_key)
+  conflict_with uuid REFERENCES memory (id),            -- 같은 키의 살아있는 행 (challenger 는 remember() 가 정한다)
   subject_id uuid,                                      -- 키 = (subject_id, attribute). note 는 키가 없다
   attribute text,                                       -- app_sec.norm_text() 로 정규화 (트리거)
   last_confirmed_at timestamptz NOT NULL DEFAULT now(), -- 생성, 같은 값 재수집(reconfirm), curator 확인 때 갱신
@@ -500,6 +500,7 @@ ALTER TABLE memory FORCE ROW LEVEL SECURITY;
 -- 읽기: reader 이상. provisional 은 active 와 같이 reader 에게 보인다 (검토 전이라는 표시는 status 가 한다).
 -- proposed 는 대리된 사용자 본인(에이전트 유무 무관) 또는 사람 작성자와 curator만,
 -- deleted/rejected 는 curator만. 봇을 공유하는 다른 사용자는 남의 proposed 를 보지 못한다.
+-- challenger(살아 있는 값과 다른 값의 제안)도 같다: 쓴 사람 본인과 curator 만 본다 (살아 있는 행에 붙여 보여 주는 일은 U37 이 한다).
 CREATE POLICY memory_read ON memory FOR SELECT USING (
   tenant_id = app_sec.ctx_tenant() AND (
     (
@@ -508,21 +509,10 @@ CREATE POLICY memory_read ON memory FOR SELECT USING (
     )
     OR store_id IN (SELECT app_sec.my_stores('curator'))
     OR (
-      status = 'proposed' AND coalesce(on_behalf_of, created_by) = app_sec.ctx_user()
+      status IN ('proposed', 'challenger') AND coalesce(on_behalf_of, created_by) = app_sec.ctx_user()
       AND store_id IN (SELECT app_sec.my_stores('reader'))
     )
   )
-);
-
--- 제안: contributor 이상. 최초 상태는 memory_bi3_origin 이 정한다. basis 는 app_sec.remember() 만 정하므로 옛 INSERT 경로는 비어 있어야 한다.
--- U33f 가 remember() 로 호출자를 옮긴 뒤 이 정책과 INSERT 권한을 없앤다.
--- 작성자 바인딩: 에이전트면 created_by=에이전트, on_behalf_of=사용자 / 아니면 created_by=사용자, on_behalf_of=NULL
-CREATE POLICY memory_propose ON memory FOR INSERT WITH CHECK (
-  status IN ('provisional', 'proposed', 'active') AND basis IS null AND version = 1
-  AND tenant_id = app_sec.ctx_tenant()
-  AND store_id IN (SELECT app_sec.my_stores('contributor'))
-  AND created_by = coalesce(app_sec.ctx_agent(), app_sec.ctx_user())
-  AND on_behalf_of IS NOT DISTINCT FROM (CASE WHEN app_sec.ctx_agent() IS NOT null THEN app_sec.ctx_user() END)
 );
 
 -- 상태 변경(승인/대체/삭제): curator 만
@@ -573,8 +563,8 @@ CREATE POLICY deleted_hash_read ON deleted_hash FOR SELECT USING (
   store_id IN (SELECT app_sec.my_stores('curator'))
 );
 
--- ── 쓰기 경로: 바인딩·해시·계보 검사·상태 기계·버전·감사는 전부 트리거가 한다 ──
--- 앱이 직접 쓰는 테이블은 memory 하나이고, 나머지(memory_version, deleted_hash)는 아래 SECURITY DEFINER 함수만 쓴다.
+-- ── 쓰기 경로: 판정은 app_sec.remember() 가, 바인딩·해시·계보 검사·상태 기계·버전·감사는 트리거가 한다 ──
+-- 앱은 memory 에 INSERT 할 수 없다. UPDATE 는 curator 의 상태 변경(삭제)과 remember() 가 부르는 내부 함수뿐이고, 나머지 표는 SECURITY DEFINER 함수만 쓴다.
 
 -- 내용 해시용 서버 비밀키. app_rw 는 이 표를 읽을 수 없다 (스키마 USAGE 만 있고 표 권한이 없다)
 CREATE TABLE app_sec.secret (
@@ -984,7 +974,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
 $$;
 
 -- INSERT: 요청 컨텍스트가 있으면 저자·대리·tenant 를 세션에 묶고(NULL 은 채우고, 다르면 42501),
--- version 을 1 로 고정한다 (status 는 memory_bi3_origin 이 정한다). 컨텍스트가 없는 소유자 적재는 값을 그대로 둔다.
+-- version 을 1 로 고정한다 (origin 은 memory_bi3_origin 이 정한다). 컨텍스트가 없는 소유자 적재는 값을 그대로 둔다.
 -- 이 트리거는 호출자(app_rw) 권한으로 돈다: 정책과 RLS 가 그대로 적용된다. 내부 함수(content_hmac 등)는
 -- app_rw 가 부를 수 없으므로 해시 계산은 SECURITY DEFINER 트리거 memory_bi2_hash / memory_bu2_hash 가 한다.
 CREATE FUNCTION app_sec.memory_before_insert() RETURNS trigger LANGUAGE plpgsql
@@ -1095,8 +1085,6 @@ END $$;
 
 -- origin 과 containment 는 출처에서 서버가 정한다. 외부 출처이거나 지시문 표지(flags)가 붙은 기억은 시간으로 승격하지 않는다 (결정 1):
 -- promote_at 을 비우면 합의(confirm, 같은 값을 다른 사람이 말함)로만 active 가 된다.
--- 옛 INSERT 경로(basis 가 비어 있다)는 최초 상태도 여기서 정한다: 충돌한 값(conflict_with)은 proposed, 개인 store 는 active, 나머지는 provisional.
--- remember() 가 쓴 행은 basis 가 있고 상태도 이미 정해져 있다. U33f 가 옛 경로와 이 분기를 함께 지운다.
 -- source_facts 는 app_rw 가 부를 수 없으므로 소유자 권한 트리거가 대신 부른다. 이름 순서상 memory_bi, memory_bi2_hash 다음에 돈다.
 CREATE FUNCTION app_sec.memory_set_origin() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
@@ -1114,13 +1102,6 @@ BEGIN
     END;
     IF cont IS NOT NULL THEN
       NEW.gate_result := NEW.gate_result || jsonb_build_object('containment', cont);
-    END IF;
-    IF NEW.basis IS NULL THEN
-      NEW.status := CASE
-        WHEN NEW.conflict_with IS NOT NULL THEN 'proposed'
-        WHEN EXISTS (SELECT 1 FROM store AS s WHERE s.id = NEW.store_id AND s.kind = 'user') THEN 'active'
-        ELSE 'provisional'
-      END;
     END IF;
     IF (NEW.origin = 'external' OR CASE
       WHEN NOT (NEW.gate_result ? 'flags') THEN false
@@ -1149,43 +1130,15 @@ BEGIN
   RETURN NEW;
 END $$;
 
--- 갱신 판정 (설계서 3). 소유자 권한이라 RLS 너머의 살아 있는 행을 보므로, 호출자가 그 store 의 contributor 일 때만 판정한다
--- (아니면 정책이 거절하게 둔다). memory_bi2_hash 가 content_hash 를 정한 뒤, memory_bi3_origin 이 상태를 정하기 전에 돈다.
--- conflict_with 는 클라이언트 값을 버리고 여기서만 정한다. 같은 키 + 같은 값이면 새 행 없이 이전 행을 reconfirm 한다 (RETURN NULL).
--- 값 비교: 양쪽에 value 가 있으면 정규화한 value 끼리 (본문 표현이 달라도 같은 값), 한쪽이라도 없으면 본문 해시로 비교한다.
-CREATE FUNCTION app_sec.memory_key_decide() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE
-  live memory;
+-- 키와 값은 정규화해서 저장한다 (attribute, value). 같은 키와 값의 판정은 remember() 가 한다.
+-- memory_bi2_hash 가 content_hash 를 정한 뒤, memory_bi3_origin 이 origin 을 정하기 전에 돈다.
+CREATE FUNCTION app_sec.memory_norm_key() RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF NEW.attribute IS NOT NULL THEN
     NEW.attribute := app_sec.norm_text(NEW.attribute);
   END IF;
   NEW.value := nullif(app_sec.norm_text(NEW.value), '');
-  IF app_sec.ctx_user() IS NULL THEN
-    RETURN NEW;
-  END IF;
-  NEW.conflict_with := NULL;
-  IF NEW.subject_id IS NULL OR NEW.attribute IS NULL OR NEW.store_id NOT IN (SELECT app_sec.my_stores('contributor')) THEN
-    RETURN NEW;
-  END IF;
-  SELECT * INTO live FROM memory AS m
-  WHERE m.store_id = NEW.store_id AND m.tenant_id = NEW.tenant_id AND m.subject_id = NEW.subject_id
-    AND m.attribute = NEW.attribute AND m.status IN ('active', 'provisional')
-  FOR UPDATE;
-  IF NOT found THEN
-    RETURN NEW;
-  END IF;
-  IF coalesce(
-    CASE WHEN NEW.value IS NOT NULL AND live.value IS NOT NULL THEN NEW.value = live.value
-         ELSE NEW.content_hash = live.content_hash END,
-    false
-  ) THEN
-    UPDATE memory SET last_confirmed_at = now(), value = coalesce(value, NEW.value) WHERE id = live.id;
-    RETURN NULL;
-  END IF;
-  NEW.conflict_with := live.id;
-  NEW.supersedes_id := live.id;
   RETURN NEW;
 END $$;
 
@@ -1259,7 +1212,7 @@ CREATE TRIGGER review_bi BEFORE INSERT ON review FOR EACH ROW EXECUTE FUNCTION a
 
 CREATE TRIGGER memory_bu BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_before_update();
 CREATE TRIGGER memory_bi2_hash BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
-CREATE TRIGGER memory_bi2k_key BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_key_decide();
+CREATE TRIGGER memory_bi2k_norm BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_norm_key();
 CREATE TRIGGER memory_bi3_origin BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_origin();
 CREATE TRIGGER memory_bu2_hash BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
 CREATE TRIGGER memory_aw AFTER INSERT OR UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_after_write();
@@ -1819,7 +1772,7 @@ GRANT SELECT ON entity, entity_alias TO app_rw;
 -- 필요한 조회는 SECURITY DEFINER 함수(app_sec.resolve_principal)로 낸다.
 GRANT SELECT (id, tenant_id, kind, display_name, active) ON principal TO app_rw;
 GRANT SELECT ON memory_version, memory_evidence, review, deleted_hash, room_binding, source_system TO app_rw;
-GRANT SELECT, INSERT, UPDATE ON memory TO app_rw;
+GRANT SELECT, UPDATE ON memory TO app_rw;  -- 쓰기는 app_sec.remember() 뿐이다: INSERT 권한이 없다
 
 -- 함수 실행 권한은 허용 목록뿐이다. 내부 함수(write_version, content_hmac, is_deleted_content, 트리거 함수)는
 -- SECURITY DEFINER 트리거와 소유자만 부른다. 정책이 호출자 권한으로 평가하는 ctx_*, my_stores 와 그 하위
@@ -1911,7 +1864,7 @@ GRANT EXECUTE ON FUNCTION app_sec.pending_dm_cards(text) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.record_card_sent(uuid, text, text) TO app_rw;
 -- 중복 note 흡수 (U27): note 는 키가 없어 같은 보고가 몇 분 간격으로 두 번 저장됐다. 같은 store 의 최근 p_days 일 안에 확인된 note 중
 -- 제목+본문 trigram 유사도가 0.9 이상이거나, 제목이 같고 본문 유사도가 0.7 이상인 행이 있으면 새 행 없이 그 행을 reconfirm 하고 id 를 돌려준다. 없으면 NULL.
--- 호출자가 그 store 의 contributor 일 때만 판정한다(아니면 NULL 을 돌려 INSERT 정책이 거절하게 둔다).
+-- 호출자가 그 store 의 contributor 일 때만 판정한다(아니면 NULL 을 돌려 remember() 가 거절하게 둔다).
 CREATE FUNCTION app_sec.reconfirm_duplicate_note(p_store uuid, p_title text, p_body text, p_days integer DEFAULT 14)
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$

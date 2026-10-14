@@ -180,11 +180,11 @@ def test_sweep_scores_trigram_then_every_embed_text_floor_and_k(admin_url: str) 
     assert grid[1] == ("title", 0.2, 20)
     assert grid[9] == ("title+body", 0.2, 20)
     assert grid[-1] == ("title+body", 0.5, 60)
-    # Equal scores break ties by random row id, so recall wobbles by a query or two between runs.
-    # Nothing approves a proposal any more, so a restated value sits next to the old one as a
-    # distractor: ten runs gave recall@1 0.476, 0.500 or 0.524 and recall@5 0.667.
-    assert rows[0]["recall@1"] == pytest.approx(0.5, abs=0.03)
-    assert rows[0]["recall@5"] == pytest.approx(0.667, abs=0.02)
+    # Equal scores break ties by random row id, so recall can wobble by a query or two between runs.
+    # A changed value is a challenger now and search does not show challengers before U37, so the
+    # queries whose gold is a changed value find nothing: ten runs gave 0.310 and 0.381.
+    assert rows[0]["recall@1"] == pytest.approx(0.31, abs=0.03)
+    assert rows[0]["recall@5"] == pytest.approx(0.38, abs=0.03)
     assert sweep_table(rows).splitlines()[1].split()[:3] == ["trigram", "-", "-"]
 
 

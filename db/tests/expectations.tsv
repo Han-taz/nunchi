@@ -78,7 +78,7 @@ N8c	(ok)	fail
 F11	(ok)	fail
 F5	(ok)	fail
 F7a	(ok)	fail
-F7b	(ok)	pass	v1.0 FK already rejects an absent supersedes target; the test pins that the new trigger keeps the same code
+F7b	(ok)	fail
 F7c	(ok)	fail
 F7d	(ok)	fail
 F7e	(ok)	fail
@@ -188,9 +188,7 @@ N12g	(ok)	fail
 N12h	(ok)	fail
 N12i	(ok)	fail
 G1a	= provisional/internal/propose	fail
-G1g	= provisional/true	fail
 G1h	= provisional/external	fail
-G1j	= active/propose	fail
 G1m	= provisional>active:confirm:contributor,provisional>active:promote:system	fail
 G1n	= provisional/external	fail
 G3m	-> P0001	fail
@@ -250,35 +248,13 @@ N21l	= 담당자/1	fail	attribute_matches finds the live attribute
 N21m	= 0	fail	attribute_matches hides a store the caller cannot read
 N22	-> 23505	fail	partial unique index blocks a second live row
 N22b	(ok)	fail	same key in another store is allowed
-N23	(ok)	fail	same key and value inserts no row
-N23a	= 1/active/v2/reconfirm	fail	reconfirm: one row, version op reconfirm
-N23b	= true	fail	last_confirmed_at bumped
-N24	(ok)	fail	different value is accepted as a proposal
-N24a	= true/proposed	fail	conflict_with set, tier at least one_curator
-N24b	= 이OO	fail	old value stays live until approval
-N25	= active/superseded/v3/active/v2	fail	decide replace path: old superseded first, new active
-N25b	= 2026-09-01/true/2026-09-01	fail	old valid_to = new valid_from, supersedes_id set
 N26a	= NULL	fail	as_of before any value
 N26b	= 이OO	fail	as_of August
 N26c	= 박OO	fail	as_of the switch day
 N26d	= 박OO	fail	as_of after the switch
 N27	-> 23514	fail	note cannot carry a key
-N28	(ok)	fail	third value proposal
-N28a	= true	fail	conflicts with the live row
 N28b	(ok)	fail	curator edits the attribute of a proposal
 N28c	= 기술 담당자/NULL	fail	attribute normalized and conflict cleared
-N40	(ok)	fail	first value with spaces is accepted
-N40a	= active/이민수	fail	value stored normalized (lower, trimmed)
-N41	(ok)	fail	same key and value in other words inserts no row
-N41a	= 1/reconfirm	fail	reconfirm by value, not by body
-N42	(ok)	fail	other value is accepted as a proposal
-N42a	= true/proposed	fail	other value conflicts with the live row
-N43	(ok)	fail	legacy row without a value
-N43a	= active	fail	legacy row goes live
-N44	(ok)	fail	restatement with a value on a legacy row
-N44a	= 1/reconfirm/아무 값	fail	legacy falls back to body hash and gets its value
-N45	(ok)	fail	other body on a legacy row
-N45a	= true	fail	legacy other body conflicts
 N18a	(ok)	fail
 N18b	(ok)	fail
 N18c	(ok)	fail
@@ -417,3 +393,8 @@ N68a	(ok)	fail
 N68b	= created/provisional true/true	fail
 N68c	(ok)	fail
 N68d	(ok)	fail
+N64	(ok)	fail
+N57d	= created/active challenged/challenger true	fail
+N57e	= true	fail
+N69	= created/active reconfirmed/active challenged/challenger	fail
+N69a	= v69	fail

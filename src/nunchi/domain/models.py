@@ -105,7 +105,6 @@ class ProposeRequest(Frozen):
     title: Annotated[str, Field(min_length=1, max_length=300)]
     body: Annotated[str, Field(max_length=100_000)] | None = None
     source_refs: Annotated[tuple[SourceRef, ...], Field(max_length=50)] = ()
-    supersedes_id: UUID | None = None
     subject_id: UUID | None = None
     attribute: Annotated[str, Field(min_length=1, max_length=200)] | None = None
     value: Annotated[str, Field(min_length=1, max_length=200)] | None = None
@@ -171,11 +170,16 @@ class Memory(MemorySummary):
 
 
 class ProposeOutcome(Frozen):
-    """created: a new proposed row. reconfirmed: the DB found a live row with the same key and
-    value, wrote no new row, and refreshed that row's last_confirmed_at."""
+    """What app_sec.remember did (design v1.3 5.1). created: a new row, provisional or active.
+    challenged: a new challenger beside the live row it disagrees with (conflict_with).
+    superseded: a newer value replaced the live row. confirmed: another author's statement made
+    a provisional row active. reconfirmed: the same value again, no new row. memory_id is the
+    row the call ended on and status is that row's status."""
 
-    kind: Literal["created", "reconfirmed"]
+    kind: Literal["created", "challenged", "superseded", "confirmed", "reconfirmed"]
     memory_id: UUID
+    status: MemoryStatus
+    conflict_with: UUID | None = None
 
 
 class MemoryVersion(Frozen):

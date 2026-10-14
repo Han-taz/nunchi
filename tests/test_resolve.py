@@ -98,7 +98,7 @@ def test_other_spelling_reuses_the_entity_and_detects_the_update(world: Pool) ->
         ("A사", "담당자", "A사 담당자: 이OO"),
         ("A사", "담당자", "A사 담당자: 박OO"),
     ]
-    say(world, ex, "A Corp", "담당자", "A사 담당자: 박OO")
+    say(world, ex, "A Corp", "담당자", "A사 담당자: 최OO")
     with request_tx(world, USER, None) as conn:
         aliases = conn.execute("SELECT alias_norm FROM entity_alias ORDER BY alias_norm").fetchall()
     assert sorted(aliases) == [("a corp",), ("a사",), ("에이사",)]

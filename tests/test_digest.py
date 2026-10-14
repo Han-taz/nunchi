@@ -204,7 +204,10 @@ def approve(url: str) -> None:
     """Stands in for the curator's approval: the first decision becomes the live row."""
     with psycopg.connect(url, autocommit=True) as conn:
         conn.execute("SET session_replication_role = replica")
-        conn.execute("UPDATE memory SET status = 'active' WHERE title = '금요일 배포 금지'")
+        conn.execute(
+            "UPDATE memory SET status = 'active', promote_at = NULL"
+            " WHERE title = '금요일 배포 금지'"
+        )
 
 
 DECISION = [
@@ -293,7 +296,7 @@ def test_a_later_window_reversing_the_decision_is_an_update_conflict(world: Worl
     assert report == DigestReport(windows=1, created=1, conflicts=1)
     assert rows(url) == [
         ("금요일 배포 금지", "active", False),
-        ("금요일 배포 허용", "proposed", True),
+        ("금요일 배포 허용", "challenger", True),
     ]
 
 

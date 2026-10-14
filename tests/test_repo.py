@@ -125,9 +125,9 @@ def test_get_returns_none_for_unreadable_and_unknown(world: Pool) -> None:
 def test_propose_binds_the_author_and_ignores_the_client(fresh_db: str, world: Pool) -> None:
     req = ProposeRequest(store_id=STORE, kind=MemoryKind.NOTE, title="new", body="b")
     with request_tx(world, USER, AGENT_NO_GRANT) as conn, pytest.raises(psycopg.Error):
-        repo.propose(conn, req)
+        repo.remember(conn, req)
     with request_tx(world, USER, None) as conn:
-        direct = repo.get(conn, repo.propose(conn, req).memory_id)
+        direct = repo.get(conn, repo.remember(conn, req).memory_id)
     assert direct is not None
     assert (direct.status, direct.origin, direct.created_by, direct.on_behalf_of) == (
         MemoryStatus.PROVISIONAL,
@@ -146,7 +146,7 @@ def test_propose_as_agent_records_the_delegate(fresh_db: str, world: Pool) -> No
         )
     req = ProposeRequest(store_id=STORE, kind=MemoryKind.NOTE, title="by agent")
     with request_tx(world, USER, AGENT) as conn:
-        mem = repo.get(conn, repo.propose(conn, req).memory_id)
+        mem = repo.get(conn, repo.remember(conn, req).memory_id)
     assert mem is not None
     assert (mem.created_by, mem.on_behalf_of) == (AGENT, USER)
     assert mem.status == MemoryStatus.PROVISIONAL
@@ -159,7 +159,7 @@ def test_propose_into_a_store_without_contributor_is_denied(world: Pool) -> None
         request_tx(world, USER, None) as conn,
         pytest.raises(psycopg.errors.InsufficientPrivilege),
     ):
-        repo.propose(conn, req)
+        repo.remember(conn, req)
 
 
 @pytest.mark.db
@@ -174,7 +174,7 @@ def test_history_and_dependents(world: Pool) -> None:
         attribute="runbook",
     )
     with request_tx(world, USER, None) as conn:
-        child = repo.get(conn, repo.propose(conn, derived).memory_id)
+        child = repo.get(conn, repo.remember(conn, derived).memory_id)
     assert child is not None
     with request_tx(world, USER, None) as conn:
         versions = repo.history(conn, child.id)
@@ -238,15 +238,17 @@ def _fact(body: str) -> ProposeRequest:
 @pytest.mark.db
 def test_propose_same_key_same_value_reconfirms(fresh_db: str, world: Pool) -> None:
     with request_tx(world, USER, None) as conn:
-        first = repo.propose(conn, _fact("Kim"))
+        first = repo.remember(conn, _fact("Kim"))
     confirmed = "SELECT last_confirmed_at FROM memory WHERE id = %s"
     before = _scalar(fresh_db, confirmed, first.memory_id)
     with request_tx(world, USER, None) as conn:
-        second = repo.propose(conn, _fact("Kim"))
+        second = repo.remember(conn, _fact("Kim"))
     after = _scalar(fresh_db, confirmed, first.memory_id)
     count = _scalar(fresh_db, "SELECT count(*) FROM memory WHERE subject_id = %s", SUBJECT)
-    assert first.kind == "created"
-    assert second == ProposeOutcome(kind="reconfirmed", memory_id=first.memory_id)
+    assert (first.kind, first.status) == ("created", MemoryStatus.PROVISIONAL)
+    assert second == ProposeOutcome(
+        kind="reconfirmed", memory_id=first.memory_id, status=MemoryStatus.PROVISIONAL
+    )
     assert after > before
     assert count == 1
 
@@ -258,15 +260,22 @@ def _valued(body: str, value: str | None) -> ProposeRequest:
 @pytest.mark.db
 def test_propose_same_key_same_value_in_other_words_reconfirms(fresh_db: str, world: Pool) -> None:
     with request_tx(world, USER, None) as conn:
-        first = repo.propose(conn, _valued("Owner is Kim.", " KIM "))
+        first = repo.remember(conn, _valued("Owner is Kim.", " KIM "))
     with request_tx(world, USER, None) as conn:
-        again = repo.propose(conn, _valued("Kim owns it these days", "kim"))
-        other = repo.propose(conn, _valued("Owner is Lee.", "Lee"))
+        again = repo.remember(conn, _valued("Kim owns it these days", "kim"))
+        other = repo.remember(conn, _valued("Owner is Lee.", "Lee"))
     stored = _scalar(fresh_db, "SELECT value FROM memory WHERE id = %s", first.memory_id)
     conflict = _scalar(fresh_db, "SELECT conflict_with FROM memory WHERE id = %s", other.memory_id)
-    assert again == ProposeOutcome(kind="reconfirmed", memory_id=first.memory_id)
+    assert again == ProposeOutcome(
+        kind="reconfirmed", memory_id=first.memory_id, status=MemoryStatus.PROVISIONAL
+    )
     assert stored == "kim"
-    assert other.kind == "created"
+    assert other == ProposeOutcome(
+        kind="challenged",
+        memory_id=other.memory_id,
+        status=MemoryStatus.CHALLENGER,
+        conflict_with=first.memory_id,
+    )
     assert conflict == first.memory_id
 
 
@@ -275,27 +284,31 @@ def test_a_row_without_a_value_falls_back_to_the_body_hash_and_gets_the_value(
     fresh_db: str, world: Pool
 ) -> None:
     with request_tx(world, USER, None) as conn:
-        old = repo.propose(conn, _valued("Kim", None))
+        old = repo.remember(conn, _valued("Kim", None))
     with request_tx(world, USER, None) as conn:
-        reworded = repo.propose(conn, _valued("Kim, as of today", "Kim"))
+        reworded = repo.remember(conn, _valued("Kim, as of today", "Kim"))
     with request_tx(world, USER, None) as conn:
-        same = repo.propose(conn, _valued("Kim", "Kim"))
+        same = repo.remember(conn, _valued("Kim", "Kim"))
     stored = _scalar(fresh_db, "SELECT value FROM memory WHERE id = %s", old.memory_id)
-    assert reworded.kind == "created"
-    assert same == ProposeOutcome(kind="reconfirmed", memory_id=old.memory_id)
+    assert reworded.kind == "challenged"
+    assert same == ProposeOutcome(
+        kind="reconfirmed", memory_id=old.memory_id, status=MemoryStatus.PROVISIONAL
+    )
     assert stored == "kim"
 
 
 @pytest.mark.db
-def test_propose_same_key_other_value_is_created_with_conflict(fresh_db: str, world: Pool) -> None:
+def test_propose_same_key_other_value_is_a_challenger_beside_the_live_row(
+    fresh_db: str, world: Pool
+) -> None:
     with request_tx(world, USER, None) as conn:
-        first = repo.propose(conn, _fact("Kim"))
+        first = repo.remember(conn, _fact("Kim"))
     with request_tx(world, USER, None) as conn:
-        second = repo.propose(conn, _fact("Lee"))
+        second = repo.remember(conn, _fact("Lee"))
     with psycopg.connect(fresh_db) as conn:
         row = conn.execute(
             "SELECT conflict_with, supersedes_id FROM memory WHERE id = %s", (second.memory_id,)
         ).fetchone()
-    assert second.kind == "created"
+    assert (second.kind, second.status) == ("challenged", MemoryStatus.CHALLENGER)
     assert second.memory_id != first.memory_id
     assert row == (first.memory_id, first.memory_id)

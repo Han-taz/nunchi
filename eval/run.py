@@ -45,8 +45,7 @@ from nunchi.extract import (
 )
 
 RESULTS = Path(__file__).parent / "results"
-# The proposer reads its own proposals and nothing approves them now, so the search counts them.
-LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL, MemoryStatus.PROPOSED)
+LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL)
 SEARCH_DEPTH = 5
 
 

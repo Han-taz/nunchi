@@ -24,7 +24,7 @@ SECOND = (
 
 def note(pool: Pool, title: str, body: str) -> ProposeOutcome:
     with request_tx(pool, USER, None) as conn:
-        return repo.propose(
+        return repo.remember(
             conn, ProposeRequest(store_id=STORE, kind=MemoryKind.NOTE, title=title, body=body)
         )
 
