@@ -60,6 +60,20 @@ def test_values_go_as_delimited_data_with_the_configured_model() -> None:
     assert body["output_config"]["format"]["schema"]["required"] == ["same", "reason"]
 
 
+def test_titles_go_with_their_values_as_delimited_data() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def respond(req: httpx2.Request) -> httpx2.Response:
+        seen.append(json.loads(req.content))
+        return httpx2.Response(200, json=message('{"same": true, "reason": "r"}'))
+
+    judge(respond).same("제거", "제외", "beacon을 v1.0에서 제거", "beacon을 v1.0 범위에서 제외")
+    assert seen[0]["messages"][0]["content"] == (
+        "<first>\n제거\n(title: beacon을 v1.0에서 제거)\n</first>\n"
+        "<second>\n제외\n(title: beacon을 v1.0 범위에서 제외)\n</second>"
+    )
+
+
 def test_any_failure_means_different() -> None:
     assert replying({"same": True, "reason": "r"}, status=500).same("a", "b") is False
     assert judge(lambda _r: httpx2.Response(200, json=message("not json"))).same("a", "b") is False
@@ -79,7 +93,9 @@ def test_sweep_judge_skips_the_call_when_numbers_differ() -> None:
     asked: list[tuple[str, str]] = []
 
     class Yes:
-        def same(self, first: str, second: str) -> bool:
+        def same(
+            self, first: str, second: str, first_title: str = "", second_title: str = ""
+        ) -> bool:
             asked.append((first, second))
             return True
 
@@ -93,5 +109,5 @@ def test_resolve_sweep_reports_the_judge_row_only_with_a_judge() -> None:
     assert {r["what"] for r in run_resolve_sweep(emb)} == {"attribute"}
     rows = run_resolve_sweep(emb, OracleJudge())
     row = next(r for r in rows if r["what"] == "judge")
-    assert (row["same_merged"], row["same_total"], row["false_merges"]) == (6, 6, 0)
+    assert (row["same_merged"], row["same_total"], row["false_merges"]) == (9, 9, 0)
     assert row["different_total"] > 0

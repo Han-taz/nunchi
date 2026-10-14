@@ -31,6 +31,7 @@ ATTRIBUTE_VARIANTS = {
     "롤백 방법": ("롤백 절차", "롤백 하는 법"),
     "알림 채널": ("알림 채널명", "알람 채널"),
     "DB 선택": ("데이터베이스 선택", "DB 종류"),
+    "팀 정보 출처": ("_user_teams 조회 방식",),
 }
 
 
@@ -53,6 +54,8 @@ GOLD_VALUES = {
     "m42": "팀장", "m43": "영수증 촬영→앱 등록→팀장 승인", "m44": "Figma Variables",
     "m45": "격주 수요일", "m46": "Vercel", "m47": "분기 1회", "m48": "윤서진",
     "m49": "2026-12-15", "m50": "한지민", "m51": "#launch",
+    "m52": "Mattermost 팀 멤버십", "m53": "v1.0에서 제거", "m54": "스크립트 제거",
+    "m55": "Mattermost API 직접 조회", "m56": "User.teams 읽기",
 }  # fmt: skip
 
 # Memories of eval/corpus/windows.jsonl.
@@ -75,7 +78,14 @@ VALUE_VARIANTS = {
     "m17": ("계정 발급→개발환경 세팅→첫 주 버디→2주차 코드 투어",),
     "m25": ("매일 새벽 3시, 14일 보관",),
     "m27": ("#incident 채널→리드 지정→30분 공유→48시간 내 포스트모템",),
+    "m52": ("Mattermost API 팀 멤버십 조회",),
+    "m53": ("v1.0 범위에서 제외",),
+    "m54": ("placeholder 제거",),
 }
+
+
+# Noisy only: the negatives a model has stored as decisions on a live stack (todos, status claims).
+LEAKY_NEGATIVES = ("todo", "claim")
 
 
 def _wording(m: Message) -> str:
@@ -84,17 +94,18 @@ def _wording(m: Message) -> str:
 
 
 class OracleJudge:
-    """Gold knowledge: values are the same when they spell one gold value."""
+    """Gold knowledge: values are the same when they spell one gold value (the database stores
+    them lowercased)."""
 
     def __init__(self) -> None:
         self._group = {
-            spelling: m
+            spelling.casefold(): m
             for m, variants in {**VALUE_VARIANTS, **WINDOW_VARIANTS}.items()
             for spelling in (ALL_VALUES[m], *variants)
         }
 
-    def same(self, first: str, second: str) -> bool:
-        a, b = self._group.get(first), self._group.get(second)
+    def same(self, first: str, second: str, first_title: str = "", second_title: str = "") -> bool:
+        a, b = self._group.get(first.casefold()), self._group.get(second.casefold())
         return a is not None and a == b
 
 
@@ -139,6 +150,8 @@ class OracleExtractor:
             )
         if gold.retracts is not None:
             return self._retraction(gold, context)
+        if self._noisy and gold.why in LEAKY_NEGATIVES:
+            return self._not_worth_draft(gold, context)
         if not gold.remember or gold.kind is None or gold.memory is None:
             return None
         text = _wording(gold) if self._noisy else self._first[gold.memory]
@@ -174,6 +187,19 @@ class OracleExtractor:
                 "attribute": same.attribute,
                 "relation": Relation(kind=RelationKind.SAME_AS, target_id=same.id),
             }
+        )
+
+    def _not_worth_draft(self, gold: Message, context: ExtractContext) -> ProposalDraft:
+        """A model that stores a todo or a status claim as a fact: the server must skip it."""
+        return ProposalDraft(
+            kind=MemoryKind.FACT,
+            title=gold.filled[:_TITLE_CHARS],
+            body=gold.filled,
+            value="완료" if gold.why == "claim" else "필요",
+            subject_name="작업 상태",
+            attribute="상태",
+            source_refs=context.source_refs,
+            origin=context.origin,
         )
 
     def _claim(self, gold: Message) -> dict[str, object]:

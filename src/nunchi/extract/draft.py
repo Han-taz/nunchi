@@ -50,6 +50,7 @@ class Candidate(Frozen):
     subject_name: str | None = None
     attribute: str | None = None
     value: str | None = None
+    status: MemoryStatus | None = None
 
 
 class EntityContext(Frozen):
