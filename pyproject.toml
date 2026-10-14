@@ -56,6 +56,8 @@ select = ["E", "F", "W", "I", "S", "B", "UP", "SIM", "PL", "RUF", "ANN"]
 [tool.ruff.lint.per-file-ignores]
 # assert is the test idiom; the PL magic-value rule fires on every expected literal
 "tests/**" = ["S101", "PLR2004"]
+# one-shot script with long SQL string literals that read better unbroken
+"scripts/migrate-v1.3.py" = ["E501"]
 
 [tool.mypy]
 strict = true

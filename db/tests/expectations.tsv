@@ -298,7 +298,7 @@ G10b	-> 22023	fail	empty list refused
 G10c	(ok)	fail	contributor replaces members
 G10d	= U5X1=false,U5X2=true	fail	snapshot equals the new list
 G10e	-> 42501	fail	unknown binding refused
-G11a	= false	fail	an unissued card cannot be marked sent
+G11b	(ok)	pass	the vulnerable fixture predates the card functions, so it has none to drop
 G12a	= NULL	fail	no absorb outside contributor stores
 N32a	= challenger,active	fail	live row and challenger coexist
 N32b	-> 23505	fail	one challenger per key

@@ -292,9 +292,9 @@ ROLLBACK;
 -- X4) 버전/리뷰는 부모 memory 가 보일 때만 보인다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
 SELECT t.eq('X4a alice+bot hr memory_version rows', $q$SELECT count(*)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000aa001'$q$, '0');
-SELECT t.eq('X4b alice+bot hr review rows', $q$SELECT count(*)::text FROM review WHERE memory_id='00000000-0000-0000-0000-0000000aa001'$q$, '0');
+SELECT t.err('X4b app_rw review SELECT (grant revoked, audit table)', $q$SELECT count(*) FROM review$q$, '42501');
 SELECT t.eq('X4c alice+bot sees sales memory_version rows (own store visible)', $q$SELECT (count(*) >= 1)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000bb001'$q$, 'true');
-SELECT t.eq('X4d alice+bot sales review verdicts (the seeded comment)', $q$SELECT string_agg(verdict, ',' ORDER BY id) FROM review$q$, 'comment');
+SELECT t.err('X4d app_rw approval_card SELECT (no grant)', $q$SELECT count(*) FROM approval_card$q$, '42501');
 SELECT t.err('X4e insert version on hr memory', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000aa001',2,'edit','00000000-0000-0000-0000-0000000000d1','{}')$q$, '42501');
 SELECT t.err('X4f insert review on hr memory', $q$INSERT INTO review (memory_id, reviewer_id, verdict) VALUES ('00000000-0000-0000-0000-0000000aa001','00000000-0000-0000-0000-0000000000d1','comment')$q$, '42501');
 SELECT t.err('X4g version actor forged as carol', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000bb001',2,'edit','00000000-0000-0000-0000-0000000000c1','{}')$q$, '42501');
@@ -304,7 +304,7 @@ SELECT t.err('X4j bot approve review (needs curator)', $q$INSERT INTO review (me
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000b1', NULL);
 SELECT t.eq('X4k bob(hr) sees hr version', $q$SELECT (count(*) >= 1)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000aa001'$q$, 'true');
-SELECT t.eq('X4l bob(hr) sees no sales version/review', $q$SELECT (SELECT count(*) FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000bb001') + (SELECT count(*) FROM review WHERE memory_id='00000000-0000-0000-0000-0000000bb001')$q$, '0');
+SELECT t.eq('X4l bob(hr) sees no sales version', $q$SELECT count(*) FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000bb001'$q$, '0');
 COMMIT;
 
 -- X5) redact 는 curator 만, snapshot 외 컬럼(reason 포함) 변경 불가 / review 는 append-only
@@ -549,7 +549,7 @@ CREATE FUNCTION t.exec_list(r text DEFAULT 'app_rw') RETURNS text LANGUAGE sql A
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.pending_dm_cards,app_sec.reconfirm_duplicate_note,app_sec.record_card_sent,app_sec.remember,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
+  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.reconfirm_duplicate_note,app_sec.remember,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
 SELECT t.eq('P3d nunchi_worker executes exactly the four worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
@@ -1002,8 +1002,8 @@ SELECT t.eq('G10d the snapshot is exactly the new list with its external flag', 
 SET ROLE app_rw;
 SELECT t.ctx(t.g5(2), NULL);
 SELECT t.err('G10e a contributor of another store replaces the snapshot of a binding it cannot see', $q$SELECT app_sec.replace_room_members(gen_random_uuid(), ARRAY['U5X1'], ARRAY[]::text[])$q$, '42501');
--- G11a) 카드 발송 표시: 모르는 nonce 나 내 제안이 아닌 카드는 표시되지 않는다
-SELECT t.eq('G11a marking a card nobody issued to this proposer returns false', $q$SELECT app_sec.record_card_sent(gen_random_uuid(), 'D1', 'P1')::text$q$, 'false');
+-- G11b) 카드 함수는 없다 (U38)
+SELECT t.eq('G11b the three card functions are gone', $q$SELECT count(*)::text FROM pg_proc WHERE proname IN ('issue_dm_cards', 'pending_dm_cards', 'record_card_sent')$q$, '0');
 -- G12a) 중복 note 흡수: 기여 권한이 없는 store 에서는 아무것도 흡수하지 않는다
 SELECT t.eq('G12a a store the caller cannot contribute to absorbs nothing', $q$SELECT coalesce(app_sec.reconfirm_duplicate_note(gen_random_uuid(), 'x', 'y')::text, 'NULL')$q$, 'NULL');
 ROLLBACK;
