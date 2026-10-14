@@ -17,7 +17,6 @@ from nunchi.db import Pool, request_tx
 from nunchi.domain.models import SourceRef
 from nunchi.embed import Embedder
 from nunchi.extract import ExtractionError, Extractor
-from nunchi.mattermost.cards import CardConfig, pending_cards
 from nunchi.mattermost.client import Mattermost, RoomFacts, room_facts
 
 log = logging.getLogger(__name__)
@@ -232,26 +231,3 @@ def _capture_window(  # noqa: PLR0913, PLR0917
             return "claimed"
         text = render(window, names, d.limits.max_chars)
         return capture_all(conn, d.extractor, text, context, d.embedder)
-
-
-def send_proposal_cards(d: Digest, config: CardConfig) -> int:
-    """DM an approval card to the curators for every proposal the bot made that has none yet
-    (the digest creates proposals, but only a mention or pin sends cards inline). A card is marked
-    sent after its DM posts, so a rerun sends nothing twice and a failed DM is retried."""
-    me = bot_principal(d)
-    if me is None:
-        return 0
-    with request_tx(d.pool, me, None) as conn:
-        owed = pending_cards(conn, config)
-    sent = 0
-    for item in owed:
-        try:
-            dm = d.client.direct_channel(d.bot_user_id, item.card.mattermost_user)
-            post_id = d.client.post(dm, "", {"attachments": [item.card.attachment]})
-        except httpx.HTTPError:
-            log.exception("digest: card %s not delivered", item.nonce)
-            continue
-        with request_tx(d.pool, me, None) as conn:
-            conn.execute("SELECT app_sec.record_card_sent(%s, %s, %s)", (item.nonce, dm, post_id))
-        sent += 1
-    return sent

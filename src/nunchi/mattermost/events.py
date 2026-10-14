@@ -14,17 +14,15 @@ import httpx
 from nunchi.capture import (
     CaptureContext,
     CaptureResult,
-    Created,
     Reconfirmed,
     Rejected,
     Skipped,
     capture,
 )
 from nunchi.db import Conn, Pool, request_tx
-from nunchi.domain.models import MemoryOrigin, MemoryStatus, SourceRef
+from nunchi.domain.models import MemoryOrigin, SourceRef
 from nunchi.embed import Embedder
 from nunchi.extract import ExtractionError, Extractor, ValueJudge
-from nunchi.mattermost.cards import Card, CardConfig, build_cards
 from nunchi.mattermost.client import Mattermost, room_facts
 
 PIN = "pushpin"
@@ -48,7 +46,6 @@ class Deps:
     client: Mattermost
     bot_user_id: str
     bot_username: str
-    cards: CardConfig
     embedder: Embedder | None = None
     judge: ValueJudge | None = None
 
@@ -56,7 +53,6 @@ class Deps:
 @dataclass(frozen=True)
 class _Outcome:
     text: str
-    cards: tuple[Card, ...] = ()
 
 
 def resolve(deps: Deps, user_id: str) -> UUID | None:
@@ -98,9 +94,6 @@ def capture_post(deps: Deps, *, event_id: str, user_id: str, channel_id: str, po
     if outcome is None:
         return
     tell(channel_id, user_id, outcome.text)
-    for card in outcome.cards:
-        dm = deps.client.direct_channel(deps.bot_user_id, card.mattermost_user)
-        deps.client.post(dm, "", {"attachments": [card.attachment]})
 
 
 def _capture(  # noqa: PLR0913, PLR0917
@@ -123,10 +116,7 @@ def _capture(  # noqa: PLR0913, PLR0917
         store_id=bound[0], origin=origin, source_refs=(ref,), today=date.today()
     )
     result = capture(conn, deps.extractor, text, context, deps.embedder, judge=deps.judge)
-    cards: tuple[Card, ...] = ()
-    if isinstance(result, Created) and result.status is MemoryStatus.PROPOSED:
-        cards = build_cards(conn, deps.cards, result.memory_id, ref.uri)
-    return _Outcome(_reply(result), cards)
+    return _Outcome(_reply(result))
 
 
 def _reply(result: CaptureResult) -> str:
