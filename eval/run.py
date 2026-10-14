@@ -50,6 +50,7 @@ from nunchi.extract import (
     Extractor,
     NullExtractor,
     ValueJudge,
+    WindowPost,
     build_extractor,
     build_judge,
 )
@@ -68,12 +69,14 @@ def _describe(conn: Conn, outcome_id: UUID) -> tuple[str, UUID | None, UUID | No
     return str(row[0]), row[1], row[2]  # type: ignore[return-value]
 
 
-def replay_group(
+def replay_group(  # noqa: PLR0913 - one capture's inputs
     pool: Pool,
     extractor: Extractor,
     group: list[Message],
     embedder: Embedder | None = None,
     judge: ValueJudge | None = None,
+    *,
+    posts: tuple[WindowPost, ...] = (),
 ) -> list[Outcome]:
     """One capture of the window's text; its results line up with the gold items in order. A gold
     item with no result is skipped, and a result with no gold item is a false positive."""
@@ -84,6 +87,7 @@ def replay_group(
         source_refs=(SourceRef(uri=f"https://eval.invalid/{msg.id}", system="slack"),),
         today=msg.today,
         window=msg.group is not None,
+        posts=posts,
     )
     try:
         with request_tx(pool, CONTRIBUTOR, None) as conn:
@@ -250,7 +254,7 @@ def run_window_eval(
     def replay_checked(p: Pool, group: list[Message]) -> list[Outcome]:
         wid = group[0].group or group[0].id
         checked = CheckedExtractor(extractor, by_id[wid])
-        outcomes = replay_group(p, checked, group, embedder, judge)
+        outcomes = replay_group(p, checked, group, embedder, judge, posts=by_id[wid].window_posts)
         checks[wid] = checked.checks
         return outcomes
 

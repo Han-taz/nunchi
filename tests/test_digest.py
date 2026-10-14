@@ -9,13 +9,23 @@ import pytest
 
 from nunchi.db import Pool
 from nunchi.domain.models import MemoryKind, MemoryOrigin
-from nunchi.extract import ExtractContext, ExtractionError, FailureReason, ProposalDraft
+from nunchi.extract import (
+    Consensus,
+    ExtractContext,
+    ExtractionError,
+    FailureReason,
+    ProposalDraft,
+    Relation,
+    RelationKind,
+    WindowPost,
+)
 from nunchi.extract.claude import SYSTEM_PROMPT, render_user_content
 from nunchi.mattermost.client import Mattermost
 from nunchi.mattermost.digest import (
     Digest,
     DigestLimits,
     DigestReport,
+    fit,
     run_digest,
 )
 from nunchi.mattermost.membership import refresh_memberships
@@ -31,6 +41,7 @@ OFF = "f" * 26
 ALICE = "a" * 26
 BOB = "o" * 26
 CURATOR = "k" * 26
+CI = "i" * 26
 T0 = 1_700_000_000_000
 MIN = 60_000
 
@@ -92,11 +103,16 @@ class FakeMattermost:
             rows = [p for p in self.posts if root in (p["id"], p["root_id"])]
             return httpx.Response(200, json={"order": [], "posts": {p["id"]: p for p in rows}})
         if path == "/users/ids":
-            names = {ALICE: "minji.kim", BOB: "junho.park", BOT: "nunchi"}
+            names = {ALICE: "minji.kim", BOB: "junho.park", BOT: "nunchi", CI: "ci-bot"}
             return httpx.Response(
                 200,
                 json=[
-                    {"id": i, "username": names[i], "remote_id": "peer" if i == BOB else ""}
+                    {
+                        "id": i,
+                        "username": names[i],
+                        "remote_id": "peer" if i == BOB else "",
+                        "is_bot": i == CI,
+                    }
                     for i in json.loads(request.content)
                 ],
             )
@@ -108,7 +124,9 @@ class FakeMattermost:
 
 
 class WindowExtractor:
-    """Reads a window the way a model would: the last agreed line decides."""
+    """Reads a window the way a model would: the last agreed line decides. It always claims
+    `agreed` and cites the lines that say the decision, so the server's check does the lowering.
+    A line saying 취소 retracts the first candidate it was offered."""
 
     def __init__(self) -> None:
         self.seen: list[tuple[str, ExtractContext]] = []
@@ -119,6 +137,9 @@ class WindowExtractor:
         self.seen.append((source_text, context))
         if self.fail:
             raise ExtractionError(FailureReason.API, "down")
+        lines = source_text.splitlines()
+        if "취소" in source_text and context.candidates:
+            return (self._retraction(lines, context),)
         value = next(
             (v for v in ("금지", "허용") if f"금요일 배포 {v}로 합의" in source_text), None
         )
@@ -133,9 +154,25 @@ class WindowExtractor:
             value=value,
             source_refs=context.source_refs,
             origin=context.origin,
+            consensus=Consensus.AGREED,
+            evidence=tuple(i for i, line in enumerate(lines) if f"배포 {value}로 합의" in line),
         )
         also = (d.model_copy(update={"source_refs": context.source_refs}) for d in self.also)
         return (draft, *also)
+
+    @staticmethod
+    def _retraction(lines: list[str], context: ExtractContext) -> ProposalDraft:
+        target = context.candidates[0]
+        return ProposalDraft(
+            kind=target.kind,
+            title=target.title,
+            subject_name=target.subject_name,
+            attribute=target.attribute,
+            value=target.value,
+            origin=context.origin,
+            relation=Relation(kind=RelationKind.RETRACTS, target_id=target.id),
+            evidence=tuple(i for i, line in enumerate(lines) if "취소" in line),
+        )
 
 
 World = tuple[Digest, FakeMattermost, WindowExtractor, str]
@@ -175,6 +212,12 @@ def world(fresh_db: str, pool: Pool) -> World:
             (BOT, TENANT, USER, CURATOR, TENANT, CUR),
         )
         bind(conn, ROOM, "public", True)
+        conn.execute(
+            "INSERT INTO room_member (tenant_id, platform, workspace_id, channel_id,"
+            " platform_user_id) VALUES (%s, 'mattermost', %s, %s, %s),"
+            " (%s, 'mattermost', %s, %s, %s)",
+            (TENANT, TEAM, ROOM, BOT, TENANT, TEAM, ROOM, CURATOR),
+        )
         bind(conn, OFF, "private", False)
         bind(conn, DM, "private", True)  # a DM id bound by mistake must still never be read
     fake = FakeMattermost()
@@ -191,6 +234,15 @@ def rows(url: str) -> list[tuple[Any, ...]]:
         ).fetchall()
 
 
+def evidence(url: str) -> list[tuple[Any, ...]]:
+    with psycopg.connect(url) as conn:
+        return conn.execute(
+            "SELECT m.title, e.op, e.post_id, e.author, e.author_name, e.uri, e.basis"
+            " FROM memory_evidence AS e JOIN memory AS m ON m.id = e.memory_id"
+            " WHERE m.title <> 'hello' ORDER BY e.id"
+        ).fetchall()
+
+
 def cursor(url: str, channel: str = ROOM) -> int:
     with psycopg.connect(url) as conn:
         row = conn.execute(
@@ -200,16 +252,7 @@ def cursor(url: str, channel: str = ROOM) -> int:
     return int(row[0])
 
 
-def approve(url: str) -> None:
-    """Stands in for the curator's approval: the first decision becomes the live row."""
-    with psycopg.connect(url, autocommit=True) as conn:
-        conn.execute("SET session_replication_role = replica")
-        conn.execute(
-            "UPDATE memory SET status = 'active', promote_at = NULL"
-            " WHERE title = '금요일 배포 금지'"
-        )
-
-
+PERMALINK = "https://mm.example/devshow/pl/{:026d}"
 DECISION = [
     post(1, 0, "금요일 배포 어떻게 할까요?"),
     post(2, 1, "저는 허용 쪽이요", BOB),
@@ -226,9 +269,29 @@ def test_a_window_with_a_decision_creates_one_memory_and_a_rerun_creates_none(wo
     report = run_digest(digest)
 
     assert report == DigestReport(windows=1, created=1)
-    assert rows(url) == [("금요일 배포 금지", "provisional", False)]
+    assert rows(url) == [("금요일 배포 금지", "active", False)]
+    assert evidence(url) == [
+        (
+            "금요일 배포 금지",
+            "propose",
+            f"{3:026d}",
+            ALICE,
+            "minji.kim",
+            PERMALINK.format(3),
+            "agreed",
+        ),
+        (
+            "금요일 배포 금지",
+            "propose",
+            f"{4:026d}",
+            BOB,
+            "junho.park",
+            PERMALINK.format(4),
+            "agreed",
+        ),
+    ]
     text, context = extractor.seen[0]
-    assert text.splitlines()[0] == "minji.kim: 금요일 배포 어떻게 할까요?"
+    assert text.splitlines()[0] == "[0] minji.kim: 금요일 배포 어떻게 할까요?"
     assert len(text.splitlines()) == 4
     assert context.window is True
     assert [r.uri for r in context.source_refs] == [
@@ -261,10 +324,10 @@ def test_a_window_settling_three_things_counts_three_created_memories(world: Wor
     )
 
     assert run_digest(digest) == DigestReport(windows=1, created=3)
-    assert sorted(title for title, *_ in rows(url)) == [
-        "금요일 배포 금지",
-        "배포 롤백 담당 정하늘",
-        "배포 점검 시간 새벽 2시",
+    assert sorted((title, status) for title, status, _ in rows(url)) == [
+        ("금요일 배포 금지", "active"),
+        ("배포 롤백 담당 정하늘", "provisional"),
+        ("배포 점검 시간 새벽 2시", "provisional"),
     ]
 
 
@@ -281,23 +344,103 @@ def test_a_chit_chat_window_creates_nothing_but_the_cursor_moves(world: World) -
 
 
 @pytest.mark.db
-def test_a_later_window_reversing_the_decision_is_an_update_conflict(world: World) -> None:
+def test_one_person_reversing_the_decision_is_a_challenger_and_two_supersede_it(
+    world: World,
+) -> None:
     digest, fake, _, url = world
     fake.posts = list(DECISION)
     run_digest(digest)
-    approve(url)
     fake.posts += [
         post(5, 120, "지난번 결정 다시 보죠"),
         post(6, 121, "이제 안정돼서 금요일 배포 허용로 합의했어요", BOB),
     ]
 
-    report = run_digest(digest)
-
-    assert report == DigestReport(windows=1, created=1, conflicts=1)
+    assert run_digest(digest) == DigestReport(windows=1, challenged=1)
     assert rows(url) == [
         ("금요일 배포 금지", "active", False),
         ("금요일 배포 허용", "challenger", True),
     ]
+
+    fake.posts += [
+        post(7, 240, "금요일 배포 허용로 합의합시다"),
+        post(8, 241, "네 금요일 배포 허용로 합의", BOB),
+    ]
+
+    assert run_digest(digest) == DigestReport(windows=1, superseded=1)
+    assert rows(url) == [
+        ("금요일 배포 금지", "superseded", False),
+        ("금요일 배포 허용", "active", True),
+    ]
+
+
+@pytest.mark.db
+def test_two_people_agreeing_on_another_value_supersede_the_live_decision_at_once(
+    world: World,
+) -> None:
+    digest, fake, _, url = world
+    fake.posts = list(DECISION)
+    run_digest(digest)
+    fake.posts += [
+        post(5, 120, "금요일 배포 허용로 합의합시다"),
+        post(6, 121, "네 금요일 배포 허용로 합의", BOB),
+    ]
+
+    assert run_digest(digest) == DigestReport(windows=1, superseded=1)
+    assert rows(url) == [
+        ("금요일 배포 금지", "superseded", False),
+        ("금요일 배포 허용", "active", False),
+    ]
+
+
+@pytest.mark.db
+def test_a_cancellation_retracts_the_live_decision_on_the_posts_that_said_so(world: World) -> None:
+    digest, fake, _, url = world
+    fake.posts = list(DECISION)
+    run_digest(digest)
+    fake.posts.append(post(5, 120, "금요일 배포 금지 그거 취소할게요"))
+
+    assert run_digest(digest) == DigestReport(windows=1, retracted=1)
+    assert rows(url) == [("금요일 배포 금지", "expired", False)]
+    assert evidence(url)[-1] == (
+        "금요일 배포 금지",
+        "retract",
+        f"{5:026d}",
+        ALICE,
+        "minji.kim",
+        PERMALINK.format(5),
+        "stated",
+    )
+
+
+@pytest.mark.db
+def test_a_bots_post_cannot_be_the_second_voice(world: World) -> None:
+    digest, fake, _, url = world
+    fake.posts = [
+        post(1, 0, "금요일 배포 금지로 합의합시다"),
+        post(2, 1, "금요일 배포 금지로 합의", CI),
+        post(3, 2, "금요일 배포 금지로 합의", ALICE) | {"props": {"from_webhook": "true"}},
+    ]
+
+    assert run_digest(digest) == DigestReport(windows=1, created=1)
+    assert rows(url) == [("금요일 배포 금지", "provisional", False)]
+    assert [(op, author) for _, op, _, author, *_ in evidence(url)] == [("propose", ALICE)]
+
+
+@pytest.mark.db
+def test_a_room_that_does_not_contain_the_readers_stores_nothing_and_keeps_the_cursor(
+    world: World,
+) -> None:
+    digest, fake, extractor, url = world
+    fake.posts = list(DECISION)
+    with psycopg.connect(url) as conn:
+        conn.execute("UPDATE room_member SET synced_at = now() - interval '3 hours'")
+
+    assert run_digest(digest) == DigestReport(skipped_audience=1)
+    assert (extractor.seen, rows(url), cursor(url)) == ([], [], 0)
+
+    with psycopg.connect(url) as conn:
+        conn.execute("UPDATE room_member SET synced_at = now()")
+    assert run_digest(digest) == DigestReport(windows=1, created=1)
 
 
 @pytest.mark.db
@@ -318,9 +461,9 @@ def test_a_thread_is_one_window_and_loose_posts_split_at_15_minutes(world: World
     assert report.windows == 3
     assert sorted(len(t.splitlines()) for t in texts) == [1, 2, 3]
     assert next(t for t in texts if "루트" in t).splitlines() == [
-        "minji.kim: 루트: 배포 규칙 논의",
-        "junho.park: 답글 하나",
-        "minji.kim: 금요일 배포 금지로 합의",
+        "[0] minji.kim: 루트: 배포 규칙 논의",
+        "[1] junho.park: 답글 하나",
+        "[2] minji.kim: 금요일 배포 금지로 합의",
     ]
     assert len(rows(url)) == 1
 
@@ -353,9 +496,9 @@ def test_the_window_cap_defers_the_rest_without_losing_it(world: World) -> None:
     assert run_digest(capped) == DigestReport(windows=1, stored_nothing=1, deferred=1)
     assert run_digest(capped) == DigestReport(windows=1, stored_nothing=1)
     assert [t for t, _ in extractor.seen] == [
-        "minji.kim: 첫째 잡담",
-        "minji.kim: 둘째 잡담",
-        "minji.kim: 셋째 잡담",
+        "[0] minji.kim: 첫째 잡담",
+        "[0] minji.kim: 둘째 잡담",
+        "[0] minji.kim: 셋째 잡담",
     ]
 
 
@@ -388,7 +531,7 @@ def test_the_bot_and_system_posts_are_not_part_of_a_window(world: World) -> None
 
     run_digest(digest)
 
-    assert [t for t, _ in extractor.seen] == ["minji.kim: 사람이 한 말"]
+    assert [t for t, _ in extractor.seen] == ["[0] minji.kim: 사람이 한 말"]
 
 
 def test_the_client_pages_until_a_page_is_short() -> None:
@@ -487,11 +630,11 @@ def test_a_later_window_restating_the_live_decision_only_reconfirms_it(world: Wo
     digest, fake, _, url = world
     fake.posts = list(DECISION)
     run_digest(digest)
-    approve(url)
     fake.posts.append(post(7, 200, "다시 확인: 금요일 배포 금지로 합의"))
 
-    assert run_digest(digest) == DigestReport(windows=1, stored_nothing=1)
+    assert run_digest(digest) == DigestReport(windows=1, reconfirmed=1, stored_nothing=1)
     assert len(rows(url)) == 1
+    assert [e[1:3] for e in evidence(url)][-1] == ("reconfirm", f"{7:026d}")
 
 
 def containment(url: str, channel: str = ROOM) -> tuple[bool, int]:
@@ -545,7 +688,7 @@ def test_an_unreadable_or_empty_channel_keeps_its_old_snapshot(world: World) -> 
             " ORDER BY channel_id",
             (ROOM, OFF),
         ).fetchall()
-    assert kept == [(ROOM, ALICE), (OFF, ALICE)]
+    assert kept == [(ROOM, ALICE), (ROOM, BOT), (ROOM, CURATOR), (OFF, ALICE)]
 
 
 @pytest.mark.db
@@ -560,3 +703,15 @@ def test_a_digest_run_stores_the_proposal_and_sends_no_dm(world: World) -> None:
             "SELECT count(*) FROM memory WHERE title = %s", ("금요일 배포 금지",)
         ).fetchone() == (1,)
     assert {"/channels/direct", "/posts"}.isdisjoint(fake.requested)
+
+
+def window_post(text: str) -> WindowPost:
+    return WindowPost(author="a", text=text)
+
+
+def test_a_long_window_keeps_its_newest_posts_and_numbers_them_from_zero() -> None:
+    posts = tuple(window_post(t) for t in ("가" * 30, "나" * 30, "다" * 30))
+
+    assert [p.text[0] for p in fit(posts, 80)] == ["나", "다"]
+    assert [p.text for p in fit((window_post("가" * 100),), 20)] == ["가" * 20]
+    assert fit(posts, 10_000) == posts

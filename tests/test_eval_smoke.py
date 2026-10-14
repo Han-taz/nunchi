@@ -301,23 +301,18 @@ def test_window_metrics_count_by_hand() -> None:
 
 
 @pytest.mark.db
-def test_window_corpus_ends_with_the_timer_promotions_and_without_retractions(
+def test_window_corpus_ends_where_the_gold_table_says_and_noisy_keys_drift_apart(
     admin_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     windows = load_windows()
     report = run_window_eval(
         admin_url, OracleExtractor(window_messages(windows)), windows, judge=OracleJudge()
     )
-    assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 3
-    assert report["duplicate_per_key"]["rate"] == 0.143
-    statuses = report["duplicate_per_key"]["statuses"]
-    assert (statuses["wm03"], statuses["wm04"], statuses["wm05"]) == (
-        ["active"],
-        ["provisional"],
-        ["provisional"],
-    )
-    assert report["wrongly_active"] == {"active": 7, "wrong": 2, "rate": 0.286}
-    assert report["retraction_recall"] == {"retractions": 2, "retracted": 0, "recall": 0.0}
+    assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 1
+    assert report["duplicate_per_key"]["rate"] == 0.0
+    assert report["wrongly_active"] == {"active": 2, "wrong": 0, "rate": 0.0}
+    assert report["retraction_recall"] == {"retractions": 2, "retracted": 2, "recall": 1.0}
+    assert report["final_statuses"] == {"active": 2, "provisional": 3, "expired": 1, "rejected": 1}
     assert report["consensus_check"] == {
         "items": 13,
         "claimed_agreed": 4,
@@ -332,6 +327,8 @@ def test_window_corpus_ends_with_the_timer_promotions_and_without_retractions(
         windows,
         judge=OracleJudge(),
     )
+    assert noisy["duplicate_per_key"]["statuses"]["wm01"] == ["active", "active", "provisional"]
+    assert noisy["retraction_recall"] == {"retractions": 2, "retracted": 2, "recall": 1.0}
     assert noisy["consensus_check"] == {
         "items": 13,
         "claimed_agreed": 13,
