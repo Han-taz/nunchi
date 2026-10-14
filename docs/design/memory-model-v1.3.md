@@ -267,9 +267,10 @@ eval 하네스(`eval/`)는 지금 메시지 한 건씩 재생하고 `decide()` �
 코퍼스 확장 (`eval/corpus/windows.jsonl`): 창마다 게시물 목록(작성자, 본문)과 정답을 둔다.
 
 ```text
-{"id": "w001", "day": 1, "posts": [{"author": "a", "text": "..."}, ...],
+{"id": "w001", "day": 1, "posts": [{"author": "a", "text": "...", "bot": false}, ...],
  "gold": [{"memory": "m30", "status_after": "active" | "provisional" | "challenger",
-           "relation": "new" | "same" | "update" | "retract", "target": "m.."}]}
+           "relation": "new" | "same" | "update" | "retract", "target": "m..",
+           "consensus": "agreed" | "stated", "evidence": [0, 1]}]}
 ```
 
 라이브 중복 사례를 `w-live-style-*` 4개 창으로 넣는다. 시뮬레이션 대화를 그대로 옮기지 않고 같은 구조로 다시 쓴다(세 사람이 스타일 방식에 동의하는 창 하나, 그 결정을 문서 이름을 주체로 다시 말하는 창 둘, 같은 결정을 같은 창에서 두 번 요약하는 창 하나). 정답은 기억 하나, 상태 active, 나머지는 `same`이다. 결정 선언 직후 창이 끝나는 사례와 "그거 아니야"로 철회하는 사례도 넣는다.
@@ -283,6 +284,20 @@ eval 하네스(`eval/`)는 지금 메시지 한 건씩 재생하고 `decide()` �
 | 변경 처리 | 정답 `update` 중 challenger가 되었다가 기간 뒤 active가 된 것, 또는 `agreed`로 바로 교체된 것 / 정답 `update` | 0.8 이상 |
 
 v1.1 경로의 기준값(U31, 큐레이터 두 명이 모든 제안을 승인하던 하네스)은 스타일 결정 live 행 3개, 중복률 0.143, 잘못된 active 5건 중 2건(0.4), 철회 재현율 0/2다. U33이 `decide()`를 지운 뒤에는 이 값을 하네스로 다시 만들 수 없어 여기에 문자 그대로 남긴다.
+
+U34 이후 값(2026-10-14, `python -m eval.run --windows`, 창 12개). 쓰기 경로가 아직 `stated`만 보내므로(U35가 합의를 `remember()`에 잇는다) 상태 지표는 그대로이고, 새 줄은 서버 확인(4.1)이 추출기의 주장을 어떻게 다뤘는지다.
+
+| 지표 | v1.1 기준 | fake | noisy |
+|---|---|---|---|
+| 스타일 결정 live 행 (wm01) | 3 | 3 | 3 |
+| 키당 중복률 | 0.143 | 0.143 (1/7) | 0.143 (1/7) |
+| 잘못된 active 비율 | 0.4 (2/5) | 없음 (active 0건) | 없음 (active 0건) |
+| 철회 재현율 | 0/2 | 0/2 | 0/2 |
+| `agreed` 주장 / 낮춘 수 | 해당 없음 | 4 / 0 | 13 / 9 |
+| 확인을 통과한 `agreed` 중 정답이 `stated`인 것 | 해당 없음 | 0 | 0 |
+| 정답 `agreed` 중 확인이 놓친 것 | 해당 없음 | 0/4 | 0/4 |
+
+fake는 정답의 `consensus`와 `evidence`를 베낀다. noisy는 모든 항목에 `agreed`를 주장해 서버 확인이 있는 이유가 되는 과대 주장을 만든다. 13개 중 9개가 `stated`로 내려갔고, 남은 4개가 정답 `agreed` 4개와 같다. 상태 지표가 움직이지 않는 이유는 두 가지다. 합의가 `remember()`에 닿지 않아 모든 행이 provisional이고, 스타일 결정의 세 행은 주체 이름이 달라(프론트 스타일링 방식, foundation.md) 키가 맞지 않는 것으로 보인다(추정, 확인하지 않았다). 둘 다 U35의 몫이다. Claude 추출기 실행은 Keychain이 필요해 Terminal.app에서만 되므로 이 값에 없다.
 
 목표는 측정값이 아니라 시작값이다. fake/noisy 추출기는 `consensus`를 정답에서 베끼므로 배선만 확인한다. 합의 판정의 실제 정밀도는 Claude 추출기로만 잴 수 있다.
 

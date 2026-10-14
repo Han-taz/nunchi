@@ -12,7 +12,16 @@ class RelationKind(StrEnum):
     NEW = "new"
     SAME_AS = "same_as"
     UPDATES = "updates"
+    RETRACTS = "retracts"
     NOT_WORTH = "not_worth"
+
+
+class Consensus(StrEnum):
+    """What the extractor claims about a window item. The server re-checks `agreed`
+    (nunchi.extract.consensus) and lowers an unproven claim to `stated`."""
+
+    AGREED = "agreed"
+    STATED = "stated"
 
 
 class Relation(Frozen):
@@ -23,9 +32,9 @@ class Relation(Frozen):
 
     @model_validator(mode="after")
     def _target_iff_pointing(self) -> Self:
-        points = self.kind in (RelationKind.SAME_AS, RelationKind.UPDATES)
+        points = self.kind in (RelationKind.SAME_AS, RelationKind.UPDATES, RelationKind.RETRACTS)
         if points != (self.target_id is not None):
-            msg = "target_id is required for same_as and updates, and forbidden otherwise"
+            msg = "target_id is required for same_as, updates and retracts, and forbidden otherwise"
             raise ValueError(msg)
         return self
 
@@ -65,6 +74,8 @@ class ProposalDraft(Frozen):
     valid_from: date | None = None
     origin: MemoryOrigin
     relation: Relation = Relation()
+    consensus: Consensus = Consensus.STATED
+    evidence: tuple[Annotated[int, Field(ge=0)], ...] = ()  # window post numbers, 0-based
 
     @model_validator(mode="after")
     def _only_notes_lack_a_key(self) -> Self:

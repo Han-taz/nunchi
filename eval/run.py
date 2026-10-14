@@ -21,7 +21,16 @@ from eval.db import CONTRIBUTOR, CURATORS, STORE, fresh_database, superuser_url
 from eval.embedding import embed_documents
 from eval.oracle import ConceptEmbedder, OracleExtractor, OracleJudge
 from eval.score import Outcome
-from eval.windows import Window, load_windows, replay_windows, window_messages, window_metrics
+from eval.windows import (
+    Check,
+    CheckedExtractor,
+    Window,
+    consensus_metrics,
+    load_windows,
+    replay_windows,
+    window_messages,
+    window_metrics,
+)
 from nunchi.capture import (
     CaptureContext,
     CaptureResult,
@@ -208,35 +217,50 @@ def run_window_eval(
     embedder: Embedder | None = None,
     judge: ValueJudge | None = None,
 ) -> dict[str, Any]:
-    """Replay the window corpus in day order and score where each gold memory ended up."""
+    """Replay the window corpus in day order and score where each gold memory ended up, and how
+    the server's consensus check treated what the extractor claimed."""
+    by_id = {w.id: w for w in windows}
+    checks: dict[str, list[Check]] = {}
+
+    def replay_checked(p: Pool, group: list[Message]) -> list[Outcome]:
+        wid = group[0].group or group[0].id
+        checked = CheckedExtractor(extractor, by_id[wid])
+        outcomes = replay_group(p, checked, group, embedder, judge)
+        checks[wid] = checked.checks
+        return outcomes
+
     with fresh_database(admin_url) as app_url:
         pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
         try:
-            outcomes, statuses = replay_windows(
-                pool,
-                windows,
-                lambda p, group: replay_group(p, extractor, group, embedder, judge),
-            )
+            outcomes, statuses = replay_windows(pool, windows, replay_checked)
         finally:
             pool.close()
     return {
         "windows": len(windows),
         **window_metrics(windows, outcomes, statuses),
+        "consensus_check": consensus_metrics(windows, checks),
         "final_statuses": dict(Counter(statuses.values())),
     }
 
 
 def window_table(report: dict[str, Any]) -> str:
-    wrong, dup, ret = (
+    wrong, dup, ret, con = (
         report["wrongly_active"],
         report["duplicate_per_key"],
         report["retraction_recall"],
+        report["consensus_check"],
     )
     rows = [
         ("wrongly active", f"{wrong['rate']} ({wrong['wrong']}/{wrong['active']})"),
         ("duplicate per key", f"{dup['rate']} ({dup['duplicated']}/{dup['memories']})"),
         ("live style rows (wm01)", dup["rows_per_memory"].get("wm01")),
         ("retraction recall", f"{ret['recall']} ({ret['retracted']}/{ret['retractions']})"),
+        ("agreed claimed / lowered", f"{con['claimed_agreed']} / {con['lowered']}"),
+        (
+            "agreed wrongly (verified)",
+            f"{con['wrongly_agreed']['rate']} ({con['wrongly_agreed']['count']})",
+        ),
+        ("agreed missed", f"{con['missed_agreed']['count']}/{con['missed_agreed']['gold_agreed']}"),
     ]
     return "\n".join([f"{report['windows']} windows", *(f"{n:<26}{v}" for n, v in rows)])
 

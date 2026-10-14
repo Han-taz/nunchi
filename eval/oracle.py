@@ -6,7 +6,13 @@ from collections.abc import Mapping, Sequence
 
 from eval.corpus import Message
 from nunchi.domain.models import MemoryKind
-from nunchi.extract.draft import ExtractContext, ProposalDraft
+from nunchi.extract.draft import (
+    Consensus,
+    ExtractContext,
+    ProposalDraft,
+    Relation,
+    RelationKind,
+)
 
 _TITLE_CHARS = 120
 
@@ -93,7 +99,9 @@ class OracleJudge:
 
 
 class OracleExtractor:
-    """Returns the gold key, the gold value and a body for each gold memory. Clean, the body is the
+    """Returns the gold key, the gold value and a body for each gold memory, and copies the gold
+    consensus and evidence; noisy, it claims `agreed` on everything, the overclaim the server's
+    check exists to lower. Clean, the body is the
     first-seen wording, so a restatement carries the identical body the server hashes. Noisy, the
     body is the message's own wording and the key spellings drift, so only the value still says
     "same". A secret message gets a leaky draft on purpose,
@@ -129,6 +137,8 @@ class OracleExtractor:
                 source_refs=context.source_refs,
                 origin=context.origin,
             )
+        if gold.retracts is not None:
+            return self._retraction(gold, context)
         if not gold.remember or gold.kind is None or gold.memory is None:
             return None
         text = _wording(gold) if self._noisy else self._first[gold.memory]
@@ -141,6 +151,33 @@ class OracleExtractor:
             attribute=self._spell(gold.attribute, ATTRIBUTE_VARIANTS, gold.subject or ""),
             source_refs=context.source_refs,
             origin=context.origin,
+            **self._claim(gold),
+        )
+
+    def _claim(self, gold: Message) -> dict[str, object]:
+        agreed = self._noisy or gold.consensus == "agreed"
+        return {
+            "consensus": Consensus.AGREED if agreed else Consensus.STATED,
+            "evidence": gold.evidence,
+        }
+
+    def _retraction(self, gold: Message, context: ExtractContext) -> ProposalDraft | None:
+        """The candidate whose value is the retracted memory's, in any spelling the run produced."""
+        spellings = {ALL_VALUES[gold.retracts or ""], *WINDOW_VARIANTS.get(gold.retracts or "", ())}
+        target = next((c for c in context.candidates if c.value in spellings), None)
+        if target is None or target.subject_name is None:
+            return None
+        return ProposalDraft(
+            kind=target.kind,
+            title=target.title,
+            body=gold.filled,
+            value=target.value,
+            subject_name=target.subject_name,
+            attribute=target.attribute,
+            source_refs=context.source_refs,
+            origin=context.origin,
+            relation=Relation(kind=RelationKind.RETRACTS, target_id=target.id),
+            **self._claim(gold),
         )
 
     def _value(self, memory: str) -> str:

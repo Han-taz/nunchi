@@ -47,6 +47,9 @@ class Message(BaseModel):
     why: str | None = None
     secret: bool = False
     group: str | None = None
+    consensus: Literal["agreed", "stated"] | None = None
+    evidence: tuple[int, ...] = ()
+    retracts: str | None = None
 
     @property
     def filled(self) -> str:

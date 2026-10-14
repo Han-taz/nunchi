@@ -15,6 +15,15 @@ from eval.db import CURATORS
 from eval.score import Outcome, _ratio
 from nunchi.db import Pool, request_tx
 from nunchi.domain.models import MemoryKind
+from nunchi.extract import (
+    Consensus,
+    ExtractContext,
+    Extractor,
+    ProposalDraft,
+    WindowPost,
+    confirm_consensus,
+    render_numbered,
+)
 
 Relation = Literal["new", "same", "update", "retract"]
 FinalStatus = Literal["active", "provisional", "challenger", "rejected"]
@@ -26,6 +35,7 @@ class Post(BaseModel):
 
     author: str
     text: str
+    bot: bool = False
 
 
 class Gold(BaseModel):
@@ -39,6 +49,8 @@ class Gold(BaseModel):
     status_after: FinalStatus | None
     relation: Relation
     target: str | None
+    consensus: Literal["agreed", "stated"]
+    evidence: tuple[int, ...]
     kind: MemoryKind | None
     subject: str | None
     attribute: str | None
@@ -64,7 +76,9 @@ class Window(BaseModel):
 
     @property
     def text(self) -> str:
-        return "\n".join(f"{p.author}: {p.text}" for p in self.posts)
+        return render_numbered(
+            [WindowPost(author=p.author, text=p.text, bot=p.bot) for p in self.posts]
+        )
 
 
 def load_windows() -> list[Window]:
@@ -95,6 +109,9 @@ def window_messages(windows: Sequence[Window]) -> list[Message]:
             memory=g.memory,
             updates=None,
             group=w.id,
+            consensus=g.consensus,
+            evidence=g.evidence,
+            retracts=g.target,
         )
         for w in windows
         for i, g in enumerate(w.gold)
@@ -163,5 +180,64 @@ def window_metrics(
             "retractions": len(retractions),
             "retracted": len(retracted),
             "recall": _ratio(len(retracted), len(retractions)),
+        },
+    }
+
+
+class Check(BaseModel):
+    """One draft's consensus claim and what the server's check made of it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    claimed: Consensus
+    verified: Consensus
+
+
+class CheckedExtractor:
+    """Runs the server's consensus check on every draft of one window, as the capture path will,
+    and keeps the claim next to the verdict. The drafts come back with the verified value."""
+
+    def __init__(self, inner: Extractor, window: Window) -> None:
+        self._inner = inner
+        self._posts = [WindowPost(author=p.author, text=p.text, bot=p.bot) for p in window.posts]
+        self.checks: list[Check] = []
+
+    def extract(self, source_text: str, context: ExtractContext) -> tuple[ProposalDraft, ...]:
+        checked = []
+        for draft in self._inner.extract(source_text, context):
+            verified = confirm_consensus(draft.consensus, draft.evidence, self._posts)
+            self.checks.append(Check(claimed=draft.consensus, verified=verified))
+            checked.append(draft.model_copy(update={"consensus": verified}))
+        return tuple(checked)
+
+
+def consensus_metrics(
+    windows: Sequence[Window], checks: dict[str, list[Check]]
+) -> dict[str, object]:
+    """Drafts line up with a window's gold items in order, as in replay_group; a draft past the
+    last gold item has nothing to be compared with and is left out."""
+    pairs = [
+        (g.consensus, c)
+        for w in windows
+        for g, c in zip(w.gold, checks.get(w.id, []), strict=False)
+    ]
+    claimed = [c for _, c in pairs if c.claimed is Consensus.AGREED]
+    lowered = [c for c in claimed if c.verified is Consensus.STATED]
+    wrongly = [g for g, c in pairs if c.verified is Consensus.AGREED and g == "stated"]
+    missed = [g for g, c in pairs if c.verified is Consensus.STATED and g == "agreed"]
+    return {
+        "items": len(pairs),
+        "claimed_agreed": len(claimed),
+        "lowered": len(lowered),
+        "verified_agreed": len(pairs) - sum(c.verified is Consensus.STATED for _, c in pairs),
+        "wrongly_agreed": {
+            "count": len(wrongly),
+            "rate": _ratio(
+                len(wrongly), len(pairs) - sum(c.verified is Consensus.STATED for _, c in pairs)
+            ),
+        },
+        "missed_agreed": {
+            "count": len(missed),
+            "gold_agreed": sum(g == "agreed" for g, _ in pairs),
         },
     }
