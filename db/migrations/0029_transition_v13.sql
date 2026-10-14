@@ -1,8 +1,9 @@
 -- Forward migration 0029: transition table v1.3 and app.op (design v1.3 U32b).
 -- Statements are copied from db/schema.sql (the schema-drift job compares the two).
 -- memory_transition is keyed (from_status, to_status, op) and holds by_roles. Every status change names its op in the
--- transaction-local setting app.op; memory_bu looks the row up with it. The callers that exist today (decide, mark_expired)
--- now set app.op. The proposed rows and the reviewed column stay until U33 replaces the card path.
+-- transaction-local setting app.op; memory_bu looks the row up with it.
+-- The callers that exist today (decide, mark_expired) now set app.op.
+-- The proposed rows and the reviewed column stay until U33 replaces the card path.
 DROP TABLE memory_transition;
 DROP TYPE transition_role;
 -- 상태 기계 (v1.3 §5.2): 허용되는 (from, to, op) 전이는 이 표가 전부다. memory_bu 는 이 표를 한 번 조회할 뿐 분기하지 않는다.
@@ -43,7 +44,8 @@ GRANT SELECT ON memory_transition TO app_rw;
 
 -- 버전/리뷰 테이블은 수정·삭제 금지. 예외: memory_version.snapshot 을 NULL 로 만드는 redact 만 허용
 -- (snapshot 을 뺀 모든 컬럼이 동일해야 함. 컬럼이 추가돼도 자동으로 비교 대상에 포함)
-CREATE OR REPLACE FUNCTION forbid_mutation() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE OR REPLACE FUNCTION forbid_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END IF;
   IF TG_TABLE_NAME = 'memory_evidence' THEN
