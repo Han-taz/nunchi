@@ -237,7 +237,7 @@ def test_pushpin_over_the_websocket_captures_once_despite_replay_and_a_broken_fr
         {"seq": 1, "action": "authentication_challenge", "data": {"token": "tok"}}
     ]
     assert memories(fresh_db) == [
-        (TEXT, "proposed", "internal", f"https://mm.example/devshow/pl/{'p' * 26}", PUBLIC)
+        (TEXT, "provisional", "internal", f"https://mm.example/devshow/pl/{'p' * 26}", PUBLIC)
     ]
     assert (extractor.calls, len(server.ephemerals)) == (1, 1)
 
@@ -317,7 +317,7 @@ def test_a_capture_that_cannot_proceed_says_why_and_saves_nothing(
 def test_a_shared_channel_capture_is_external(world: World, fresh_db: str) -> None:
     deps, _, _ = world
     handle_event(deps, reaction("u" * 26))
-    assert [(m[1], m[2]) for m in memories(fresh_db)] == [("proposed", "external")]
+    assert [(m[1], m[2]) for m in memories(fresh_db)] == [("provisional", "external")]
 
 
 @pytest.mark.parametrize(
@@ -375,7 +375,7 @@ def test_client_builds_permalinks(world: World) -> None:
 
 def test_each_capture_result_has_its_reply_text() -> None:
     mid = uuid.UUID(int=1)
-    created = Created(memory_id=mid, tier="t", status=MemoryStatus.PROVISIONAL)
+    created = Created(memory_id=mid, status=MemoryStatus.PROVISIONAL)
     assert [
         _reply(Skipped()),
         _reply(Rejected(reasons=("secret",))),

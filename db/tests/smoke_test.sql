@@ -158,10 +158,10 @@ SELECT 'T2 propose ok'; COMMIT;
 
 -- 3) 영업봇이 active 로 바로 쓰기 시도 → 성공하되 트리거가 proposed 로 덮어쓴다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.eq('T3 bot insert with status=active is stored as status/tier', $q$WITH i AS (
+SELECT t.eq('T3 bot insert with status=active is stored as status', $q$WITH i AS (
   INSERT INTO memory (tenant_id, store_id, kind, status, title, source_refs, created_by, on_behalf_of)
   VALUES ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','우회','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1')
-  RETURNING status, tier) SELECT status || '/' || tier FROM i$q$, 'proposed/one_curator');
+  RETURNING status) SELECT status FROM i$q$, 'provisional');
 COMMIT;
 
 -- 4) Alice(contributor)는 승인 불가 → 0 rows updated
@@ -366,10 +366,10 @@ DELETE FROM store_grant WHERE principal_id = '00000000-0000-0000-0000-0000000000
 SET ROLE app_rw;
 
 -- A6) proposed 는 대리된 사용자 본인에게만 보인다 (N7)
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, on_behalf_of)
-VALUES ('00000000-0000-0000-0000-0000000cc002', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', '민감한 초안', 'draft', '[]', '00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000a1');
-COMMIT;
+RESET ROLE;
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, on_behalf_of)
+VALUES ('00000000-0000-0000-0000-0000000cc002', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', 'proposed', '민감한 초안', 'draft', '[]', '00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000a1');
+SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-0000000000d1');
 SELECT t.eq('F6a dave(reader)+same bot sees alice proposal (N7a)', $q$SELECT count(*)::text FROM memory WHERE id = '00000000-0000-0000-0000-0000000cc002'$q$, '0');
 COMMIT;
@@ -430,7 +430,7 @@ BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-
 SELECT t.eq('F5 client status=active and content_hash are replaced', $q$WITH i AS (
   INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, on_behalf_of, content_hash)
   VALUES ('00000000-0000-0000-0000-0000000cc001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','F5','본문 F5','[{"uri":"https://crm/1"}]','00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-0000000000a1','client-hash')
-  RETURNING status, content_hash, body) SELECT status || '/' || (content_hash ~ '^[0-9a-f]{64}$') FROM i$q$, 'proposed/true');
+  RETURNING status, content_hash, body) SELECT status || '/' || (content_hash ~ '^[0-9a-f]{64}$') FROM i$q$, 'provisional/true');
 COMMIT;
 
 -- 존재 오라클 차단: 못 읽는 행과 없는 행은 같은 오류 (N3)
@@ -849,8 +849,8 @@ SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.prop(1, 'fact', 'pangolin 담당자');
 SELECT t.prop(4, 'fact', 'pangolin 정정', p_sup => t.mid(1));
-SELECT t.err('setup 5 client sends status, tier, conflict_with and a gate flag', $q$INSERT INTO memory (id, tenant_id, store_id, kind, status, tier, conflict_with, title, body, source_refs, created_by, gate_result)
-  VALUES (t.mid(5),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active','auto',t.mid(1),'spoof','spoof','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','{"flags":["imperative"]}')$q$, 'ok');
+SELECT t.err('setup 5 client sends status, conflict_with and a gate flag', $q$INSERT INTO memory (id, tenant_id, store_id, kind, status, conflict_with, title, body, source_refs, created_by, gate_result)
+  VALUES (t.mid(5),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','active',t.mid(1),'spoof','spoof','[{"uri":"x"}]','00000000-0000-0000-0000-0000000000a1','{"flags":["imperative"]}')$q$, 'ok');
 SELECT t.prop(6, 'fact', 'cites a provisional', p_src => 'memory://' || t.mid(1));
 SELECT t.prop(7, 'fact', 'containment unverified', p_gate => '{"flags":[],"containment":"unverified"}');
 SELECT t.prop(8, 'fact', 'private note', p_store => '00000000-0000-0000-0000-00000000f0a1');
@@ -861,66 +861,27 @@ SELECT t.prop(15, 'fact', 'replaces a curator fact', p_sup => t.mid(11));
 SELECT t.prop(16, 'fact', 'lower authority replaces', p_gate => '{"flags":[],"authority":1}', p_sup => t.mid(12));
 SELECT t.prop(17, 'fact', 'equal authority replaces', p_gate => '{"flags":[],"authority":3}', p_sup => t.mid(12));
 SELECT t.prop(18, 'procedure', 'howto');
-SELECT t.eq('G1a human fact, clean, internal: tier/status/origin/ops', $q$SELECT tier || '/' || status || '/' || origin || '/' || (SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id = t.mid(1)) FROM memory WHERE id = t.mid(1)$q$, 'auto_labeled/provisional/internal/propose,auto_activate');
-SELECT t.eq('G1f supersede declared', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(4)$q$, 'one_curator/proposed');
-SELECT t.eq('G1g client status=active, tier=auto, conflict_with and a flag: stored tier/status/conflict_with null', $q$SELECT tier || '/' || status || '/' || (conflict_with IS NULL) FROM memory WHERE id = t.mid(5)$q$, 'one_curator/proposed/true');
-SELECT t.eq('G1h cites a provisional memory: tier/status/origin', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(6)$q$, 'one_curator/proposed/external');
-SELECT t.eq('G1i containment unverified', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(7)$q$, 'one_curator/proposed');
-SELECT t.eq('G1j user store, clean: tier/status/ops', $q$SELECT tier || '/' || status || '/' || (SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id = t.mid(8)) FROM memory WHERE id = t.mid(8)$q$, 'auto/active/propose,auto_activate');
-SELECT t.eq('G1k org store note', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(9)$q$, 'two_curators/proposed');
-SELECT t.eq('G1n cites a user store memory: tier/status/origin', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(13)$q$, 'one_curator/proposed/external');
-SELECT t.eq('G1o supersedes a decision', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(14)$q$, 'two_curators/proposed');
-SELECT t.eq('G1p supersedes a curator-authored fact', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(15)$q$, 'two_curators/proposed');
-SELECT t.eq('G1q supersedes a higher-authority source', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(16)$q$, 'two_curators/proposed');
-SELECT t.eq('G1r supersedes an equal-authority source', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(17)$q$, 'one_curator/proposed');
-SELECT t.eq('G1s procedure', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(18)$q$, 'one_curator/proposed');
+SELECT t.eq('G1a human fact, clean, internal: status/origin/ops', $q$SELECT status || '/' || origin || '/' || (SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id = t.mid(1)) FROM memory WHERE id = t.mid(1)$q$, 'provisional/internal/propose');
+SELECT t.eq('G1g client status=active, conflict_with and a flag: stored status/conflict_with null', $q$SELECT status || '/' || (conflict_with IS NULL) FROM memory WHERE id = t.mid(5)$q$, 'provisional/true');
+SELECT t.eq('G1h cites a provisional memory: status/origin', $q$SELECT status || '/' || origin FROM memory WHERE id = t.mid(6)$q$, 'provisional/external');
+SELECT t.eq('G1j user store, clean: status/ops', $q$SELECT status || '/' || (SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id = t.mid(8)) FROM memory WHERE id = t.mid(8)$q$, 'active/propose');
+SELECT t.eq('G1n cites a user store memory: status/origin', $q$SELECT status || '/' || origin FROM memory WHERE id = t.mid(13)$q$, 'provisional/external');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
 SELECT t.prop(2, 'fact', 'agent claim');
-SELECT t.eq('G1b agent fact, trust 0', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(2)$q$, 'one_curator/proposed');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
 SELECT t.prop(3, 'decision', 'curator decision');
-SELECT t.eq('G1d decision', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(3)$q$, 'two_curators/proposed');
 COMMIT;
 
--- G1l, G1m) 등급과 전이는 코드가 아니라 표다
-SELECT t.eq('G1l approval_tier_rule', $q$SELECT string_agg(tier || ':' || initial_status || ':' || approvals_needed, ',' ORDER BY tier) FROM approval_tier_rule$q$,
-  'auto:active:0,auto_labeled:provisional:1,one_curator:proposed:1,two_curators:proposed:2');
+-- G1m) 전이는 코드가 아니라 표다
 SELECT t.eq('G1m memory_transition', $q$SELECT string_agg(from_status || '>' || to_status || ':' || op || ':' || array_to_string(by_roles, '|'), ',' ORDER BY from_status, to_status, op) FROM memory_transition$q$,
   'provisional>active:confirm:contributor,provisional>active:promote:system,provisional>superseded:supersede:contributor|system,provisional>rejected:retract:contributor,provisional>deleted:delete:curator,challenger>active:confirm:contributor,challenger>active:promote:system,challenger>rejected:retract:contributor,challenger>deleted:delete:curator,active>superseded:supersede:contributor|system,active>expired:retract:contributor,active>expired:expire:system,active>deleted:delete:curator,superseded>deleted:delete:curator,rejected>deleted:delete:curator,expired>deleted:delete:curator');
 
--- G4e-g) 신뢰: 20점이면 에이전트도 auto_labeled, 19점은 아니다, 강등 중이면 사람도 one_curator (점수 시드는 소유자 권한, 마지막에 ROLLBACK)
-BEGIN;
-RESET ROLE;
-DO $do$ BEGIN
-  IF to_regclass('proposer_trust') IS NOT NULL THEN
-    INSERT INTO proposer_trust (principal_id, store_id, points) VALUES ('00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-00000000f001', 20)
-    ON CONFLICT (principal_id, store_id) DO UPDATE SET points = excluded.points;
-    INSERT INTO proposer_trust (principal_id, store_id, points, demoted_until) VALUES ('00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-00000000f001', 50, now() + interval '30 days')
-    ON CONFLICT (principal_id, store_id) DO UPDATE SET points = excluded.points, demoted_until = excluded.demoted_until;
-  END IF;
-END $do$;
-SET ROLE app_rw;
-SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.prop(20, 'fact', 'agent with 20 points');
-SELECT t.eq('G4e agent with 20 points', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(20)$q$, 'auto_labeled/provisional');
-SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
-SELECT t.prop(21, 'fact', 'human while demoted');
-SELECT t.eq('G4g demoted human with 50 points', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(21)$q$, 'one_curator/proposed');
-RESET ROLE;
-SELECT t.err('setup bot at 19 points', $q$UPDATE proposer_trust SET points = 19 WHERE principal_id = '00000000-0000-0000-0000-0000000000d1'$q$, 'ok');
-SET ROLE app_rw;
-SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.prop(22, 'fact', 'agent with 19 points');
-SELECT t.eq('G4f agent with 19 points', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(22)$q$, 'one_curator/proposed');
-ROLLBACK;
-
--- G3m-p) 전이는 표에 있는 길만, 표의 역할대로만: tier 는 불변, curator 전이는 요청 컨텍스트가 있어야 하고 system 전이는 없어야 한다
+-- G3m-o) 전이는 표에 있는 길만, 표의 역할대로만: curator 전이는 요청 컨텍스트가 있어야 하고 system 전이는 없어야 한다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
 SET LOCAL app.op = 'supersede';
 SELECT t.err('G3m active -> proposed', $q$UPDATE memory SET status = 'proposed' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, 'P0001');
-SELECT t.err('G3n tier change', $q$UPDATE memory SET tier = 'auto' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, 'P0001');
 SET LOCAL app.op = 'expire';
 SELECT t.err('G3o curator in a request runs the system transition active -> expired', $q$UPDATE memory SET status = 'expired' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, '42501');
 ROLLBACK;
@@ -929,7 +890,7 @@ SET ROLE app_rw;
 -- F6c) provisional 은 reader 에게도 보인다 / N10n) 검색 기본값은 active 만이고 provisional 은 명시해야 섞인다 (B9)
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-0000000000d1');
 SELECT t.eq('F6c dave(reader)+bot sees the provisional memory as', $q$SELECT status::text FROM memory WHERE id = t.mid(1)$q$, 'provisional');
-SELECT t.eq('N10n search pangolin: default / explicit provisional', $q$SELECT (SELECT count(*) FROM app_sec.search('pangolin')) || '/' || (SELECT count(*) FROM app_sec.search('pangolin', NULL, ARRAY['provisional']::memory_status[]))$q$, '0/1');
+SELECT t.eq('N10n search pangolin: default / explicit provisional', $q$SELECT (SELECT count(*) FROM app_sec.search('pangolin')) || '/' || (SELECT count(*) FROM app_sec.search('pangolin', NULL, ARRAY['provisional']::memory_status[]))$q$, '0/2');
 COMMIT;
 
 -- B6a) store.auto_approve 는 없다: user store 의 자동은 등급표가 정한다
@@ -1085,15 +1046,15 @@ SELECT t.propr(207, t.slack_ref('C5PUB'));
 SELECT t.propr(208, t.slack_ref('C5PUB'), 'external');
 SELECT t.propr(209, t.slack_ref('C5EXT'));
 SELECT t.propr(210, t.slack_ref('C5PRV'), 'internal', '{"flags":[],"containment":"ok","authority":9}');
-SELECT t.eq('G1c source host outside source_system: tier/status/origin', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(201)$q$, 'one_curator/proposed/external');
-SELECT t.eq('G1t registered internal host stays internal', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(202)$q$, 'auto_labeled/provisional/internal');
-SELECT t.eq('G1e wildcard pattern matches an internal wiki host', $q$SELECT tier || '/' || origin FROM memory WHERE id = t.mid(203)$q$, 'auto_labeled/internal');
-SELECT t.eq('G1w userinfo in the uri does not pass for the internal host', $q$SELECT tier || '/' || origin FROM memory WHERE id = t.mid(204)$q$, 'one_curator/external');
-SELECT t.eq('G1u client says internal on a Slack Connect source: tier/status/origin', $q$SELECT tier || '/' || status || '/' || origin FROM memory WHERE id = t.mid(205)$q$, 'one_curator/proposed/external');
-SELECT t.eq('G1v client says containment ok for a private room missing readers: stored containment/tier', $q$SELECT (gate_result ->> 'containment') || '/' || tier FROM memory WHERE id = t.mid(206)$q$, 'unverified/one_curator');
-SELECT t.eq('G7o fully contained public room: containment/tier/origin', $q$SELECT (gate_result ->> 'containment') || '/' || tier || '/' || origin FROM memory WHERE id = t.mid(207)$q$, 'ok/auto_labeled/internal');
-SELECT t.eq('G1y client raises origin to external on a clean room: origin/tier', $q$SELECT origin || '/' || tier FROM memory WHERE id = t.mid(208)$q$, 'external/one_curator');
-SELECT t.eq('G1z public room with an outside member: origin/tier', $q$SELECT origin || '/' || tier FROM memory WHERE id = t.mid(209)$q$, 'external/one_curator');
+SELECT t.eq('G1c source host outside source_system: status/origin', $q$SELECT status || '/' || origin FROM memory WHERE id = t.mid(201)$q$, 'provisional/external');
+SELECT t.eq('G1t registered internal host stays internal', $q$SELECT status || '/' || origin FROM memory WHERE id = t.mid(202)$q$, 'provisional/internal');
+SELECT t.eq('G1e wildcard pattern matches an internal wiki host', $q$SELECT status || '/' || origin FROM memory WHERE id = t.mid(203)$q$, 'provisional/internal');
+SELECT t.eq('G1w userinfo in the uri does not pass for the internal host', $q$SELECT status || '/' || origin FROM memory WHERE id = t.mid(204)$q$, 'provisional/external');
+SELECT t.eq('G1u client says internal on a Slack Connect source: status/origin', $q$SELECT status || '/' || origin FROM memory WHERE id = t.mid(205)$q$, 'provisional/external');
+SELECT t.eq('G1v client says containment ok for a private room missing readers: stored containment/status', $q$SELECT (gate_result ->> 'containment') || '/' || status FROM memory WHERE id = t.mid(206)$q$, 'unverified/provisional');
+SELECT t.eq('G7o fully contained public room: containment/status/origin', $q$SELECT (gate_result ->> 'containment') || '/' || status || '/' || origin FROM memory WHERE id = t.mid(207)$q$, 'ok/provisional/internal');
+SELECT t.eq('G1y client raises origin to external on a clean room: origin/status', $q$SELECT origin || '/' || status FROM memory WHERE id = t.mid(208)$q$, 'external/provisional');
+SELECT t.eq('G1z public room with an outside member: origin/status', $q$SELECT origin || '/' || status FROM memory WHERE id = t.mid(209)$q$, 'external/provisional');
 SELECT t.eq('G7p client-supplied gate_result containment is replaced, the rest kept', $q$SELECT (gate_result ->> 'containment') || '/' || (gate_result ->> 'authority') FROM memory WHERE id = t.mid(210)$q$, 'unverified/9');
 SELECT t.err('G1x source room with no live binding for this store', $q$INSERT INTO memory (tenant_id, store_id, kind, title, body, source_refs, created_by)
   VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000005f1', 'fact', 'unbound', 'unbound', t.slack_ref('C5NOPE'), t.g5(2))$q$, '23503');
@@ -1144,7 +1105,7 @@ SELECT t.eq('N23a rows for the key/state/last op', $q$SELECT (SELECT count(*) FR
 SELECT t.eq('N23b last_confirmed_at moved forward', $q$SELECT (last_confirmed_at > '2026-03-01')::text FROM memory WHERE id = t.mid(300)$q$, 'true');
 SELECT t.err('N24 same key, different value', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, valid_from)
   VALUES (t.mid(301),'00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-00000000f001','fact','A사 담당자','박OO','[{"uri":"https://crm/acct/A"}]','00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-0000000e0a01','담당자','2026-09-01')$q$, 'ok');
-SELECT t.eq('N24a conflict_with/tier/status', $q$SELECT (conflict_with = t.mid(300))::text || '/' || tier || '/' || status FROM memory WHERE id = t.mid(301)$q$, 'true/one_curator/proposed');
+SELECT t.eq('N24a conflict_with/status', $q$SELECT (conflict_with = t.mid(300))::text || '/' || status FROM memory WHERE id = t.mid(301)$q$, 'true/proposed');
 SELECT t.eq('N24b the old value is still the only live one', $q$SELECT body FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000e0a01','담당자','2026-10-01')$q$, '이OO');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);

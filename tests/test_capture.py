@@ -87,7 +87,7 @@ def test_new_fact_creates_entity_alias_and_memory(world: Pool) -> None:
     before = counts(world)
     result = run(world, fact(), "A사 담당자는 이OO입니다")
     assert isinstance(result, Created)
-    assert result.status in (MemoryStatus.PROPOSED, MemoryStatus.PROVISIONAL)
+    assert result.status is MemoryStatus.PROVISIONAL
     assert result.conflict_with is None
     assert counts(world) == (before[0] + 1, before[1] + 1)
     with request_tx(world, USER, None) as conn:
@@ -256,4 +256,4 @@ def test_a_rejected_item_does_not_stop_the_others_and_a_single_message_keeps_one
     assert [type(r) for r in results] == [Rejected, Created]
     with request_tx(world, USER, None) as conn:
         single = capture_all(conn, extractor(*three_items()), STACK, CTX)
-    assert [type(r) for r in single] == [Created]
+    assert [type(r) for r in single] == [Reconfirmed]

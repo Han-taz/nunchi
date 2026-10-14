@@ -141,8 +141,6 @@ CREATE TYPE memory_status AS ENUM (
 );
 -- 현재 상태에 이른 근거 (v1.3 §3.1)
 CREATE TYPE promotion_basis AS ENUM ('agreed', 'stated', 'timer', 'agent', 'user_store', 'migrated');
--- 위험 등급: risk_tier() 가 정하고 approval_tier_rule 이 등급마다 최초 상태와 승인 정족수를 정한다
-CREATE TYPE approval_tier AS ENUM ('auto', 'auto_labeled', 'one_curator', 'two_curators');
 CREATE TYPE memory_origin AS ENUM ('internal', 'external');
 
 CREATE TABLE memory (
@@ -167,7 +165,6 @@ CREATE TABLE memory (
   version integer NOT NULL DEFAULT 1,              -- 낙관적 잠금
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  tier approval_tier NOT NULL DEFAULT 'one_curator',  -- 요청 컨텍스트가 있는 INSERT 에서 risk_tier() 가 정한다. 이후 불변
   conflict_with uuid REFERENCES memory (id),            -- 같은 키의 살아있는 행 (서버 결정: memory_bi2k_key)
   subject_id uuid,                                      -- 키 = (subject_id, attribute). note 는 키가 없다
   attribute text,                                       -- app_sec.norm_text() 로 정규화 (트리거)
@@ -321,46 +318,6 @@ CREATE TABLE store_autonomy (
   store_id uuid PRIMARY KEY REFERENCES store (id),
   promote_after interval NOT NULL DEFAULT '24 hours' CHECK (promote_after > interval '0')
 );
-
--- 등급 -> 최초 상태와 승인 정족수. INSERT 정책, 등급 트리거, 버전 기록이 모두 이 표 하나를 본다.
-CREATE TABLE approval_tier_rule (
-  tier approval_tier PRIMARY KEY,
-  initial_status memory_status NOT NULL,
-  approvals_needed integer NOT NULL
-);
-INSERT INTO approval_tier_rule (tier, initial_status, approvals_needed) VALUES
-('auto', 'active', 0),
-('auto_labeled', 'provisional', 1),
-('one_curator', 'proposed', 1),
-('two_curators', 'proposed', 2);
-
--- 제안자 신뢰: (저자, store) 별 점수. risk_tier() 가 읽고, memory_aw 가 trust_rule 표대로 갱신한다.
-CREATE TABLE proposer_trust (
-  principal_id uuid NOT NULL REFERENCES principal (id),
-  store_id uuid NOT NULL REFERENCES store (id),
-  points integer NOT NULL DEFAULT 0,
-  approved integer NOT NULL DEFAULT 0,
-  rejected integer NOT NULL DEFAULT 0,
-  retracted integer NOT NULL DEFAULT 0,
-  demoted_until timestamptz,
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (principal_id, store_id)
-);
-
--- 비대칭 점수: 승인/확인 +1, 반려 -5, 회수 -10 (이미 노출된 것이라 반려의 두 배) + 30일 강등. 전이의 op 마다 한 행이다.
-CREATE TABLE trust_rule (
-  op memory_op PRIMARY KEY,
-  points integer NOT NULL,
-  approved integer NOT NULL,
-  rejected integer NOT NULL,
-  retracted integer NOT NULL,
-  demote_days integer NOT NULL
-);
-INSERT INTO trust_rule (op, points, approved, rejected, retracted, demote_days) VALUES
-('approve', 1, 1, 0, 0, 0),
-('confirm', 1, 1, 0, 0, 0),
-('reject', -5, 0, 1, 0, 0),
-('retract', -10, 0, 0, 1, 30);
 
 -- 버전/리뷰 테이블은 수정·삭제 금지. 예외: memory_version.snapshot 을 NULL 로 만드는 redact 만 허용
 -- (snapshot 을 뺀 모든 컬럼이 동일해야 함. 컬럼이 추가돼도 자동으로 비교 대상에 포함)
@@ -556,13 +513,10 @@ CREATE POLICY memory_read ON memory FOR SELECT USING (
   )
 );
 
--- 제안: contributor 이상. 최초 상태는 트리거가 정한 tier 의 approval_tier_rule 값과 같아야 한다 (클라이언트는 고를 수 없다).
+-- 제안: contributor 이상. 최초 상태는 memory_bi3_origin 이 정한다. U33d 가 이 정책과 함께 INSERT 권한을 없앤다.
 -- 작성자 바인딩: 에이전트면 created_by=에이전트, on_behalf_of=사용자 / 아니면 created_by=사용자, on_behalf_of=NULL
 CREATE POLICY memory_propose ON memory FOR INSERT WITH CHECK (
-  status = (
-    SELECT r.initial_status FROM approval_tier_rule AS r
-    WHERE r.tier = memory.tier
-  ) AND version = 1
+  status IN ('provisional', 'proposed', 'active') AND version = 1
   AND tenant_id = app_sec.ctx_tenant()
   AND store_id IN (SELECT app_sec.my_stores('contributor'))
   AND created_by = coalesce(app_sec.ctx_agent(), app_sec.ctx_user())
@@ -1027,57 +981,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
   LIMIT p_limit
 $$;
 
--- 위험 등급 (설계서 2.1). 입력은 모두 서버/DB 가 정한 값이고 위에서부터 첫 일치 행이 등급이다.
--- 1행(게이트 reject = 제안 거부)은 게이트의 몫이라 여기 없다. 신뢰 20점이 기준이고 점수 갱신은 proposer_trust 가 한다.
--- gate_result.containment 가 없으면 방 근거가 없는 출처로 보고 확인된 것으로 취급한다 (방 테이블은 U6). 있는데 ok 가 아니면 9행이다.
-CREATE FUNCTION app_sec.risk_tier(m memory) RETURNS approval_tier
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-  WITH f AS (
-    SELECT
-      s.kind AS store_kind,
-      m.supersedes_id IS NOT NULL AS supersedes,
-      t.kind = 'decision' AS target_is_decision,
-      EXISTS (
-        SELECT 1 FROM store_grant AS g
-        WHERE g.store_id = t.store_id AND g.role = 'curator'
-          AND g.principal_id IN (SELECT app_sec.closure(coalesce(t.on_behalf_of, t.created_by)))
-      ) AS target_by_curator,
-      coalesce(substring(m.gate_result ->> 'authority' FROM '^[0-9]{1,4}$')::int, 1) AS authority,
-      coalesce(substring(t.gate_result ->> 'authority' FROM '^[0-9]{1,4}$')::int, 1) AS target_authority,
-      CASE
-        WHEN NOT (m.gate_result ? 'flags') THEN false
-        WHEN jsonb_typeof(m.gate_result -> 'flags') = 'array' THEN jsonb_array_length(m.gate_result -> 'flags') > 0
-        ELSE true
-      END AS flagged,
-      m.gate_result ? 'containment' AND (m.gate_result ->> 'containment') IS DISTINCT FROM 'ok' AS containment_unverified,
-      coalesce(pt.demoted_until > now(), false) AS demoted,
-      au.kind AS author_kind,
-      coalesce(pt.points, 0) AS trust_points,
-      20 AS trust_threshold
-    FROM store AS s
-    LEFT JOIN memory AS t ON t.id = m.supersedes_id
-    LEFT JOIN proposer_trust AS pt ON pt.principal_id = m.created_by AND pt.store_id = m.store_id
-    LEFT JOIN principal AS au ON au.id = m.created_by
-    WHERE s.id = m.store_id
-  )
-
-  SELECT (CASE
-    WHEN f.store_kind = 'user' THEN 'auto'
-    WHEN f.store_kind = 'org' OR m.kind = 'decision' THEN 'two_curators'
-    WHEN f.supersedes AND (f.target_is_decision OR f.target_by_curator OR f.authority < f.target_authority) THEN 'two_curators'
-    WHEN f.supersedes THEN 'one_curator'
-    WHEN m.kind = 'procedure' THEN 'one_curator'
-    WHEN m.origin = 'external' THEN 'one_curator'
-    WHEN f.flagged THEN 'one_curator'
-    WHEN m.conflict_with IS NOT NULL OR f.containment_unverified THEN 'one_curator'
-    WHEN f.demoted THEN 'one_curator'
-    WHEN f.author_kind = 'user' OR f.trust_points >= f.trust_threshold THEN 'auto_labeled'
-    ELSE 'one_curator'
-  END)::approval_tier FROM f
-$$;
-
 -- INSERT: 요청 컨텍스트가 있으면 저자·대리·tenant 를 세션에 묶고(NULL 은 채우고, 다르면 42501),
--- version 을 1 로 고정한다 (tier 와 status 는 memory_bi3_tier 가 정한다). 컨텍스트가 없는 소유자 적재는 값을 그대로 둔다.
+-- version 을 1 로 고정한다 (status 는 memory_bi3_origin 이 정한다). 컨텍스트가 없는 소유자 적재는 값을 그대로 둔다.
 -- 이 트리거는 호출자(app_rw) 권한으로 돈다: 정책과 RLS 가 그대로 적용된다. 내부 함수(content_hmac 등)는
 -- app_rw 가 부를 수 없으므로 해시 계산은 SECURITY DEFINER 트리거 memory_bi2_hash / memory_bu2_hash 가 한다.
 CREATE FUNCTION app_sec.memory_before_insert() RETURNS trigger LANGUAGE plpgsql
@@ -1133,9 +1038,9 @@ DECLARE
   tr memory_transition;
   v_op memory_op;
 BEGIN
-  IF (NEW.id, NEW.tenant_id, NEW.store_id, NEW.kind, NEW.created_by, NEW.on_behalf_of, NEW.created_at, NEW.session_ref, NEW.tier)
+  IF (NEW.id, NEW.tenant_id, NEW.store_id, NEW.kind, NEW.created_by, NEW.on_behalf_of, NEW.created_at, NEW.session_ref)
      IS DISTINCT FROM
-     (OLD.id, OLD.tenant_id, OLD.store_id, OLD.kind, OLD.created_by, OLD.on_behalf_of, OLD.created_at, OLD.session_ref, OLD.tier) THEN
+     (OLD.id, OLD.tenant_id, OLD.store_id, OLD.kind, OLD.created_by, OLD.on_behalf_of, OLD.created_at, OLD.session_ref) THEN
     RAISE EXCEPTION 'immutable column changed';
   END IF;
   IF (NEW.subject_id, NEW.attribute) IS DISTINCT FROM (OLD.subject_id, OLD.attribute) THEN
@@ -1186,9 +1091,10 @@ BEGIN
   RETURN NEW;
 END $$;
 
--- 등급과 최초 상태는 서버가 정한다: 클라이언트가 보낸 tier, status 는 요청 컨텍스트가 있으면 덮어쓴다.
--- risk_tier 는 app_rw 가 부를 수 없으므로 소유자 권한 트리거가 대신 부른다. 이름 순서상 memory_bi, memory_bi2_hash 다음에 돈다.
-CREATE FUNCTION app_sec.memory_set_tier() RETURNS trigger
+-- origin 과 containment 는 출처에서, 최초 상태는 서버가 정한다: 클라이언트가 보낸 status 는 요청 컨텍스트가 있으면 덮어쓴다.
+-- 충돌한 값(conflict_with)은 proposed, 개인 store 는 active, 나머지는 provisional 이다. 이 상태 정하기는 U33d 의 remember() 가 대신한다.
+-- source_facts 는 app_rw 가 부를 수 없으므로 소유자 권한 트리거가 대신 부른다. 이름 순서상 memory_bi, memory_bi2_hash 다음에 돈다.
+CREATE FUNCTION app_sec.memory_set_origin() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE cont text;
 BEGIN
@@ -1205,8 +1111,11 @@ BEGIN
     IF cont IS NOT NULL THEN
       NEW.gate_result := NEW.gate_result || jsonb_build_object('containment', cont);
     END IF;
-    NEW.tier := app_sec.risk_tier(NEW);
-    SELECT r.initial_status INTO NEW.status FROM approval_tier_rule AS r WHERE r.tier = NEW.tier;
+    NEW.status := CASE
+      WHEN NEW.conflict_with IS NOT NULL THEN 'proposed'
+      WHEN EXISTS (SELECT 1 FROM store AS s WHERE s.id = NEW.store_id AND s.kind = 'user') THEN 'active'
+      ELSE 'provisional'
+    END;
   END IF;
   RETURN NEW;
 END $$;
@@ -1228,7 +1137,7 @@ BEGIN
 END $$;
 
 -- 갱신 판정 (설계서 3). 소유자 권한이라 RLS 너머의 살아 있는 행을 보므로, 호출자가 그 store 의 contributor 일 때만 판정한다
--- (아니면 정책이 거절하게 둔다). memory_bi2_hash 가 content_hash 를 정한 뒤, memory_bi3_tier 가 등급을 정하기 전에 돈다.
+-- (아니면 정책이 거절하게 둔다). memory_bi2_hash 가 content_hash 를 정한 뒤, memory_bi3_origin 이 상태를 정하기 전에 돈다.
 -- conflict_with 는 클라이언트 값을 버리고 여기서만 정한다. 같은 키 + 같은 값이면 새 행 없이 이전 행을 reconfirm 한다 (RETURN NULL).
 -- 값 비교: 양쪽에 value 가 있으면 정규화한 value 끼리 (본문 표현이 달라도 같은 값), 한쪽이라도 없으면 본문 해시로 비교한다.
 CREATE FUNCTION app_sec.memory_key_decide() RETURNS trigger
@@ -1313,25 +1222,6 @@ BEGIN
     ELSE nullif(current_setting('app.op', true), '')::memory_op
   END;
   PERFORM app_sec.write_version(NEW, v_op, actor, why);
-  -- 제안자 신뢰는 전이의 op 마다 trust_rule 한 행으로 갱신한다 (규칙이 없는 op 는 아무 행도 만들지 않는다)
-  INSERT INTO proposer_trust AS pt (principal_id, store_id, points, approved, rejected, retracted, demoted_until)
-  SELECT
-    NEW.created_by, NEW.store_id, r.points, r.approved, r.rejected, r.retracted,
-    CASE WHEN r.demote_days > 0 THEN now() + make_interval(days => r.demote_days) END
-  FROM trust_rule AS r WHERE r.op = v_op
-  ON CONFLICT (principal_id, store_id) DO UPDATE SET
-    points = pt.points + excluded.points,
-    approved = pt.approved + excluded.approved,
-    rejected = pt.rejected + excluded.rejected,
-    retracted = pt.retracted + excluded.retracted,
-    demoted_until = coalesce(excluded.demoted_until, pt.demoted_until),
-    updated_at = now();
-  IF TG_OP = 'INSERT' AND EXISTS (
-    SELECT 1 FROM approval_tier_rule AS r
-    WHERE r.tier = NEW.tier AND r.initial_status = NEW.status AND r.initial_status <> 'proposed'
-  ) THEN
-    PERFORM app_sec.write_version(NEW, 'auto_activate', actor, why);
-  END IF;
   IF v_op = 'delete' THEN
     IF OLD.content_hash IS NOT NULL THEN
       INSERT INTO deleted_hash (store_id, content_hash, reason) VALUES (NEW.store_id, OLD.content_hash, coalesce(why, 'delete'))
@@ -1357,7 +1247,7 @@ CREATE TRIGGER review_bi BEFORE INSERT ON review FOR EACH ROW EXECUTE FUNCTION a
 CREATE TRIGGER memory_bu BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_before_update();
 CREATE TRIGGER memory_bi2_hash BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
 CREATE TRIGGER memory_bi2k_key BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_key_decide();
-CREATE TRIGGER memory_bi3_tier BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_tier();
+CREATE TRIGGER memory_bi3_origin BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_origin();
 CREATE TRIGGER memory_bu2_hash BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
 CREATE TRIGGER memory_aw AFTER INSERT OR UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_after_write();
 
@@ -1621,7 +1511,7 @@ END $$;
 -- ── 앱 접속 역할 최소 권한 (RLS 우회·스스로 권한 부여 불가) ──
 GRANT USAGE ON SCHEMA public TO app_rw;
 -- 주체/권한/감사 테이블은 읽기 전용이다. 버전은 memory 트리거, 삭제 해시는 삭제 트리거, 권한과 주체는 별도 관리 역할이 쓴다
-GRANT SELECT ON tenant, group_member, store, store_grant, memory_transition, approval_tier_rule TO app_rw;
+GRANT SELECT ON tenant, group_member, store, store_grant, memory_transition TO app_rw;
 GRANT SELECT ON entity, entity_alias TO app_rw;
 -- principal.external_id(IdP subject, SCIM id)는 숨긴다: 컬럼 단위 GRANT 에서 뺀다. SELECT * 는 42501 이다.
 -- 필요한 조회는 SECURITY DEFINER 함수(app_sec.resolve_principal)로 낸다.

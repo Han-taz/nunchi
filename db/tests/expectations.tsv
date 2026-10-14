@@ -187,31 +187,16 @@ N12f	(ok)	fail
 N12g	(ok)	fail
 N12h	(ok)	fail
 N12i	(ok)	fail
-G1a	= auto_labeled/provisional/internal/propose,auto_activate	fail
-G1b	= one_curator/proposed	fail
-G1d	= two_curators/proposed	fail
-G1f	= one_curator/proposed	fail
-G1g	= one_curator/proposed/true	fail
-G1h	= one_curator/proposed/external	fail
-G1i	= one_curator/proposed	fail
-G1j	= auto/active/propose,auto_activate	fail
-G1k	= two_curators/proposed	fail
-G1l	= auto:active:0	fail
+G1a	= provisional/internal/propose	fail
+G1g	= provisional/true	fail
+G1h	= provisional/external	fail
+G1j	= active/propose	fail
 G1m	= provisional>active:confirm:contributor,provisional>active:promote:system	fail
-G1n	= one_curator/proposed/external	fail
-G1o	= two_curators/proposed	fail
-G1p	= two_curators/proposed	fail
-G1q	= two_curators/proposed	fail
-G1r	= one_curator/proposed	fail
-G1s	= one_curator/proposed	fail
+G1n	= provisional/external	fail
 G3m	-> P0001	fail
-G3n	-> P0001	fail
 G3o	-> 42501	fail
-G4e	= auto_labeled/provisional	fail
-G4f	= one_curator/proposed	fail
-G4g	= one_curator/proposed	fail
 F6c	= provisional	fail
-N10n	= 0/1	fail
+N10n	= 0/2	fail
 B6a	= 0	fail
 N17a	(ok)	fail
 N17b	(ok)	fail
@@ -230,7 +215,7 @@ G7k	-> 42501	fail	only a curator of the store confirms
 G7l	-> 23514	fail	no membership snapshot, no binding
 G7m	-> P0001	fail	a confirmed binding keeps its confirmer
 G7n	-> P0001	fail	kind only goes up to connect
-G7o	= ok/auto_labeled/internal	fail	control: a contained public room is not raised
+G7o	= ok/provisional/internal	fail	control: a contained public room is not raised
 G7p	= unverified/9	fail	client containment is replaced and other gate keys are kept
 G6a	= true	fail	scim link resolves
 G6b	= NULL	fail	email-quality link resolves to nothing
@@ -240,15 +225,15 @@ G6e	-> 23505	fail	a Slack id links to one principal
 G6f	= NULL	fail	deactivated principal
 G6g	-> 42501	fail	app_rw has no SELECT on principal_identity
 G6h	= false	fail	store.confidential defaults to false
-G1c	= one_curator/proposed/external	fail	host outside the internal source_system set
-G1t	= auto_labeled/provisional/internal	fail	control: a registered internal host stays internal
-G1e	= auto_labeled/internal	fail	wildcard host pattern
-G1w	= one_curator/external	fail	userinfo cannot impersonate an internal host
-G1u	= one_curator/proposed/external	fail	client claims internal on a Slack Connect source
-G1v	= unverified/one_curator	fail	client claims containment ok on a private room with missing readers
+G1c	= provisional/external	fail	host outside the internal source_system set
+G1t	= provisional/internal	fail	control: a registered internal host stays internal
+G1e	= provisional/internal	fail	wildcard host pattern
+G1w	= provisional/external	fail	userinfo cannot impersonate an internal host
+G1u	= provisional/external	fail	client claims internal on a Slack Connect source
+G1v	= unverified/provisional	fail	client claims containment ok on a private room with missing readers
 G1x	-> 23503	fail	room without a live binding for the store
-G1y	= external/one_curator	fail	client may raise origin to external
-G1z	= external/one_curator	fail	public room with an outside member
+G1y	= external/provisional	fail	client may raise origin to external
+G1z	= external/provisional	fail	public room with an outside member
 N20	= [담당자]	fail	attribute trimmed and lowercased
 N21a	= 00000000-0000-0000-0000-0000000e0a01	fail	alias A Corp resolves
 N21b	= 00000000-0000-0000-0000-0000000e0a01	fail	alias 에이사 resolves to the same entity
@@ -269,7 +254,7 @@ N23	(ok)	fail	same key and value inserts no row
 N23a	= 1/active/v2/reconfirm	fail	reconfirm: one row, version op reconfirm
 N23b	= true	fail	last_confirmed_at bumped
 N24	(ok)	fail	different value is accepted as a proposal
-N24a	= true/one_curator/proposed	fail	conflict_with set, tier at least one_curator
+N24a	= true/proposed	fail	conflict_with set, tier at least one_curator
 N24b	= 이OO	fail	old value stays live until approval
 N25	= active/superseded/v3/active/v2	fail	decide replace path: old superseded first, new active
 N25b	= 2026-09-01/true/2026-09-01	fail	old valid_to = new valid_from, supersedes_id set

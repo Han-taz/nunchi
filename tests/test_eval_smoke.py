@@ -182,9 +182,9 @@ def test_sweep_scores_trigram_then_every_embed_text_floor_and_k(admin_url: str) 
     assert grid[-1] == ("title+body", 0.5, 60)
     # Equal scores break ties by random row id, so recall wobbles by a query or two between runs.
     # Nothing approves a proposal any more, so a restated value sits next to the old one as a
-    # distractor: ten runs gave recall@1 0.500 or 0.524 and recall@5 0.643 or 0.667.
-    assert rows[0]["recall@1"] == pytest.approx(0.51, abs=0.02)
-    assert rows[0]["recall@5"] == pytest.approx(0.655, abs=0.02)
+    # distractor: ten runs gave recall@1 0.476, 0.500 or 0.524 and recall@5 0.667.
+    assert rows[0]["recall@1"] == pytest.approx(0.5, abs=0.03)
+    assert rows[0]["recall@5"] == pytest.approx(0.667, abs=0.02)
     assert sweep_table(rows).splitlines()[1].split()[:3] == ["trigram", "-", "-"]
 
 
@@ -300,13 +300,13 @@ def test_window_corpus_without_an_approval_path_is_recorded_literally(
     report = run_window_eval(
         admin_url, OracleExtractor(window_messages(windows)), windows, judge=OracleJudge()
     )
-    assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 5
+    assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 3
     assert report["duplicate_per_key"]["rate"] == 0.143
     assert report["wrongly_active"] == {"active": 0, "wrong": 0, "rate": None}
     assert report["retraction_recall"] == {"retractions": 2, "retracted": 0, "recall": 0.0}
     argv = ["--db", admin_url, "--extractor", "noisy", "--windows", "--out-dir", str(tmp_path)]
     assert main(argv) == 0
-    assert "live style rows (wm01)    5" in capsys.readouterr().out
+    assert "live style rows (wm01)    3" in capsys.readouterr().out
     saved = json.loads(next(tmp_path.glob("windows-*.json")).read_text())
     assert saved["duplicate_per_key"]["rate"] == 0.143
 
