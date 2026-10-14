@@ -28,7 +28,9 @@ class RunResult(Frozen):
 
 def run_once(conn: Conn, stale_limit: int = STALE_LIMIT, now: datetime | None = None) -> RunResult:
     """Promote provisional and challenger rows whose time has come, expire rows whose valid_to
-    has passed, then list the stale ones (oldest first). `now` is the promotion clock."""
+    has passed, then list the stale ones (oldest first). `now` is the promotion clock.
+    The caller only reports the stale rows: v1.3 sends no "still correct?" cards, and a stale row
+    shows up as a `stale` flag in search results."""
     with conn.transaction():
         promoted, replaced = conn.execute(
             "SELECT promoted, replaced FROM app_sec.promote_due(coalesce(%s, now()))", (now,)

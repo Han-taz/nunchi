@@ -160,6 +160,11 @@ def test_get_wraps_body_as_data(url: str) -> None:
             "status": "active",
             "body": "배포 담당자는 김철수입니다",
         },
+        "version": 1,
+        "label": None,
+        "basis": None,
+        "promote_at": None,
+        "evidence": {"count": 0, "distinct_authors": 0, "last_said_at": None},
     }
 
 
