@@ -111,11 +111,13 @@ relation:  new | same_as | updates | retracts | not_worth   # retracts 가 새�
 
 키 없는 note는 1, 2, 9, 10행만 탄다. 같은 note 판정은 U27(PR #73)의 `reconfirm_duplicate_note`가 4행 자리를 맡는다.
 
+전이는 같은 트랜잭션 안에서 이전 행을 먼저 `superseded`로 옮긴 뒤 새 행을 `active`로 올린다(5, 7행). 살아 있는 행이 9, 10행으로 철회되거나 `valid_to`가 지나 만료되면, 그 키의 열린 challenger가 키의 임시 살아 있는 행이 된다(`challenger → provisional`, `promote`). `promote_at`과 증거는 그대로이고 `conflict_with`만 비운다. 키마다 살아 있는 행은 여전히 하나다.
+
 동시에 두 창이 같은 빈 키에 쓰면 두 번째 INSERT가 `memory_live_key_uidx`에서 `23505`를 받는다. `remember()`는 한 번 다시 판정하고, 이때는 3행이나 4행이 맞는다. 같은 창은 `inbound_event` 선점으로 한 번만 처리하고, 같은 게시물 증거는 6절의 유일 제약으로 한 번만 센다. 그래서 재시도해도 결과가 같다.
 
 ### 5.2 전이 표
 
-`memory_transition`의 행은 아래가 전부다. 표에 없는 `(from, to, op)`는 `P0001`이다. `contributor`는 그 store에 contributor 이상인 요청 컨텍스트(digest 봇, MCP를 쓰는 에이전트나 사람)이고, `system`은 컨텍스트 없는 워커다. 카드 경로가 남아 있는 동안(U33 전까지)은 `proposed`에서 나가는 옛 행 세 개와 `reviewed` 열이 표에 함께 남고, U33이 지운다.
+`memory_transition`의 행은 아래가 전부다. 표에 없는 `(from, to, op)`는 `P0001`이다. `contributor`는 그 store에 contributor 이상인 요청 컨텍스트(digest 봇, MCP를 쓰는 에이전트나 사람)이고, `system`은 컨텍스트 없는 워커다.
 
 | from | to | op | by_roles | 언제 |
 |---|---|---|---|---|
@@ -129,6 +131,7 @@ relation:  new | same_as | updates | retracts | not_worth   # retracts 가 새�
 | challenger | active | `confirm` | contributor | 5.1의 5행, MCP `decide confirm` |
 | challenger | active | `promote` | system | 승격 기간 경과 (7절) |
 | challenger | rejected | `retract` | contributor | 5.1의 4, 7, 8, 9행, MCP `decide retract` |
+| challenger | provisional | `promote` | contributor, system | 5.1의 고아 challenger (아래), 만료 때의 워커 |
 | active, provisional, challenger, superseded, expired, rejected | deleted | `delete` | curator | 관리자 삭제 |
 
 `curator`는 삭제 하나에만 남는다. 삭제는 본문을 지우는 관리 작업이지 무엇을 기억할지 정하는 일이 아니다.

@@ -352,3 +352,16 @@ N33l	-> P0001	fail	evidence name scrub only on deleted memory
 N33m	(ok)	pass	curator delete (success path; v1.0 allows any UPDATE, the failing N33 tests carry the mutation signal)
 N33n	= NULL/https://chat.example/p/1	fail	delete scrubs author_name only
 N33o	-> P0001	fail	evidence stays append-only after delete
+N70	= true	fail
+N70a	= true	fail
+N70b	= e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	fail
+N71	= true/true	fail
+N72	= 2/1	fail
+N71a	= false	fail
+N71b	= false	fail
+N71c	= false	fail
+N73	= superseded/true/supersede/replaced by a newer value	fail
+N74	= challenger,active	fail
+N74a	= provisional,expired/true	fail
+N75	= true	fail
+N75a	= provisional,expired	fail
