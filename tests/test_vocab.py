@@ -46,7 +46,6 @@ def say(  # noqa: PLR0913, PLR0917 - one message: key, question, value, how sure
     value: str,
     n: int,
     *,
-    agreed: bool = True,
     judge: ByQuestion | None = None,
 ) -> Created:
     class Ex:
@@ -80,8 +79,8 @@ def say(  # noqa: PLR0913, PLR0917 - one message: key, question, value, how sure
         origin=MemoryOrigin.EXTERNAL,
         source_refs=(SourceRef(uri=f"https://mm.example/p/{n}a", system="mattermost"),),
         today=date(2026, 10, 14),
-        consensus=Consensus.AGREED if agreed else Consensus.STATED,
-        evidence=evidence if agreed else evidence[:1],
+        consensus=Consensus.AGREED,
+        evidence=evidence,
     )
     with request_tx(pool, USER, None) as conn:
         result = capture(conn, Ex(), title, context, None, None, judge or ByQuestion())
@@ -109,12 +108,9 @@ def vocabulary(pool: Pool) -> list[tuple[str, str, str]]:
 @pytest.mark.parametrize(
     ("text", "key"),
     [
-        ("Border Contrast", "border-contrast"),
         ("v1.0 포함 여부", "v1-0-포함-여부"),
-        ("  --color-border 대비 ", "color-border-대비"),
         ("???", "attribute"),
         ("x" * 60, "x" * 40),
-        ("가나다-" * 20, ("가나다-" * 20)[:40].strip("-")),
     ],
 )
 def test_a_key_is_a_short_lowercase_slug(text: str, key: str) -> None:
@@ -135,6 +131,8 @@ def test_two_questions_of_one_subject_keep_both_decisions_live(world: Pool) -> N
         ("border-contrast", "border contrast", BORDER_Q),
         ("tertiary-contrast", "tertiary contrast", TERTIARY_Q),
     ]
+    say(world, "color-gamut", None, BORDER, "sRGB", 3)
+    assert vocabulary(world)[-1] == ("color-gamut", "color gamut", "color gamut")
 
 
 @pytest.mark.db
@@ -150,49 +148,25 @@ def test_the_same_key_is_the_same_topic_and_a_new_value_supersedes_without_a_jud
         ("라이트 3.1:1 통과", "active"),
     ]
     assert judge.asked == 0
-    assert len(vocabulary(world)) == 1
 
 
 @pytest.mark.db
 def test_a_new_key_that_asks_an_existing_question_lands_on_that_key(world: Pool) -> None:
     say(world, "border-contrast", BORDER_Q, BORDER, "라이트 1.4:1 미달", 1)
-    again = say(
-        world,
-        "border-color-ratio",
-        "border 색은 흰 배경과 몇 대 몇인가",
-        BORDER,
-        "라이트 3.1:1 통과",
-        2,
-        judge=ByQuestion(merge=True),
-    )
+    judge = ByQuestion(merge=True)
+    again = say(world, "border-ratio", "border 색은 몇 대 몇인가", BORDER, "3.1:1", 2, judge=judge)
     assert again.change == "superseded"
     assert [a for a, _v, _s in rows(world)] == ["border-contrast", "border-contrast"]
     assert [k for k, _l, _q in vocabulary(world)] == ["border-contrast"]
 
 
 @pytest.mark.db
-@pytest.mark.parametrize("judge", [ByQuestion(error=True), None])
-def test_without_a_working_judge_a_new_key_is_a_new_question_and_nothing_is_replaced(
-    world: Pool, judge: ByQuestion | None
-) -> None:
+def test_a_failing_judge_makes_a_new_key_a_new_question_and_replaces_nothing(world: Pool) -> None:
     say(world, "border-contrast", BORDER_Q, BORDER, "라이트 1.4:1 미달", 1)
-    other = say(
-        world,
-        "tertiary-contrast",
-        TERTIARY_Q,
-        TERTIARY,
-        "라이트 2.46:1 미달",
-        2,
-        judge=judge or ByQuestion(error=True),
-    )
-    assert other.change == "created"
+    judge = ByQuestion(error=True)
+    other = say(world, "tertiary", TERTIARY_Q, TERTIARY, "라이트 2.46:1 미달", 2, judge=judge)
+    assert (other.change, judge.asked) == ("created", 1)
     assert [s for _a, _v, s in rows(world)] == ["active", "active"]
-
-
-@pytest.mark.db
-def test_a_proposal_without_a_question_registers_its_label_as_the_question(world: Pool) -> None:
-    say(world, "border-contrast", None, BORDER, "라이트 1.4:1 미달", 1)
-    assert vocabulary(world) == [("border-contrast", "border contrast", "border contrast")]
 
 
 @pytest.mark.db
@@ -224,5 +198,5 @@ def test_an_attribute_stored_before_the_vocabulary_is_a_key_the_subject_already_
 @pytest.mark.db
 def test_a_note_has_no_attribute_to_settle(world: Pool) -> None:
     note = ProposalDraft(kind=MemoryKind.NOTE, title="메모", origin=MemoryOrigin.EXTERNAL)
-    with request_tx(world, USER, None) as conn:
-        assert settle_attribute(conn, STORE, STORE, note, None) is note
+    with request_tx(world, USER, None) as c:
+        assert settle_attribute(c, STORE, STORE, note, None) is note

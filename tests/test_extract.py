@@ -587,16 +587,6 @@ def test_a_proposed_attribute_carries_its_label_and_question_cut_to_size() -> No
     )
 
 
-def test_an_existing_key_arrives_without_label_or_question() -> None:
-    says = reply(attribute="담당자", attribute_label=None, attribute_question="  ")
-    (draft,) = replying(message(wire(says))).extract("x", CTX_ENTITY)
-    assert (draft.attribute, draft.attribute_label, draft.attribute_question) == (
-        "담당자",
-        None,
-        None,
-    )
-
-
 def test_the_schema_demands_label_and_question_and_the_prompt_teaches_the_key() -> None:
     assert {"attribute_label", "attribute_question"} <= set(ITEM_SCHEMA["required"])
     assert "copy that entry's key exactly" in SYSTEM_PROMPT

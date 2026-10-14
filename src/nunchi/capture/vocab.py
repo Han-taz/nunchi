@@ -17,13 +17,12 @@ from nunchi.extract import ProposalDraft, ValueJudge, VocabEntry
 KEY_CHARS = 40
 LABEL_CHARS = 80
 QUESTION_CHARS = 200
-COMPARED = 8
-"""Entries a new question is compared with: a subject rarely has more attributes than this."""
+COMPARED = 8  # a subject rarely has more attributes than a new question is compared with
 _OPEN = ("active", "provisional", "challenger")
 
 
 def slug(text: str) -> str:
-    """A short key, stable under app_sec.norm_text: lowercase words joined by hyphens."""
+    """A short lowercase key of hyphenated words, unchanged by app_sec.norm_text."""
     words = re.findall(r"\w+", unicodedata.normalize("NFKC", text).lower())
     return "-".join(words)[:KEY_CHARS].strip("-_") or "attribute"
 
