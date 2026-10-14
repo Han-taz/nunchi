@@ -4,11 +4,12 @@ from typing import Any
 
 import anthropic
 import httpx2
+import pytest
 from eval.oracle import OracleJudge
 from eval.resolve_sweep import judged, run_resolve_sweep
 
-from nunchi.extract import ClaudeJudge, build_judge
-from nunchi.extract.judge import QUESTION_PROMPT, SYSTEM_PROMPT, TOPIC_PROMPT
+from nunchi.extract import AttributeSpec, ClaudeJudge, build_judge
+from nunchi.extract.judge import DESCRIBE_PROMPT, QUESTION_PROMPT, SYSTEM_PROMPT, TOPIC_PROMPT
 from tests.embed_fake import FakeEmbedder
 
 
@@ -99,11 +100,6 @@ def test_sweep_judge_skips_the_call_when_numbers_differ() -> None:
             asked.append((first, second))
             return True
 
-        def same_topic(
-            self, first: str, second: str, first_title: str = "", second_title: str = ""
-        ) -> bool:
-            return True
-
         def same_question(self, first: str, second: str) -> bool:
             return True
 
@@ -138,6 +134,36 @@ def test_question_judge_uses_its_own_prompt_and_any_failure_means_another_questi
     assert replying({"same": False, "reason": "r"}).same_question("a", "b") is False
     assert replying({"same": True, "reason": "r"}, status=500).same_question("a", "b") is False
     assert replying({"same": True, "reason": "r"}, stop="refusal").same_question("a", "b") is False
+
+
+def test_describe_returns_a_spec_and_sends_the_memory_as_delimited_data() -> None:
+    seen: list[dict[str, Any]] = []
+    spec = {"key": "border-contrast", "label": "border 대비", "question": "border 색의 대비 비율"}
+
+    def respond(req: httpx2.Request) -> httpx2.Response:
+        seen.append(json.loads(req.content))
+        return httpx2.Response(200, json=message(json.dumps(spec)))
+
+    got = judge(respond).describe("border 대비 1.4:1 미달", "1.4:1", "--color-border 대비")
+    assert got == AttributeSpec(**spec)
+    assert seen[0]["system"] == DESCRIBE_PROMPT
+    assert seen[0]["messages"][0]["content"] == (
+        "<memory>\n1.4:1\n(title: border 대비 1.4:1 미달)\n"
+        "(attribute: --color-border 대비)\n</memory>"
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        replying({"key": "k"}),
+        replying(["not", "an", "object"]),  # type: ignore[arg-type]
+        replying({"key": "k", "label": "l", "question": "q"}, status=500),
+        replying({"key": "k", "label": "l", "question": "q"}, stop="max_tokens"),
+    ],
+)
+def test_describe_is_none_on_any_failure(answer: ClaudeJudge) -> None:
+    assert answer.describe("t", "v", "a") is None
 
 
 def test_topic_question_uses_its_own_prompt_and_any_failure_means_another_topic() -> None:

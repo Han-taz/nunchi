@@ -20,13 +20,14 @@ from nunchi.extract.draft import (
     RelationKind,
     VocabEntry,
 )
-from nunchi.extract.judge import ClaudeJudge, ValueJudge, build_judge
+from nunchi.extract.judge import AttributeSpec, ClaudeJudge, ValueJudge, build_judge
 from nunchi.extract.null import NullExtractor
 from nunchi.extract.request import UnknownSubjectError, to_propose_request
 
 __all__ = [
     "DECISION_MARKERS",
     "MAX_DRAFTS",
+    "AttributeSpec",
     "Candidate",
     "ClaudeExtractor",
     "ClaudeJudge",
