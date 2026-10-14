@@ -218,7 +218,7 @@ class ProposeOutcome(Frozen):
     conflict_with: UUID | None = None
 
 
-class Evidence(Frozen):
+class VersionEvidence(Frozen):
     """One message behind a transition: its permalink, who said it and when."""
 
     uri: str | None
@@ -233,7 +233,7 @@ class MemoryVersion(Frozen):
     actor_id: UUID
     reason: str | None
     at: datetime
-    evidence: tuple[Evidence, ...]
+    evidence: tuple[VersionEvidence, ...]
 
 
 class EvidenceSummary(Frozen):
