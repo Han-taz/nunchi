@@ -79,18 +79,6 @@ class Mattermost:
             {"user_id": user_id, "post": {"channel_id": channel_id, "message": message}},
         )
 
-    def direct_channel(self, user_a: str, user_b: str) -> str:
-        response = self._http.post("/channels/direct", json=[user_a, user_b])
-        response.raise_for_status()
-        return str(response.json()["id"])
-
-    def post(self, channel_id: str, message: str, props: dict[str, Any]) -> str:
-        """Returns the id of the new post."""
-        created = self._post(
-            "/posts", {"channel_id": channel_id, "message": message, "props": props}
-        )
-        return str(created["id"])
-
     def channel_posts(
         self, channel_id: str, since: int, per_page: int = 200
     ) -> Iterator[dict[str, Any]]:

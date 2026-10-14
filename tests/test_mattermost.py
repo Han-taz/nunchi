@@ -8,15 +8,12 @@ from typing import Any
 import httpx
 import psycopg
 import pytest
-from starlette.testclient import TestClient
 
 from nunchi.capture import Created, Reconfirmed, Rejected, Skipped
 from nunchi.db import Pool
 from nunchi.domain.models import MemoryKind, MemoryStatus
 from nunchi.extract import ExtractContext, ExtractionError, FailureReason, ProposalDraft
 from nunchi.mattermost import __main__ as mm_main
-from nunchi.mattermost import actions
-from nunchi.mattermost.cards import CardConfig, verdict_line
 from nunchi.mattermost.client import Mattermost, room_facts
 from nunchi.mattermost.events import Deps, _reply, handle_event
 from nunchi.mattermost.ws import listen
@@ -32,8 +29,6 @@ SHARED = "s" * 26
 DIRECT = "d" * 26
 REACTOR = "r" * 26
 CURATOR = "k" * 26
-CARD_POST = "z" * 26
-SECRET = b"s3cret"
 CONFIDENTIAL = "f" * 26
 STRANGER = "x" * 26
 TEXT = "배포는 금요일에 하지 않는다"
@@ -72,23 +67,16 @@ POSTS: dict[str, dict[str, Any]] = {
 class FakeServer:
     def __init__(self) -> None:
         self.ephemerals: list[dict[str, Any]] = []
-        self.dms: list[dict[str, Any]] = []
+        self.paths: list[str] = []
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:  # noqa: PLR0911
+    def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix("/api/v4")
+        self.paths.append(path)
         assert request.headers["Authorization"] == "Bearer tok"
         body: Any = json.loads(request.content) if request.content else None
         if path == "/posts/ephemeral":
             self.ephemerals.append(body)
             return httpx.Response(201, json={})
-        if path == "/channels/direct":
-            assert body == [BOT, CURATOR]
-            return httpx.Response(201, json={"id": "dm" * 13})
-        if path == "/posts" and request.method == "POST":
-            self.dms.append(body)
-            return httpx.Response(201, json={"id": CARD_POST})
-        if path == "/posts/" + CARD_POST:
-            return httpx.Response(200, json={"id": CARD_POST, "props": self.dms[-1]["props"]})
         if path == "/teams/" + TEAM:
             return httpx.Response(200, json={"name": "devshow"})
         for prefix, table in (("/posts/", POSTS), ("/channels/", CHANNELS)):
@@ -189,8 +177,7 @@ def world(mm_db: Pool) -> World:
     server = FakeServer()
     client = Mattermost("http://mm", "tok", "https://mm.example/", httpx.MockTransport(server))
     extractor = CountingExtractor()
-    config = CardConfig("http://bot/actions", SECRET)
-    return Deps(mm_db, extractor, TENANT, client, BOT, "nunchi", config), server, extractor
+    return Deps(mm_db, extractor, TENANT, client, BOT, "nunchi"), server, extractor
 
 
 def reaction(
@@ -381,10 +368,9 @@ def test_the_channel_id_rule_depends_on_the_platform(
             bind()
 
 
-def test_client_builds_permalinks_and_direct_channels(world: World) -> None:
+def test_client_builds_permalinks(world: World) -> None:
     deps, _server, _ = world
     assert deps.client.permalink(TEAM, "p" * 26) == f"https://mm.example/devshow/pl/{'p' * 26}"
-    assert deps.client.direct_channel(BOT, CURATOR) == "dm" * 13
 
 
 def test_each_capture_result_has_its_reply_text() -> None:
@@ -437,16 +423,6 @@ def test_main_connects_with_the_bot_token_and_reconnects(
     monkeypatch.setenv("MM_BOT_TOKEN", "tok")
     monkeypatch.setenv("MM_URL", "http://mm")
     monkeypatch.setenv("NUNCHI_TENANT_ID", str(TENANT))
-    monkeypatch.setenv("MM_ACTION_SECRET", "s3cret")
-
-    class FakeActionServer:
-        def __init__(self, config: object) -> None:
-            self.config = config
-
-        async def serve(self) -> None:
-            await asyncio.Event().wait()
-
-    monkeypatch.setattr(mm_main, "Server", FakeActionServer)
     monkeypatch.setenv("NUNCHI_DATABASE_URL", "postgresql://unused")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("NUNCHI_EMBEDDING_BASE_URL", raising=False)
@@ -466,151 +442,12 @@ def test_main_connects_with_the_bot_token_and_reconnects(
     assert len(memories(fresh_db)) == 1
 
 
-def the_card(server: FakeServer) -> dict[str, Any]:
-    [dm] = server.dms
-    [attachment] = dm["props"]["attachments"]
-    return attachment  # type: ignore[no-any-return]
-
-
-def click(
-    attachment: dict[str, Any], verdict: str, clicker: str = CURATOR, **override: object
-) -> dict[str, Any]:
-    action = next(a for a in attachment["actions"] if a["id"] == verdict)
-    context = action["integration"]["context"] | override
-    return {"user_id": clicker, "post_id": CARD_POST, "channel_id": "dm" * 13, "context": context}
-
-
-def status_of(fresh_db: str) -> str:
-    with psycopg.connect(fresh_db) as conn:
-        row = conn.execute("SELECT status FROM memory WHERE title = %s", (TEXT,)).fetchone()
-    assert row is not None
-    return str(row[0])
-
-
 @pytest.mark.db
-@pytest.mark.parametrize(("post_id", "secret"), [("p" * 26, False), ("e" * 26, True)])
-def test_the_curator_gets_a_titled_card_but_a_confidential_store_gets_the_id_only(
-    world: World, fresh_db: str, post_id: str, secret: bool
+@pytest.mark.parametrize("post_id", ["p" * 26, "e" * 26])
+def test_a_capture_replies_in_the_channel_and_sends_no_dm(
+    world: World, fresh_db: str, post_id: str
 ) -> None:
     deps, server, _ = world
     handle_event(deps, reaction(post_id))
-    attachment = the_card(server)
-    context = attachment["actions"][0]["integration"]["context"]
-    assert [(a["id"], a["name"]) for a in attachment["actions"]] == [
-        ("approve", "승인"),
-        ("reject", "거절"),
-    ]
-    assert (sorted(context), context["v"]) == (["a", "m", "n", "sig", "v"], 1)
-    assert attachment["actions"][0]["integration"]["url"] == "http://bot/actions"
-    if secret:
-        assert attachment["text"] == f"기밀 store 제안 #{context['m']}"
-        assert TEXT not in json.dumps(server.dms) and "pl/" not in json.dumps(server.dms)
-    else:
-        assert attachment["text"] == f"**{TEXT}**\n[원문](https://mm.example/devshow/pl/{post_id})"
-
-
-@pytest.mark.db
-@pytest.mark.parametrize(
-    ("verdict", "line", "status"),
-    [("approve", "승인됨", "active"), ("reject", "거절됨", "rejected")],
-)
-def test_the_curator_decides_as_themselves_and_the_card_is_replaced_with_the_result(
-    world: World, fresh_db: str, verdict: str, line: str, status: str
-) -> None:
-    deps, server, _ = world
-    handle_event(deps, reaction())
-    card = the_card(server)
-    http = TestClient(actions.create(deps))
-    first = http.post("/actions", json=click(card, verdict))
-    second = http.post("/actions", json=click(card, "approve"))
-    assert first.status_code == 200
-    assert first.json() == {
-        "update": {"props": {"attachments": [{"text": card["text"], "footer": line}]}}
-    }
-    assert second.json()["update"]["props"]["attachments"][0]["footer"] == "이미 처리됨"
-    assert status_of(fresh_db) == status
-
-
-@pytest.mark.db
-@pytest.mark.parametrize(
-    "override",
-    [{"sig": "0" * 64}, {"v": 2}, {"a": "reject"}, {"m": str(uuid.UUID(int=9))}, {"sig": None}],
-)
-def test_a_click_with_a_bad_signature_is_403_and_decides_nothing(
-    world: World, fresh_db: str, override: dict[str, Any]
-) -> None:
-    deps, server, _ = world
-    handle_event(deps, reaction())
-    response = TestClient(actions.create(deps)).post(
-        "/actions", json=click(the_card(server), "approve", **override)
-    )
-    assert (response.status_code, response.json()) == (403, {"error": "bad signature"})
-    assert status_of(fresh_db) == "proposed"
-    with psycopg.connect(fresh_db) as conn:
-        assert conn.execute("SELECT count(*) FROM review").fetchone() == (0,)
-
-
-@pytest.mark.db
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"user_id": CURATOR},
-        {"context": {"a": "approve"}},
-        {"context": {"n": "n", "m": "m", "v": "x", "a": "approve", "sig": "s"}},
-    ],
-)
-def test_a_request_with_a_missing_or_malformed_context_is_403(
-    world: World, body: dict[str, Any]
-) -> None:
-    deps, _, _ = world
-    assert TestClient(actions.create(deps)).post("/actions", json=body).status_code == 403
-
-
-@pytest.mark.db
-def test_a_capture_that_saves_nothing_sends_no_card(world: World) -> None:
-    deps, server, extractor = world
-    extractor.skip = True
-    handle_event(deps, reaction())
-    assert (server.dms, len(server.ephemerals)) == ([], 1)
-
-
-@pytest.mark.db
-@pytest.mark.parametrize(
-    ("clicker", "revoke", "line"),
-    [
-        (REACTOR, False, "거부: 이 카드를 받은 사람이 아닙니다"),
-        (CURATOR, True, "거부: 큐레이터가 아닙니다"),
-        (STRANGER, False, "Mattermost 계정이 연결되어 있지 않습니다"),
-    ],
-)
-def test_a_clicker_who_cannot_decide_is_refused_and_the_card_shows_it(
-    world: World, fresh_db: str, clicker: str, revoke: bool, line: str
-) -> None:
-    deps, server, _ = world
-    handle_event(deps, reaction())
-    card = the_card(server)
-    if revoke:
-        with psycopg.connect(fresh_db) as conn:
-            conn.execute("DELETE FROM store_grant WHERE principal_id = %s", (CUR,))
-    response = TestClient(actions.create(deps)).post(
-        "/actions", json=click(card, "approve", clicker)
-    )
-    [updated] = response.json()["update"]["props"]["attachments"]
-    assert (updated["footer"], [a["id"] for a in updated["actions"]]) == (
-        line,
-        ["approve", "reject"],
-    )
-    assert status_of(fresh_db) == "proposed"
-
-
-@pytest.mark.parametrize(
-    ("result", "expected"),
-    [
-        ("pending_quorum:1/2", ("승인 대기 1/2", True)),
-        ("duplicate:active", ("이미 처리됨", True)),
-        ("stale", ("처리 안 함: 카드를 보낸 뒤 내용이 바뀌었습니다", True)),
-        ("mismatch", ("처리 안 됨: mismatch", False)),
-    ],
-)
-def test_verdict_line_maps_decide_results(result: str, expected: tuple[str, bool]) -> None:
-    assert verdict_line(result) == expected
+    assert (len(server.ephemerals), len(memories(fresh_db))) == (1, 1)
+    assert {"/channels/direct", "/posts"}.isdisjoint(server.paths)
