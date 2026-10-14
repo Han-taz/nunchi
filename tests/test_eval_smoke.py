@@ -7,12 +7,16 @@ from uuid import UUID
 import pytest
 from eval import score
 from eval.corpus import Message, Query, load_messages, load_queries, window_groups
+from eval.db import fresh_database
 from eval.embedding import CachingEmbedder
-from eval.oracle import GOLD_VALUES, ConceptEmbedder, OracleExtractor
-from eval.run import main, run_eval, table
+from eval.oracle import GOLD_VALUES, WINDOW_VALUES, ConceptEmbedder, OracleExtractor, OracleJudge
+from eval.run import main, replay_group, run_eval, run_window_eval, table
 from eval.score import Outcome
 from eval.sweep import run_sweep, sweep_table
+from eval.windows import load_windows, replay_windows, window_messages, window_metrics
 
+from nunchi.config import Settings
+from nunchi.db import open_pool
 from nunchi.domain.models import MemoryOrigin
 from nunchi.embed import PromptName
 from nunchi.extract import ExtractContext
@@ -241,3 +245,88 @@ def test_item_recall_splits_multi_item_windows_from_single_messages() -> None:
 
     outcomes = [item("g", "created"), item("g", "skipped"), item(None, "created")]
     assert score.item_recall(outcomes) == {"multi": 0.5, "single": 1.0}
+
+
+def test_window_corpus_has_the_live_style_case_and_every_retraction_target() -> None:
+    windows = load_windows()
+    live = [w for w in windows if w.id.startswith("w-live-style-")]
+    assert [w.id for w in live] == [f"w-live-style-{n}" for n in (1, 2, 3, 4)]
+    assert {g.memory for w in live for g in w.gold} == {"wm01"}
+    assert [len(w.gold) for w in live] == [1, 1, 1, 2]
+    ids = {g.memory for w in windows for g in w.gold if g.memory}
+    assert set(WINDOW_VALUES) == ids
+    assert all(g.target in ids for w in windows for g in w.gold if g.relation == "retract")
+    assert {g.status_after for w in windows for g in w.gold} == {
+        None, "active", "provisional", "rejected",
+    }  # fmt: skip
+
+
+def _gold_window_outcomes() -> tuple[list[Outcome], dict[UUID, str]]:
+    messages = {m.id: m for m in window_messages(load_windows())}
+
+    def made(msg_id: str, n: int) -> Outcome:
+        return Outcome(
+            message=messages[msg_id], result="created", memory_id=UUID(int=n), db_kind="decision"
+        )
+
+    outcomes = [
+        made("w-live-style-1.0", 1),
+        made("w-live-style-2.0", 2),
+        made("w-agree-1.0", 3),
+        made("w-noagree-1.0", 4),
+        Outcome(message=messages["w-retract-1.0"], result="skipped"),
+    ]
+    statuses = {UUID(int=1): "active", UUID(int=2): "active", UUID(int=3): "rejected"}
+    statuses[UUID(int=4)] = "active"
+    return outcomes, statuses
+
+
+def test_window_metrics_count_by_hand() -> None:
+    outcomes, statuses = _gold_window_outcomes()
+    report = window_metrics(load_windows(), outcomes, statuses)
+    assert report["wrongly_active"] == {"active": 3, "wrong": 1, "rate": 0.333}
+    assert report["duplicate_per_key"]["rows_per_memory"] == {  # type: ignore[index]
+        "wm01": 2, "wm02": 0, "wm04": 1,
+    }  # fmt: skip
+    assert report["duplicate_per_key"]["rate"] == 0.333  # type: ignore[index]
+    assert report["retraction_recall"] == {"retractions": 2, "retracted": 1, "recall": 0.5}
+
+
+@pytest.mark.db
+def test_v11_baseline_on_the_window_corpus_is_recorded_literally(
+    admin_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    windows = load_windows()
+    report = run_window_eval(
+        admin_url, OracleExtractor(window_messages(windows)), windows, judge=OracleJudge()
+    )
+    assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 3
+    assert report["duplicate_per_key"]["rate"] == 0.143
+    assert report["wrongly_active"] == {"active": 5, "wrong": 2, "rate": 0.4}
+    assert report["retraction_recall"] == {"retractions": 2, "retracted": 0, "recall": 0.0}
+    argv = ["--db", admin_url, "--extractor", "noisy", "--windows", "--out-dir", str(tmp_path)]
+    assert main(argv) == 0
+    assert "live style rows (wm01)    3" in capsys.readouterr().out
+    saved = json.loads(next(tmp_path.glob("windows-*.json")).read_text())
+    assert saved["duplicate_per_key"]["rate"] == 0.143
+
+
+@pytest.mark.db
+def test_the_clock_ticks_on_each_new_day_and_once_after_the_last(admin_url: str) -> None:
+    windows = load_windows()
+    days: list[date] = []
+    with fresh_database(admin_url) as app_url:
+        pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
+        try:
+            replay_windows(
+                pool,
+                windows,
+                lambda p, group: replay_group(p, OracleExtractor(window_messages(windows)), group),
+                lambda _pool, day: days.append(day),
+            )
+        finally:
+            pool.close()
+    assert [d.isoformat() for d in days] == [
+        "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-08",
+        "2026-08-09", "2026-08-10", "2026-08-11", "2026-08-12",
+    ]  # fmt: skip

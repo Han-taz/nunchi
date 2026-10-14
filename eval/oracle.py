@@ -49,6 +49,15 @@ GOLD_VALUES = {
     "m49": "2026-12-15", "m50": "한지민", "m51": "#launch",
 }  # fmt: skip
 
+# Memories of eval/corpus/windows.jsonl.
+WINDOW_VALUES = {
+    "wm01": "CSS Modules + CSS 커스텀 프로퍼티", "wm02": "12/18", "wm03": "#ops-alerts",
+    "wm04": "목요일", "wm05": "warn", "wm06": "화요일", "wm07": "30일",
+}  # fmt: skip
+ALL_VALUES = {**GOLD_VALUES, **WINDOW_VALUES}
+# The live restatement: one model call wrote "CSS 변수" for "CSS 커스텀 프로퍼티".
+WINDOW_VARIANTS = {"wm01": ("CSS Modules + CSS 변수",)}
+
 # Noisy only. Person values come back with an honorific or a title on later mentions.
 HONORIFIC_SUFFIXES = ("님", " 매니저님")
 PERSON_MEMORIES = ("m01", "m02", "m05", "m06", "m24")
@@ -74,8 +83,8 @@ class OracleJudge:
     def __init__(self) -> None:
         self._group = {
             spelling: m
-            for m, variants in VALUE_VARIANTS.items()
-            for spelling in (GOLD_VALUES[m], *variants)
+            for m, variants in {**VALUE_VARIANTS, **WINDOW_VARIANTS}.items()
+            for spelling in (ALL_VALUES[m], *variants)
         }
 
     def same(self, first: str, second: str) -> bool:
@@ -138,12 +147,12 @@ class OracleExtractor:
         """The gold value; noisy, a memory's later mentions drift by honorific or wording."""
         n = self._said[memory]
         self._said[memory] += 1
-        gold = GOLD_VALUES[memory]
+        gold = ALL_VALUES[memory]
         if not self._noisy or n == 0:
             return gold
         if memory in PERSON_MEMORIES:
             return gold + HONORIFIC_SUFFIXES[(n - 1) % len(HONORIFIC_SUFFIXES)]
-        variants = VALUE_VARIANTS.get(memory)
+        variants = {**VALUE_VARIANTS, **WINDOW_VARIANTS}.get(memory)
         return variants[(n - 1) % len(variants)] if variants else gold
 
     def _spell(
