@@ -273,32 +273,40 @@ CREATE TABLE review (
   version integer NOT NULL
 );
 
--- 상태 기계: 허용되는 (from, to) 전이는 이 표가 전부다. memory_bu 는 이 표를 한 번 조회할 뿐 분기하지 않는다.
--- op = 그 전이가 버전 기록에 남기는 op, by_role = curator(요청 컨텍스트의 사용자) 또는 system(컨텍스트 없는 워커/소유자),
--- reviewed = 전이마다 review 행(verdict = op)이 정족수만큼 있어야 하는가 (정족수와 직무 분리는 memory_bu 가 본다)
-CREATE TYPE transition_role AS ENUM ('curator', 'system');
+-- 상태 기계 (v1.3 §5.2): 허용되는 (from, to, op) 전이는 이 표가 전부다. memory_bu 는 이 표를 한 번 조회할 뿐 분기하지 않는다.
+-- op = 전이를 일으키는 함수가 트랜잭션 로컬 설정 app.op 로 넘기는 값이고 버전 기록에도 그대로 남는다. app.op 없는 상태 UPDATE 는 42501.
+-- by_roles = 이 전이를 할 수 있는 역할. 요청 컨텍스트가 있으면 contributor 와 curator, 없으면 system 으로 본다. curator 는 삭제에만 쓴다.
+-- reviewed = 전이마다 review 행(verdict = op)이 정족수만큼 있어야 하는가. 카드 경로(U33 이 지운다)가 남아 있는 동안의 호환 열이다.
+-- proposed 에서 나가는 세 행도 같은 이유로 남긴다 (U33 이 remember() 로 쓰기 경로를 바꿀 때, U38 이 proposed 행을 없앨 때 지운다).
+CREATE TYPE transition_role AS ENUM ('contributor', 'system', 'curator');
 CREATE TABLE memory_transition (
   from_status memory_status NOT NULL,
   to_status memory_status NOT NULL,
   op memory_op NOT NULL,
-  by_role transition_role NOT NULL,
+  by_roles transition_role[] NOT NULL CHECK (cardinality(by_roles) > 0),
   reviewed boolean NOT NULL DEFAULT false,
-  PRIMARY KEY (from_status, to_status)
+  PRIMARY KEY (from_status, to_status, op)
 );
-INSERT INTO memory_transition (from_status, to_status, op, by_role, reviewed) VALUES
-('proposed', 'provisional', 'auto_activate', 'system', false),
-('proposed', 'active', 'approve', 'curator', true),
-('proposed', 'rejected', 'reject', 'curator', true),
-('provisional', 'active', 'confirm', 'curator', true),
-('provisional', 'rejected', 'retract', 'curator', true),
-('provisional', 'superseded', 'supersede', 'curator', false),
-('provisional', 'deleted', 'delete', 'curator', false),
-('active', 'superseded', 'supersede', 'curator', false),
-('active', 'expired', 'expire', 'system', false),
-('active', 'deleted', 'delete', 'curator', false),
-('superseded', 'deleted', 'delete', 'curator', false),
-('expired', 'deleted', 'delete', 'curator', false),
-('rejected', 'deleted', 'delete', 'curator', false);
+INSERT INTO memory_transition (from_status, to_status, op, by_roles, reviewed) VALUES
+('provisional', 'active', 'confirm', '{contributor}', true),
+('provisional', 'active', 'promote', '{system}', false),
+('provisional', 'rejected', 'retract', '{contributor}', true),
+('provisional', 'superseded', 'supersede', '{contributor,system}', false),
+('active', 'superseded', 'supersede', '{contributor,system}', false),
+('active', 'expired', 'retract', '{contributor}', false),
+('active', 'expired', 'expire', '{system}', false),
+('challenger', 'active', 'confirm', '{contributor}', false),
+('challenger', 'active', 'promote', '{system}', false),
+('challenger', 'rejected', 'retract', '{contributor}', false),
+('active', 'deleted', 'delete', '{curator}', false),
+('provisional', 'deleted', 'delete', '{curator}', false),
+('challenger', 'deleted', 'delete', '{curator}', false),
+('superseded', 'deleted', 'delete', '{curator}', false),
+('expired', 'deleted', 'delete', '{curator}', false),
+('rejected', 'deleted', 'delete', '{curator}', false),
+('proposed', 'provisional', 'auto_activate', '{system}', false),
+('proposed', 'active', 'approve', '{curator}', true),
+('proposed', 'rejected', 'reject', '{curator}', true);
 
 -- ── 신선도 (v1.2 §4) ──
 -- kind 별 기본 유효 기간(일). 행이 없는 kind(decision, note)는 오래돼도 stale 이 아니다. store_freshness 가 스토어별로 덮어쓴다.
@@ -365,6 +373,14 @@ INSERT INTO trust_rule (op, points, approved, rejected, retracted, demote_days) 
 CREATE FUNCTION forbid_mutation() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END IF;
+  IF TG_TABLE_NAME = 'memory_evidence' THEN
+    IF NOT (OLD.author_name IS NOT NULL AND NEW.author_name IS NULL
+            AND to_jsonb(OLD) - 'author_name' = to_jsonb(NEW) - 'author_name'
+            AND EXISTS (SELECT 1 FROM memory AS m WHERE m.id = OLD.memory_id AND m.status = 'deleted')) THEN
+      RAISE EXCEPTION 'memory_evidence is append-only (only the delete scrub of author_name is allowed)';
+    END IF;
+    RETURN NEW;
+  END IF;
   IF TG_TABLE_NAME <> 'memory_version' THEN
     RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
   END IF;
@@ -1130,7 +1146,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
         AND m.store_id IN (SELECT app_sec.my_stores('curator'))
         AND v.memory_id = m.id
         AND v.version = m.version
-        AND v.verdict = (SELECT t.op::text FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = p_to)
+        AND v.verdict = (SELECT t.op::text FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = p_to AND t.reviewed)
         AND v.reviewer_id NOT IN (m.created_by, coalesce(m.on_behalf_of, m.created_by))
         AND EXISTS (
           SELECT 1 FROM store_grant AS g
@@ -1152,6 +1168,7 @@ SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   tr memory_transition;
   q record;
+  v_op memory_op;
 BEGIN
   IF (NEW.id, NEW.tenant_id, NEW.store_id, NEW.kind, NEW.created_by, NEW.on_behalf_of, NEW.created_at, NEW.session_ref, NEW.tier)
      IS DISTINCT FROM
@@ -1176,12 +1193,21 @@ BEGIN
     RAISE EXCEPTION 'origin cannot be laundered to internal';
   END IF;
   IF NEW.status <> OLD.status THEN
-    SELECT * INTO tr FROM memory_transition AS t WHERE t.from_status = OLD.status AND t.to_status = NEW.status;
-    IF NOT found THEN
-      RAISE EXCEPTION 'illegal transition % -> %', OLD.status, NEW.status;
+    v_op := nullif(current_setting('app.op', true), '')::memory_op;
+    IF v_op IS NULL THEN
+      RAISE EXCEPTION 'status change % -> % needs app.op', OLD.status, NEW.status USING ERRCODE = '42501';
     END IF;
-    IF (tr.by_role = 'curator') <> (app_sec.ctx_user() IS NOT NULL) THEN
-      RAISE EXCEPTION 'transition % -> % is for the % role', OLD.status, NEW.status, tr.by_role USING ERRCODE = '42501';
+    SELECT * INTO tr FROM memory_transition AS t WHERE t.from_status = OLD.status AND t.to_status = NEW.status AND t.op = v_op;
+    IF NOT found THEN
+      RAISE EXCEPTION 'illegal transition % -> % (%)', OLD.status, NEW.status, v_op;
+    END IF;
+    IF NOT (tr.by_roles && (
+      CASE WHEN app_sec.ctx_user() IS NOT NULL THEN ARRAY['contributor', 'curator'] ELSE ARRAY['system'] END
+    )::transition_role[]) THEN
+      RAISE EXCEPTION 'transition % -> % (%) is for the % role', OLD.status, NEW.status, v_op, tr.by_roles USING ERRCODE = '42501';
+    END IF;
+    IF NEW.status NOT IN ('provisional', 'challenger') THEN
+      NEW.promote_at := NULL;
     END IF;
     IF tr.reviewed THEN
       IF app_sec.ctx_user() IN (OLD.created_by, coalesce(OLD.on_behalf_of, OLD.created_by)) THEN
@@ -1330,7 +1356,7 @@ BEGIN
     WHEN NEW.status = OLD.status AND NEW.last_confirmed_at IS DISTINCT FROM OLD.last_confirmed_at
       AND (NEW.title, NEW.body, NEW.source_refs) IS NOT DISTINCT FROM (OLD.title, OLD.body, OLD.source_refs) THEN 'reconfirm'
     WHEN NEW.status = OLD.status THEN 'edit'
-    ELSE (SELECT t.op FROM memory_transition AS t WHERE t.from_status = OLD.status AND t.to_status = NEW.status)
+    ELSE nullif(current_setting('app.op', true), '')::memory_op
   END;
   PERFORM app_sec.write_version(NEW, v_op, actor, why);
   -- 제안자 신뢰는 전이의 op 마다 trust_rule 한 행으로 갱신한다 (규칙이 없는 op 는 아무 행도 만들지 않는다)
@@ -1358,6 +1384,7 @@ BEGIN
       ON CONFLICT DO NOTHING;
     END IF;
     UPDATE memory_version SET snapshot = NULL WHERE memory_id = NEW.id AND snapshot IS NOT NULL;
+    UPDATE memory_evidence SET author_name = NULL WHERE memory_id = NEW.id AND author_name IS NOT NULL;
   END IF;
   RETURN NULL;
 END $$;
@@ -1396,6 +1423,7 @@ DECLARE
   q record;
   refusal text;
   target memory_status;
+  v_op memory_op;
   v_outcome text;
   v_old uuid;
 BEGIN
@@ -1424,7 +1452,11 @@ BEGIN
   END IF;
 
   target := CASE p_verdict WHEN 'approve' THEN 'active' WHEN 'confirm' THEN 'active' WHEN 'reject' THEN 'rejected' WHEN 'retract' THEN 'rejected' END;
-  SELECT * INTO tr FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = target;
+  v_op := CASE
+    WHEN target = 'active' THEN CASE WHEN m.status = 'proposed' THEN 'approve' ELSE 'confirm' END
+    WHEN target = 'rejected' THEN CASE WHEN m.status = 'proposed' THEN 'reject' ELSE 'retract' END
+  END;
+  SELECT * INTO tr FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = target AND t.op = v_op;
   IF target IS NOT NULL AND NOT found THEN
     RAISE EXCEPTION 'illegal transition % -> %', m.status, target;
   END IF;
@@ -1440,11 +1472,13 @@ BEGIN
     ELSE
       -- 교체: 같은 키(또는 supersedes_id)의 살아 있는 행을 먼저 superseded 로 바꾼 뒤 새 행을 활성화한다 (한 트랜잭션, 지연 제약 없음)
       IF target = 'active' THEN
+        PERFORM set_config('app.op', 'supersede', true);
         UPDATE memory SET status = 'superseded', valid_to = coalesce(m.valid_from, current_date)
         WHERE id <> m.id AND status IN ('active', 'provisional')
           AND (id = m.supersedes_id OR (store_id = m.store_id AND subject_id = m.subject_id AND attribute = m.attribute))
         RETURNING id INTO v_old;
       END IF;
+      PERFORM set_config('app.op', v_op::text, true);
       UPDATE memory SET
         status = target,
         supersedes_id = coalesce(v_old, supersedes_id),
@@ -1531,6 +1565,7 @@ CREATE FUNCTION app_sec.mark_expired() RETURNS integer
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE n integer;
 BEGIN
+  PERFORM set_config('app.op', 'expire', true);
   UPDATE memory SET status = 'expired' WHERE status = 'active' AND valid_to < current_date;
   GET DIAGNOSTICS n = ROW_COUNT;
   RETURN n;

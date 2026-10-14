@@ -469,6 +469,7 @@ UPDATE memory SET origin = 'external' WHERE id = '00000000-0000-0000-0000-000000
 SELECT t.err('F9b launder origin external -> internal (N5a)', $q$UPDATE memory SET origin = 'internal' WHERE id = '00000000-0000-0000-0000-0000000cc001'$q$, 'P0001');
 SELECT t.err('F9c rewrite created_by (N5a)', $q$UPDATE memory SET created_by = '00000000-0000-0000-0000-0000000000a1' WHERE id = '00000000-0000-0000-0000-0000000cc001'$q$, 'P0001');
 SET LOCAL app.reason = 'PII erasure request #42';
+SET LOCAL app.op = 'delete';
 UPDATE memory SET status = 'deleted' WHERE id = '00000000-0000-0000-0000-0000000cc001';
 SELECT t.eq('F9d deleted: body null / snapshots all null / deleted_hash rows', $q$SELECT (body IS NULL) || '/' || (SELECT bool_and(snapshot IS NULL) FROM memory_version WHERE memory_id = '00000000-0000-0000-0000-0000000cc001') || '/' || (SELECT count(*) FROM deleted_hash WHERE store_id = '00000000-0000-0000-0000-00000000f001') FROM memory WHERE id = '00000000-0000-0000-0000-0000000cc001'$q$, 'true/true/1');
 SELECT t.err('F9e resurrect deleted -> active with a new body (N5b)', $q$UPDATE memory SET status = 'active', body = '되살림' WHERE id = '00000000-0000-0000-0000-0000000cc001'$q$, 'P0001');
@@ -875,8 +876,8 @@ COMMIT;
 -- G1l, G1m) 등급과 전이는 코드가 아니라 표다
 SELECT t.eq('G1l approval_tier_rule', $q$SELECT string_agg(tier || ':' || initial_status || ':' || approvals_needed, ',' ORDER BY tier) FROM approval_tier_rule$q$,
   'auto:active:0,auto_labeled:provisional:1,one_curator:proposed:1,two_curators:proposed:2');
-SELECT t.eq('G1m memory_transition', $q$SELECT string_agg(from_status || '>' || to_status || ':' || op || ':' || by_role, ',' ORDER BY from_status, to_status) FROM memory_transition$q$,
-  'proposed>provisional:auto_activate:system,proposed>active:approve:curator,proposed>rejected:reject:curator,provisional>active:confirm:curator,provisional>superseded:supersede:curator,provisional>rejected:retract:curator,provisional>deleted:delete:curator,active>superseded:supersede:curator,active>expired:expire:system,active>deleted:delete:curator,superseded>deleted:delete:curator,rejected>deleted:delete:curator,expired>deleted:delete:curator');
+SELECT t.eq('G1m memory_transition', $q$SELECT string_agg(from_status || '>' || to_status || ':' || op || ':' || array_to_string(by_roles, '|') || CASE WHEN reviewed THEN ':reviewed' ELSE '' END, ',' ORDER BY from_status, to_status, op) FROM memory_transition$q$,
+  'proposed>provisional:auto_activate:system,proposed>active:approve:curator:reviewed,proposed>rejected:reject:curator:reviewed,provisional>active:confirm:contributor:reviewed,provisional>active:promote:system,provisional>superseded:supersede:contributor|system,provisional>rejected:retract:contributor:reviewed,provisional>deleted:delete:curator,challenger>active:confirm:contributor,challenger>active:promote:system,challenger>rejected:retract:contributor,challenger>deleted:delete:curator,active>superseded:supersede:contributor|system,active>expired:retract:contributor,active>expired:expire:system,active>deleted:delete:curator,superseded>deleted:delete:curator,rejected>deleted:delete:curator,expired>deleted:delete:curator');
 
 -- G4e-g) 신뢰: 20점이면 에이전트도 auto_labeled, 19점은 아니다, 강등 중이면 사람도 one_curator (점수 시드는 소유자 권한, 마지막에 ROLLBACK)
 BEGIN;
@@ -906,11 +907,14 @@ ROLLBACK;
 
 -- G3m-p) 전이는 표에 있는 길만, 표의 역할대로만: tier 는 불변, curator 전이는 요청 컨텍스트가 있어야 하고 system 전이는 없어야 한다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SET LOCAL app.op = 'supersede';
 SELECT t.err('G3m active -> proposed', $q$UPDATE memory SET status = 'proposed' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, 'P0001');
 SELECT t.err('G3n tier change', $q$UPDATE memory SET tier = 'auto' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, 'P0001');
+SET LOCAL app.op = 'expire';
 SELECT t.err('G3o curator in a request runs the system transition active -> expired', $q$UPDATE memory SET status = 'expired' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, '42501');
 ROLLBACK;
 BEGIN; RESET ROLE;
+SET LOCAL app.op = 'reject';
 SELECT t.err('G3p owner without a request context runs the curator transition proposed -> rejected', $q$UPDATE memory SET status = 'rejected' WHERE id = t.mid(2)$q$, '42501');
 ROLLBACK;
 SET ROLE app_rw;
@@ -1025,6 +1029,7 @@ SELECT t.eq('G3r comment: result/status/reviews', $q$SELECT d || '/' || t.state(
 SELECT t.eq('G3s expired card', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd009', t.mid(109), 1, 'approve')$q$, 'expired');
 SELECT t.eq('G3t card for another memory', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd010', t.mid(107), 1, 'approve')$q$, 'mismatch');
 SELECT t.eq('G3u reject: result/status', $q$SELECT d || '/' || t.state(t.mid(110)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd011', t.mid(110), 1, 'reject', 'no') AS d) AS s$q$, 'rejected/rejected/v2');
+SET LOCAL app.op = 'approve';
 SELECT t.errm('G3q carol updates her own proposal directly with a review of her own', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(104)$q$, '%separation of duties%');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', NULL);
@@ -1034,10 +1039,12 @@ BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f5', NULL);
 SELECT t.eq('G3v frank clicks carol''s consumed card', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd001', t.mid(101), 1, 'approve')$q$, 'wrong_clicker');
 SELECT t.eq('G3w frank approves a two_curators memory twice: still one distinct reviewer', $q$SELECT a || '/' || b || '/' || t.state(t.mid(115)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd030', t.mid(115), 1, 'approve') AS a) AS x, LATERAL (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd031', t.mid(115), 1, 'approve') AS b) AS y$q$, 'pending_quorum:1/2/pending_quorum:1/2/proposed/v1');
 SELECT t.eq('G3x the proposer''s own review does not count toward the quorum', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd034', t.mid(114), 1, 'approve')$q$, 'pending_quorum:1/2');
+SET LOCAL app.op = 'approve';
 SELECT t.errm('G3j frank updates a two_curators memory directly with one approval', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(106)$q$, '%quorum not met: 1 of 2%');
 SELECT t.eq('G3k second curator: result/status', $q$SELECT d || '/' || t.state(t.mid(106)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd007', t.mid(106), 1, 'approve') AS d) AS s$q$, 'active/active/v2');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f6', NULL);
+SET LOCAL app.op = 'approve';
 SELECT t.errm('G3l grace updates a proposal directly without any review', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(107)$q$, '%quorum not met: 0 of 1%');
 COMMIT;
 
@@ -1090,6 +1097,7 @@ DELETE FROM store_grant WHERE store_id = '00000000-0000-0000-0000-00000000f001' 
 SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f8', NULL);
 SELECT t.eq('G3y heidi lost the curator role, then ivan approves: result/status', $q$SELECT d || '/' || t.state(t.mid(116)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd041', t.mid(116), 1, 'approve') AS d) AS s$q$, 'pending_quorum:1/2/proposed/v1');
+SET LOCAL app.op = 'approve';
 SELECT t.errm('G4k heidi lost the curator role: direct UPDATE after ivan', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(116)$q$, '%quorum not met: 1 of 2%');
 SELECT t.eq('G4l ivan approves a second memory: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd042', t.mid(117), 1, 'approve')$q$, 'pending_quorum:1/2');
 COMMIT;
@@ -1126,6 +1134,7 @@ SELECT t.eq('G5b the body edit bumps the version', $q$SELECT t.state(t.mid(118))
 SET ROLE app_rw;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f9', NULL);
 SELECT t.eq('G5c judy approves v2, ivan saw only v1: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd051', t.mid(118), 2, 'approve')$q$, 'pending_quorum:1/2');
+SET LOCAL app.op = 'approve';
 SELECT t.errm('G5d judy direct UPDATE cannot activate v2 on ivan''s v1 approval', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(118)$q$, '%quorum not met: 1 of 2%');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f5', NULL);
@@ -1532,6 +1541,44 @@ SET LOCAL ROLE app_rw;
 SELECT t.eq('N32k alice reads the evidence of a memory she can read, not of the hr one', $q$SELECT string_agg(author_name, ',' ORDER BY author_name) FROM memory_evidence$q$, 'Yuna');
 SELECT t.err('N32l app_rw cannot write evidence', $q$INSERT INTO memory_evidence (memory_id, version, op, basis) VALUES ('00000000-0000-0000-0000-0000000032a1', 2, 'reconfirm', 'agreed')$q$, '42501');
 SELECT t.err('N32m app_rw cannot read store_autonomy', $q$SELECT count(*) FROM store_autonomy$q$, '42501');
+ROLLBACK;
+
+-- N33) 전이 표 v1.3 (v1.3 §5.2): (from, to, op) 키, by_roles, app.op (롤백되는 트랜잭션 안의 임시 행)
+-- b1 = 키 k1 의 active, b2 = 같은 키의 challenger, b3 = provisional(promote_at 있음), b4 = active, b5 = active + 증거
+BEGIN; RESET ROLE;
+DO $setup$ BEGIN
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute) VALUES ('00000000-0000-0000-0000-0000000033b1', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active', 'N33 n33k1', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n33k1');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, promote_at) VALUES ('00000000-0000-0000-0000-0000000033b2', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'challenger', 'N33 n33k1', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n33k1', now() + interval '24 hours');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, promote_at) VALUES ('00000000-0000-0000-0000-0000000033b3', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'provisional', 'N33 n33k3', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n33k3', now() + interval '24 hours');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute) VALUES ('00000000-0000-0000-0000-0000000033b4', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active', 'N33 n33k4', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n33k4');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute) VALUES ('00000000-0000-0000-0000-0000000033b5', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active', 'N33 n33k5', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n33k5');
+INSERT INTO memory_evidence (memory_id, version, op, post_id, author, author_name, uri, basis) VALUES ('00000000-0000-0000-0000-0000000033b5', 1, 'confirm', 'p1', 'u1', 'Yuna', 'https://chat.example/p/1', 'agreed');
+EXCEPTION WHEN OTHERS THEN NULL;
+END $setup$;
+SELECT t.err('N33a a status change without app.op', $q$UPDATE memory SET status = 'expired' WHERE id = '00000000-0000-0000-0000-0000000033b4'$q$, '42501');
+SET LOCAL app.op = 'retract';
+SELECT t.err('N33b active -> rejected is not in the table', $q$UPDATE memory SET status = 'rejected' WHERE id = '00000000-0000-0000-0000-0000000033b4'$q$, 'P0001');
+SET LOCAL app.op = 'confirm';
+SELECT t.err('N33c active -> expired exists, but not with op confirm', $q$UPDATE memory SET status = 'expired' WHERE id = '00000000-0000-0000-0000-0000000033b4'$q$, 'P0001');
+SET LOCAL app.op = 'promote';
+SELECT t.err('N33d promote is a system op: a request context is refused', $q$SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL); UPDATE memory SET status = 'active' WHERE id = '00000000-0000-0000-0000-0000000033b3'$q$, '42501');
+SET LOCAL app.op = 'promote';
+SELECT t.err('N33e a challenger cannot become active while its live row is active', $q$UPDATE memory SET status = 'active' WHERE id = '00000000-0000-0000-0000-0000000033b2'$q$, '23505');
+SET LOCAL app.op = 'supersede';
+SELECT t.err('N33f the system supersedes the live row first', $q$UPDATE memory SET status = 'superseded' WHERE id = '00000000-0000-0000-0000-0000000033b1'$q$, 'ok');
+SET LOCAL app.op = 'promote';
+SELECT t.err('N33g then the challenger is promoted', $q$UPDATE memory SET status = 'active' WHERE id = '00000000-0000-0000-0000-0000000033b2'$q$, 'ok');
+SELECT t.eq('N33h the key now has the new live row and the old one superseded', $q$SELECT string_agg(status::text || ':' || coalesce(promote_at::text, '-'), ',' ORDER BY status) FROM memory WHERE attribute = 'n33k1'$q$, 'active:-,superseded:-');
+SELECT t.eq('N33i the version log records the op that was named', $q$SELECT string_agg(op::text, ',' ORDER BY id) FROM memory_version WHERE memory_id IN ('00000000-0000-0000-0000-0000000033b1', '00000000-0000-0000-0000-0000000033b2') AND op IN ('supersede', 'promote')$q$, 'supersede,promote');
+SET LOCAL app.op = 'promote';
+SELECT t.err('N33j a provisional row is promoted by the system', $q$UPDATE memory SET status = 'active' WHERE id = '00000000-0000-0000-0000-0000000033b3'$q$, 'ok');
+SELECT t.eq('N33k promote_at is cleared when the row leaves provisional', $q$SELECT (promote_at IS NULL)::text FROM memory WHERE id = '00000000-0000-0000-0000-0000000033b3'$q$, 'true');
+SELECT t.err('N33l evidence author_name cannot be scrubbed while the memory lives', $q$UPDATE memory_evidence SET author_name = NULL WHERE memory_id = '00000000-0000-0000-0000-0000000033b5'$q$, 'P0001');
+SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SET LOCAL app.op = 'delete';
+SELECT t.err('N33m a curator deletes the memory', $q$UPDATE memory SET status = 'deleted' WHERE id = '00000000-0000-0000-0000-0000000033b5'$q$, 'ok');
+SELECT t.eq('N33n the delete scrubs the evidence name and keeps the link', $q$SELECT coalesce(author_name, 'NULL') || '/' || uri FROM memory_evidence WHERE memory_id = '00000000-0000-0000-0000-0000000033b5'$q$, 'NULL/https://chat.example/p/1');
+SELECT t.err('N33o scrubbing is the only change allowed, even on a deleted memory', $q$UPDATE memory_evidence SET uri = 'x' WHERE memory_id = '00000000-0000-0000-0000-0000000033b5'$q$, 'P0001');
 ROLLBACK;
 
 RESET ROLE;

@@ -400,3 +400,18 @@ N32j	-> 23505	fail	one evidence row per post
 N32k	= Yuna	fail	evidence follows memory visibility
 N32l	-> 42501	fail	app_rw cannot write evidence
 N32m	-> 42501	fail	app_rw cannot read store_autonomy
+N33a	-> 42501	fail	no app.op, no status change
+N33b	-> P0001	fail	(from,to,op) not in the table
+N33c	-> P0001	fail	op is part of the key
+N33d	-> 42501	fail	promote is system only
+N33e	-> 23505	fail	challenger cannot activate before the live row is superseded
+N33f	(ok)	pass	system supersede (success path; v1.0 allows any UPDATE, the failing N33 tests carry the mutation signal)
+N33g	(ok)	pass	system promote of a challenger (success path; v1.0 allows any UPDATE, the failing N33 tests carry the mutation signal)
+N33h	= active:-,superseded:-	fail	challenger promoted, old row superseded
+N33i	= supersede,promote	fail	version op is app.op
+N33j	(ok)	pass	system promote of a provisional row (success path; v1.0 allows any UPDATE, the failing N33 tests carry the mutation signal)
+N33k	= true	fail	promote_at cleared on leaving provisional
+N33l	-> P0001	fail	evidence name scrub only on deleted memory
+N33m	(ok)	pass	curator delete (success path; v1.0 allows any UPDATE, the failing N33 tests carry the mutation signal)
+N33n	= NULL/https://chat.example/p/1	fail	delete scrubs author_name only
+N33o	-> P0001	fail	evidence stays append-only after delete
