@@ -138,22 +138,6 @@ def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
     return ProposeOutcome(kind="reconfirmed", memory_id=live[0])
 
 
-def decide(
-    conn: Conn, memory_id: UUID, nonce: UUID | None, verdict: str, expected_version: int
-) -> str:
-    """app_sec.decide's raw answer: an outcome ('active', 'rejected', 'pending_quorum:n/m') or a
-    refusal ('stale', 'self_review', 'not_curator', 'duplicate:<outcome>', ...)."""
-    if nonce is None:
-        issued = conn.execute("SELECT app_sec.issue_card(%s)", (memory_id,)).fetchone()
-        assert issued is not None  # noqa: S101 - a SELECT of a function always returns one row
-        nonce = issued[0]  # type: ignore[assignment]
-    row = conn.execute(
-        "SELECT app_sec.decide(%s, %s, %s, %s)", (nonce, memory_id, expected_version, verdict)
-    ).fetchone()
-    assert row is not None  # noqa: S101 - a SELECT of a function always returns one row
-    return str(row[0])
-
-
 def history(conn: Conn, memory_id: UUID) -> list[MemoryVersion]:
     with conn.cursor(row_factory=class_row(MemoryVersion)) as cur:
         return cur.execute(

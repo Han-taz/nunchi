@@ -4,7 +4,7 @@ import asyncio
 import json
 import sys
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -58,15 +58,11 @@ def check(step: str, actual: object, expected: object) -> None:
 
 async def story(directory: Path, url: str) -> None:
     contributor = {"Authorization": f"Bearer {token(directory, 'contributor@dev')}"}
-    curator = {"Authorization": f"Bearer {token(directory, 'curator@dev')}"}
     async with (
         streamablehttp_client(url, headers=contributor) as (r1, w1, _),
         ClientSession(r1, w1) as writer,
-        streamablehttp_client(url, headers=curator) as (r2, w2, _),
-        ClientSession(r2, w2) as boss,
     ):
         await writer.initialize()
-        await boss.initialize()
         check(
             "tools",
             sorted(
@@ -74,7 +70,7 @@ async def story(directory: Path, url: str) -> None:
                 for t in (await writer.list_tools()).tools
                 if t.name in {"remember", "decide"}
             ),
-            ["decide", "remember"],
+            ["remember"],
         )
 
         first = await call(
@@ -96,40 +92,20 @@ async def story(directory: Path, url: str) -> None:
         check("remember 박민수 -> created", second["outcome"], "created")
         check("conflict_with the first", second["conflict_with"], first["memory_id"])
 
-        trail = await call(boss, "history", memory_id=second["memory_id"])
-        applied = await call(
-            boss,
-            "decide",
-            memory_id=second["memory_id"],
-            decision="approve",
-            expected_version=trail[-1]["version"],
-        )
-        check("curator approve -> active", applied, {"outcome": "applied", "status": "active"})
-        old = await call(boss, "get", memory_id=first["memory_id"])
-        check("old memory -> superseded", old["data"]["status"], "superseded")
+        waiting = await call(writer, "get", memory_id=second["memory_id"])
+        check("the conflicting value waits", waiting["data"]["status"], "proposed")
 
-        hits = await call(boss, "search", query="담당자")
-        check("search 담당자 -> only the new one", [h["id"] for h in hits], [second["memory_id"]])
-        subject = hits[0]["subject_id"]
-
-        before = await call(
-            boss,
-            "as_of",
-            store_id=STORE,
-            subject_id=subject,
-            attribute="담당자",
-            on=(datetime.now(UTC).date() - timedelta(days=1)).isoformat(),
-        )
-        check("as_of yesterday -> 이민수", before["data"]["body"], "A사 담당자는 이민수")
+        hits = await call(writer, "search", query="담당자")
+        check("search 담당자 -> only the first", [h["id"] for h in hits], [first["memory_id"]])
         now = await call(
-            boss,
+            writer,
             "as_of",
             store_id=STORE,
-            subject_id=subject,
+            subject_id=hits[0]["subject_id"],
             attribute="담당자",
             on=datetime.now(UTC).date().isoformat(),
         )
-        check("as_of today -> 박민수", now["data"]["body"], "A사 담당자는 박민수")
+        check("as_of today -> 이민수", now["data"]["body"], "A사 담당자는 이민수")
 
 
 if __name__ == "__main__":

@@ -19,8 +19,8 @@ from mcp.client.streamable_http import streamable_http_client
 from nunchi.db import Pool
 from nunchi.extract import ClaudeExtractor
 from nunchi.extract.claude import MODEL
-from nunchi.mcp.server import AGENT_HEADER, build_server, decided_outcome
-from tests.conftest import AGENT, OTHER, STORE, TENANT, USER
+from nunchi.mcp.server import AGENT_HEADER, build_server
+from tests.conftest import OTHER, STORE, TENANT, USER
 from tests.jwt_support import mint, verifier
 from tests.test_repo import world as world  # noqa: PLC0414 - fixture re-export
 
@@ -130,12 +130,7 @@ def remember(url: str, script: Script, owner: str) -> dict[str, Any]:
     return anyio.run(call, url, USER, "remember", args)
 
 
-def decide(url: str, sub: uuid.UUID, memory_id: str, verdict: str, version: int) -> dict[str, Any]:
-    args = {"memory_id": memory_id, "decision": verdict, "expected_version": version}
-    return anyio.run(call, url, sub, "decide", args)
-
-
-def test_new_then_reconfirm_then_conflict_then_curator_supersedes(url: str, script: Script) -> None:
+def test_new_then_reconfirm_then_conflict(url: str, script: Script) -> None:
     first = remember(url, script, "이OO")
     assert (first["outcome"], first["conflict_with"]) == ("created", None)
     assert first["status"] == "provisional"
@@ -145,38 +140,7 @@ def test_new_then_reconfirm_then_conflict_then_curator_supersedes(url: str, scri
 
     changed = remember(url, script, "박OO")
     assert (changed["outcome"], changed["conflict_with"]) == ("created", first["memory_id"])
-    assert changed["tier"] in ("one_curator", "two_curators")
     assert changed["status"] == "proposed"
-    assert decide(url, CURATOR, changed["memory_id"], "approve", 1) == {
-        "outcome": "applied",
-        "status": "active",
-    }
-
-    old = anyio.run(call, url, USER, "get", {"memory_id": first["memory_id"]})
-    new = anyio.run(call, url, USER, "get", {"memory_id": changed["memory_id"]})
-    assert (old["data"]["status"], new["data"]["status"]) == ("superseded", "active")
-
-
-def test_agent_cannot_decide_even_with_a_curator_user(url: str, script: Script) -> None:
-    created = remember(url, script, "이OO")
-    refused = anyio.run(
-        call,
-        url,
-        CURATOR,
-        "decide",
-        {"memory_id": created["memory_id"], "decision": "approve", "expected_version": 1},
-        AGENT,
-    )
-    assert refused == {"outcome": "refused", "reason": "agent_may_not_decide"}
-    got = anyio.run(call, url, USER, "get", {"memory_id": created["memory_id"]})
-    assert got["data"]["status"] == "provisional"
-
-
-def test_non_curator_and_stale_version_are_refused(url: str, script: Script) -> None:
-    created = remember(url, script, "이OO")
-    mid = created["memory_id"]
-    assert decide(url, USER, mid, "approve", 1) == {"outcome": "refused", "reason": "not_curator"}
-    assert decide(url, CURATOR, mid, "approve", 7) == {"outcome": "refused", "reason": "stale"}
 
 
 def test_secret_is_rejected_and_chit_chat_is_skipped(url: str, script: Script) -> None:
@@ -199,16 +163,3 @@ def test_extractor_failure_is_a_tool_error(url: str, script: Script) -> None:
     args = {"text": "A사 담당자는 이OO입니다", "store_id": str(STORE), "source_refs": REFS}
     with pytest.raises(AssertionError, match="extraction failed: malformed"):
         anyio.run(call, url, USER, "remember", args)
-
-
-@pytest.mark.parametrize(
-    ("raw", "typed"),
-    [
-        ("active", {"outcome": "applied", "status": "active"}),
-        ("rejected", {"outcome": "applied", "status": "rejected"}),
-        ("pending_quorum:1/2", {"outcome": "pending", "have": 1, "needed": 2}),
-        ("self_review", {"outcome": "refused", "reason": "self_review"}),
-    ],
-)
-def test_decide_result_strings_map_to_typed_outcomes(raw: str, typed: dict[str, Any]) -> None:
-    assert decided_outcome(raw) == typed
