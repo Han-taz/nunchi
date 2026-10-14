@@ -1961,12 +1961,18 @@ GRANT EXECUTE ON FUNCTION app_sec.replace_room_members(uuid, text[], text[]) TO 
 -- 중복 note 흡수 (U27): note 는 키가 없어 같은 보고가 몇 분 간격으로 두 번 저장됐다. 같은 store 의 최근 p_days 일 안에 확인된 note 중
 -- 제목+본문 trigram 유사도가 0.9 이상이거나, 제목이 같고 본문 유사도가 0.7 이상인 행이 있으면 새 행 없이 그 행을 reconfirm 하고 id 를 돌려준다. 없으면 NULL.
 -- 호출자가 그 store 의 contributor 일 때만 판정한다(아니면 NULL 을 돌려 remember() 가 거절하게 둔다).
-CREATE FUNCTION app_sec.reconfirm_duplicate_note(p_store uuid, p_title text, p_body text, p_days integer DEFAULT 14)
+CREATE FUNCTION app_sec.reconfirm_duplicate_note(
+  p_store uuid, p_title text, p_body text, p_days integer DEFAULT 14,
+  p_consensus text DEFAULT 'stated', p_evidence jsonb DEFAULT '[]'
+)
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   v_title text := app_sec.norm_text(p_title);
   v_body text := app_sec.norm_text(coalesce(p_body, ''));
+  v_basis promotion_basis := CASE WHEN p_consensus = 'agreed' THEN 'agreed' ELSE 'stated' END;
+  v_ev jsonb;
+  v_fresh jsonb;
   v_id uuid;
 BEGIN
   IF app_sec.ctx_user() IS NULL OR p_store NOT IN (SELECT app_sec.my_stores('contributor')) THEN
@@ -1984,9 +1990,23 @@ BEGIN
   LIMIT 1
   FOR UPDATE OF m;
   IF v_id IS NOT NULL THEN
+    v_ev := (
+      SELECT jsonb_agg(jsonb_build_object(
+        'uri', e ->> 'uri', 'post_id', e ->> 'post_id', 'author', coalesce(e ->> 'author', app_sec.ctx_user()::text),
+        'author_name', e ->> 'author_name', 'said_at', coalesce(e ->> 'said_at', clock_timestamp()::text)
+      ))
+      FROM jsonb_array_elements(CASE WHEN jsonb_array_length(coalesce(p_evidence, '[]'::jsonb)) = 0 THEN '[{}]'::jsonb ELSE p_evidence END) AS e
+    );
+    v_fresh := app_sec.new_evidence(v_id, 'reconfirm', v_ev);
+    PERFORM set_config('app.reason', app_sec.evidence_reason(v_basis, v_fresh), true);
     UPDATE memory SET last_confirmed_at = now() WHERE id = v_id;
+    PERFORM app_sec.record_evidence(v_id, 'reconfirm', v_basis, v_fresh);
+    PERFORM set_config('app.reason', '', true);
   END IF;
   RETURN v_id;
 END $$;
 
-GRANT EXECUTE ON FUNCTION app_sec.reconfirm_duplicate_note(uuid, text, text, integer) TO app_rw;
+GRANT EXECUTE ON FUNCTION app_sec.reconfirm_duplicate_note(uuid, text, text, integer, text, jsonb) TO app_rw;
+
+-- digest 봇이 창을 읽기 전에 청중 포함을 확인한다 (design v1.3 7.1 5번)
+GRANT EXECUTE ON FUNCTION app_sec.room_containment(uuid) TO app_rw;
