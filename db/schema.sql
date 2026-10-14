@@ -192,7 +192,7 @@ CREATE INDEX memory_store_status_idx ON memory (store_id, status);
 CREATE INDEX memory_search_idx ON memory USING gin ((title || ' ' || coalesce(body, '')) gin_trgm_ops);
 CREATE INDEX memory_sources_idx ON memory USING gin (source_refs jsonb_path_ops);  -- 역방향 계보 조회
 CREATE INDEX memory_hash_idx ON memory (store_id, content_hash);
--- 한 스토어 안에서 키마다 살아 있는 기억은 최대 하나다. 교체는 decide() 가 이전 행을 먼저 superseded 로 바꾼 뒤 새 행을 활성화한다
+-- 한 스토어 안에서 키마다 살아 있는 기억은 최대 하나다. 교체는 이전 행을 먼저 superseded 로 바꾼 뒤 새 행을 활성화한다 (한 트랜잭션)
 CREATE UNIQUE INDEX memory_live_key_uidx ON memory (store_id, subject_id, attribute)
 WHERE status IN ('active', 'provisional');
 -- 키마다 열린 변경 제안(challenger)은 하나다. 살아 있는 행과는 별개의 유일성이다
@@ -245,7 +245,7 @@ CREATE TABLE memory_evidence (
   UNIQUE (memory_id, op, post_id)
 );
 
--- 승인 카드: nonce 1개 = (memory, 수신 curator) 1장. 클릭은 nonce 로만 들어오고 decide() 만 읽고 쓴다 (app_rw 권한 없음).
+-- 승인 카드: nonce 1개 = (memory, 수신 curator) 1장. 읽고 쓰는 함수는 U38 이 지운다 (app_rw 권한 없음).
 CREATE TABLE approval_card (
   nonce uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   memory_id uuid NOT NULL REFERENCES memory (id),
@@ -276,37 +276,31 @@ CREATE TABLE review (
 -- 상태 기계 (v1.3 §5.2): 허용되는 (from, to, op) 전이는 이 표가 전부다. memory_bu 는 이 표를 한 번 조회할 뿐 분기하지 않는다.
 -- op = 전이를 일으키는 함수가 트랜잭션 로컬 설정 app.op 로 넘기는 값이고 버전 기록에도 그대로 남는다. app.op 없는 상태 UPDATE 는 42501.
 -- by_roles = 이 전이를 할 수 있는 역할. 요청 컨텍스트가 있으면 contributor 와 curator, 없으면 system 으로 본다. curator 는 삭제에만 쓴다.
--- reviewed = 전이마다 review 행(verdict = op)이 정족수만큼 있어야 하는가. 카드 경로(U33 이 지운다)가 남아 있는 동안의 호환 열이다.
--- proposed 에서 나가는 세 행도 같은 이유로 남긴다 (U33 이 remember() 로 쓰기 경로를 바꿀 때, U38 이 proposed 행을 없앨 때 지운다).
 CREATE TYPE transition_role AS ENUM ('contributor', 'system', 'curator');
 CREATE TABLE memory_transition (
   from_status memory_status NOT NULL,
   to_status memory_status NOT NULL,
   op memory_op NOT NULL,
   by_roles transition_role[] NOT NULL CHECK (cardinality(by_roles) > 0),
-  reviewed boolean NOT NULL DEFAULT false,
   PRIMARY KEY (from_status, to_status, op)
 );
-INSERT INTO memory_transition (from_status, to_status, op, by_roles, reviewed) VALUES
-('provisional', 'active', 'confirm', '{contributor}', true),
-('provisional', 'active', 'promote', '{system}', false),
-('provisional', 'rejected', 'retract', '{contributor}', true),
-('provisional', 'superseded', 'supersede', '{contributor,system}', false),
-('active', 'superseded', 'supersede', '{contributor,system}', false),
-('active', 'expired', 'retract', '{contributor}', false),
-('active', 'expired', 'expire', '{system}', false),
-('challenger', 'active', 'confirm', '{contributor}', false),
-('challenger', 'active', 'promote', '{system}', false),
-('challenger', 'rejected', 'retract', '{contributor}', false),
-('active', 'deleted', 'delete', '{curator}', false),
-('provisional', 'deleted', 'delete', '{curator}', false),
-('challenger', 'deleted', 'delete', '{curator}', false),
-('superseded', 'deleted', 'delete', '{curator}', false),
-('expired', 'deleted', 'delete', '{curator}', false),
-('rejected', 'deleted', 'delete', '{curator}', false),
-('proposed', 'provisional', 'auto_activate', '{system}', false),
-('proposed', 'active', 'approve', '{curator}', true),
-('proposed', 'rejected', 'reject', '{curator}', true);
+INSERT INTO memory_transition (from_status, to_status, op, by_roles) VALUES
+('provisional', 'active', 'confirm', '{contributor}'),
+('provisional', 'active', 'promote', '{system}'),
+('provisional', 'rejected', 'retract', '{contributor}'),
+('provisional', 'superseded', 'supersede', '{contributor,system}'),
+('active', 'superseded', 'supersede', '{contributor,system}'),
+('active', 'expired', 'retract', '{contributor}'),
+('active', 'expired', 'expire', '{system}'),
+('challenger', 'active', 'confirm', '{contributor}'),
+('challenger', 'active', 'promote', '{system}'),
+('challenger', 'rejected', 'retract', '{contributor}'),
+('active', 'deleted', 'delete', '{curator}'),
+('provisional', 'deleted', 'delete', '{curator}'),
+('challenger', 'deleted', 'delete', '{curator}'),
+('superseded', 'deleted', 'delete', '{curator}'),
+('expired', 'deleted', 'delete', '{curator}'),
+('rejected', 'deleted', 'delete', '{curator}');
 
 -- ── 신선도 (v1.2 §4) ──
 -- kind 별 기본 유효 기간(일). 행이 없는 kind(decision, note)는 오래돼도 stale 이 아니다. store_freshness 가 스토어별로 덮어쓴다.
@@ -685,7 +679,7 @@ $$;
 CREATE TYPE link_quality AS ENUM ('scim', 'email');
 CREATE TYPE room_kind AS ENUM ('public', 'private', 'connect');
 
--- SCIM 으로 이은 Slack user.id 만 decide() 의 신원이 된다. 이메일만 맞는 사용자는 'email' 품질이라 resolve_identity 가 NULL 을 준다.
+-- SCIM 으로 이은 Slack user.id 만 신원이 된다. 이메일만 맞는 사용자는 'email' 품질이라 resolve_identity 가 NULL 을 준다.
 CREATE TABLE principal_identity (
   platform text NOT NULL,
   platform_user_id text NOT NULL,
@@ -1132,42 +1126,11 @@ BEGIN
   RETURN NEW;
 END $$;
 
--- 정족수: 이 전이를 뒷받침하는 review(verdict = 전이의 op)의 서로 다른 비저자 reviewer 수와 필요한 수.
--- 결정 시점에 reviewer(와 via_agent)가 지금도 그 store 의 curator 인 review 만 센다: 역할을 잃은 curator 의 이전 승인은 세지 않는다.
--- 다른 사람의 grant 를 읽어야 해서 SECURITY DEFINER 이고, 호출자가 그 store 의 curator 일 때만 0 이상을 돌려준다(그 외는 0).
--- 활성화(to = active)는 등급의 approvals_needed, 반려/회수는 1.
-CREATE FUNCTION app_sec.quorum(p_mem memory, p_to memory_status) RETURNS TABLE (have integer, needed integer)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-  SELECT
-    (
-      SELECT count(DISTINCT v.reviewer_id)::integer FROM review AS v, memory AS m
-      WHERE
-        m.id = p_mem.id
-        AND m.store_id IN (SELECT app_sec.my_stores('curator'))
-        AND v.memory_id = m.id
-        AND v.version = m.version
-        AND v.verdict = (SELECT t.op::text FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = p_to AND t.reviewed)
-        AND v.reviewer_id NOT IN (m.created_by, coalesce(m.on_behalf_of, m.created_by))
-        AND EXISTS (
-          SELECT 1 FROM store_grant AS g
-          WHERE g.store_id = m.store_id AND g.tenant_id = m.tenant_id AND g.role = 'curator' AND g.principal_id IN (SELECT app_sec.closure(v.reviewer_id))
-        )
-        AND (
-          v.via_agent_id IS NULL OR EXISTS (
-            SELECT 1 FROM store_grant AS g
-            WHERE g.store_id = m.store_id AND g.tenant_id = m.tenant_id AND g.role = 'curator' AND g.principal_id IN (SELECT app_sec.closure(v.via_agent_id))
-          )
-        )
-    ),
-    CASE WHEN p_to = 'active' THEN (SELECT r.approvals_needed FROM approval_tier_rule AS r WHERE r.tier = p_mem.tier)::integer ELSE 1 END
-$$;
-
 -- UPDATE: 불변 컬럼, origin 단방향, memory_transition 표, 본문 편집 범위, 버전 증가, 삭제 시 본문 제거
 CREATE FUNCTION app_sec.memory_before_update() RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   tr memory_transition;
-  q record;
   v_op memory_op;
 BEGIN
   IF (NEW.id, NEW.tenant_id, NEW.store_id, NEW.kind, NEW.created_by, NEW.on_behalf_of, NEW.created_at, NEW.session_ref, NEW.tier)
@@ -1208,15 +1171,6 @@ BEGIN
     END IF;
     IF NEW.status NOT IN ('provisional', 'challenger') THEN
       NEW.promote_at := NULL;
-    END IF;
-    IF tr.reviewed THEN
-      IF app_sec.ctx_user() IN (OLD.created_by, coalesce(OLD.on_behalf_of, OLD.created_by)) THEN
-        RAISE EXCEPTION 'separation of duties: the proposer cannot review' USING ERRCODE = '42501';
-      END IF;
-      SELECT * INTO q FROM app_sec.quorum(OLD, NEW.status);
-      IF q.have < q.needed THEN
-        RAISE EXCEPTION 'quorum not met: % of % reviews', q.have, q.needed USING ERRCODE = '42501';
-      END IF;
     END IF;
   END IF;
   IF (NEW.title, NEW.body, NEW.source_refs) IS DISTINCT FROM (OLD.title, OLD.body, OLD.source_refs)
@@ -1406,115 +1360,6 @@ CREATE TRIGGER memory_bi2k_key BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNC
 CREATE TRIGGER memory_bi3_tier BEFORE INSERT ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_tier();
 CREATE TRIGGER memory_bu2_hash BEFORE UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_set_hash();
 CREATE TRIGGER memory_aw AFTER INSERT OR UPDATE ON memory FOR EACH ROW EXECUTE FUNCTION app_sec.memory_after_write();
-
--- 승인 함수: 카드 nonce 로만 승인/반려/의견. 멱등(소비된 nonce), 낙관적 잠금(expected_version), 클릭자 = 수신자.
--- 거절 사유는 위에서부터 첫 일치 하나만 반환하고 review 행도 버전도 남기지 않는다. 처리되면 review 를 쓰고 memory 를 UPDATE 하며
--- 정족수와 직무 분리의 최종 판정은 memory_bu 가 한다. verdict 는 approve/confirm(→ active), reject/retract(→ rejected), comment 이고
--- review 에는 현재 상태에서 그 전이의 op 로 기록한다 (proposed 의 approve 는 approve, provisional 의 approve 는 confirm).
-CREATE FUNCTION app_sec.decide(
-  p_nonce uuid, p_memory uuid, p_expected_version integer, p_verdict text, p_reason text DEFAULT null
-) RETURNS text
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE
-  me uuid := app_sec.ctx_user();
-  c approval_card;
-  m memory;
-  tr memory_transition;
-  q record;
-  refusal text;
-  target memory_status;
-  v_op memory_op;
-  v_outcome text;
-  v_old uuid;
-BEGIN
-  IF me IS NULL THEN
-    RAISE EXCEPTION 'no user context' USING ERRCODE = '28000';
-  END IF;
-  IF p_verdict NOT IN ('approve', 'confirm', 'reject', 'retract', 'comment') THEN
-    RAISE EXCEPTION 'unknown verdict %', p_verdict USING ERRCODE = '22023';
-  END IF;
-  SELECT * INTO c FROM approval_card WHERE nonce = p_nonce FOR UPDATE;
-  SELECT * INTO m FROM memory WHERE id = c.memory_id FOR UPDATE;
-  refusal := CASE
-    WHEN c.nonce IS NULL THEN 'unknown_nonce'
-    WHEN c.issued_to <> me THEN 'wrong_clicker'
-    WHEN c.consumed_at IS NOT NULL THEN 'duplicate:' || c.outcome
-    WHEN c.memory_id <> p_memory THEN 'mismatch'
-    WHEN c.expires_at < now() THEN 'expired'
-    WHEN NOT EXISTS (
-      SELECT 1 FROM app_sec.my_store_roles() AS r WHERE r.store_id = m.store_id AND r.role = 'curator'
-    ) THEN 'not_curator'
-    WHEN m.version <> p_expected_version THEN 'stale'
-    WHEN me IN (m.created_by, coalesce(m.on_behalf_of, m.created_by)) THEN 'self_review'
-  END;
-  IF refusal IS NOT NULL THEN
-    RETURN refusal;
-  END IF;
-
-  target := CASE p_verdict WHEN 'approve' THEN 'active' WHEN 'confirm' THEN 'active' WHEN 'reject' THEN 'rejected' WHEN 'retract' THEN 'rejected' END;
-  v_op := CASE
-    WHEN target = 'active' THEN CASE WHEN m.status = 'proposed' THEN 'approve' ELSE 'confirm' END
-    WHEN target = 'rejected' THEN CASE WHEN m.status = 'proposed' THEN 'reject' ELSE 'retract' END
-  END;
-  SELECT * INTO tr FROM memory_transition AS t WHERE t.from_status = m.status AND t.to_status = target AND t.op = v_op;
-  IF target IS NOT NULL AND NOT found THEN
-    RAISE EXCEPTION 'illegal transition % -> %', m.status, target;
-  END IF;
-  INSERT INTO review (memory_id, reviewer_id, verdict, note, via_agent_id, card_nonce)
-  VALUES (m.id, me, coalesce(tr.op::text, p_verdict), p_reason, app_sec.ctx_agent(), p_nonce);
-  PERFORM set_config('app.reason', coalesce(p_reason, ''), true);
-
-  v_outcome := CASE WHEN target IS NULL THEN 'comment' ELSE target::text END;
-  IF target IS NOT NULL THEN
-    SELECT * INTO q FROM app_sec.quorum(m, target);
-    IF q.have < q.needed THEN
-      v_outcome := 'pending_quorum:' || q.have || '/' || q.needed;
-    ELSE
-      -- 교체: 같은 키(또는 supersedes_id)의 살아 있는 행을 먼저 superseded 로 바꾼 뒤 새 행을 활성화한다 (한 트랜잭션, 지연 제약 없음)
-      IF target = 'active' THEN
-        PERFORM set_config('app.op', 'supersede', true);
-        UPDATE memory SET status = 'superseded', valid_to = coalesce(m.valid_from, current_date)
-        WHERE id <> m.id AND status IN ('active', 'provisional')
-          AND (id = m.supersedes_id OR (store_id = m.store_id AND subject_id = m.subject_id AND attribute = m.attribute))
-        RETURNING id INTO v_old;
-      END IF;
-      PERFORM set_config('app.op', v_op::text, true);
-      UPDATE memory SET
-        status = target,
-        supersedes_id = coalesce(v_old, supersedes_id),
-        valid_from = CASE WHEN v_old IS NULL THEN valid_from ELSE coalesce(valid_from, current_date) END
-      WHERE id = m.id AND version = p_expected_version;
-    END IF;
-  END IF;
-  UPDATE approval_card SET consumed_at = now(), outcome = v_outcome WHERE nonce = p_nonce;
-  RETURN v_outcome;
-END $$;
-
--- 승인 카드 발급: MCP 처럼 Slack 카드가 없는 경로에서 curator 가 직접 결정할 때 쓴다. 사람만(에이전트 문맥이면 거부), 그 기억이 속한 store 의 curator 만 받는다.
--- 이미 열린 카드가 있으면 새로 만들지 않고 그 nonce 를 돌려준다 (재시도에 안전). 결정의 나머지 검사(self_review, stale, 정족수)는 decide() 의 몫이다.
-CREATE FUNCTION app_sec.issue_card(p_memory uuid) RETURNS uuid
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE
-  me uuid := app_sec.ctx_user();
-  m memory;
-  v_nonce uuid;
-BEGIN
-  IF me IS NULL OR app_sec.ctx_agent() IS NOT NULL THEN
-    RAISE EXCEPTION 'only a human principal may open an approval' USING ERRCODE = '42501';
-  END IF;
-  SELECT * INTO m FROM memory WHERE id = p_memory;
-  IF NOT found OR NOT EXISTS (
-    SELECT 1 FROM app_sec.my_store_roles() AS r WHERE r.store_id = m.store_id AND r.role = 'curator'
-  ) THEN
-    RAISE EXCEPTION 'not a curator of this memory' USING ERRCODE = '42501';
-  END IF;
-  SELECT nonce INTO v_nonce FROM approval_card
-  WHERE memory_id = m.id AND issued_to = me AND consumed_at IS NULL AND expires_at > now() AND version_at_issue = m.version;
-  IF v_nonce IS NOT NULL THEN RETURN v_nonce; END IF;
-  INSERT INTO approval_card (memory_id, version_at_issue, issued_to, platform)
-  VALUES (m.id, m.version, me, 'mcp') RETURNING nonce INTO v_nonce;
-  RETURN v_nonce;
-END $$;
 
 -- 체인 검증. 호출자의 RLS 가 적용되므로 보이는 버전만 검증한다 (없거나 못 보면 NULL)
 CREATE FUNCTION app_sec.verify_chain(p_mem uuid) RETURNS boolean LANGUAGE sql
@@ -1795,11 +1640,8 @@ GRANT EXECUTE ON FUNCTION app_sec.resolve_identity(uuid, text, text) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_user() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_agent() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.ctx_tenant() TO app_rw;
-GRANT EXECUTE ON FUNCTION app_sec.decide(uuid, uuid, integer, text, text) TO app_rw;
-GRANT EXECUTE ON FUNCTION app_sec.issue_card(uuid) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.claim_inbound_event(text) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.issue_dm_cards(uuid, text) TO app_rw;
-GRANT EXECUTE ON FUNCTION app_sec.quorum(memory, memory_status) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_store_roles() TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.my_stores(store_role) TO app_rw;
 GRANT EXECUTE ON FUNCTION

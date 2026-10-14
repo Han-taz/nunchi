@@ -35,8 +35,9 @@ BEGIN
   ELSE RAISE NOTICE '% FAIL: expected %, got %', label, expected, s; END IF;
 END $$;
 
--- t_state = 한 memory 의 status/version (volatile 이라 같은 문장 안에서 decide() 뒤의 값을 본다), t_approve = 요청 컨텍스트의 curator 가
---           카드를 받아 decide() 로 승인한다 (v1.0 스키마에는 decide 가 없어 UPDATE 로 흉내 낸다. 카드 발급은 앱 몫이라 소유자 권한이다)
+-- t_state = 한 memory 의 status/version (volatile 이라 같은 문장 안에서 쓰기 뒤의 값을 본다).
+-- t_approve = 제안 행을 옛 승인이 남기던 모습(이전 살아 있는 행 superseded, 새 행 active, 버전 기록)으로 만드는 픽스처 도우미다. decide() 는 U33b 가 지웠고
+--             proposed 에서 나가는 전이도 없으므로 소유자 권한으로 트리거를 끄고(session_replication_role) 직접 쓴다. v1.0 스키마에서는 UPDATE 로 흉내 낸다.
 CREATE FUNCTION t.state(p uuid) RETURNS text LANGUAGE plpgsql AS $$
 DECLARE r text;
 BEGIN
@@ -44,16 +45,27 @@ BEGIN
   RETURN r;
 END $$;
 CREATE FUNCTION t.approve(p uuid) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE n uuid := gen_random_uuid(); ver integer;
+DECLARE m memory; o memory;
 BEGIN
-  IF to_regprocedure('app_sec.decide(uuid,uuid,integer,text,text)') IS NULL THEN
+  IF to_regprocedure('app_sec.begin_request(uuid,uuid)') IS NULL THEN
     UPDATE memory SET status = 'active' WHERE id = p;
     RETURN 'legacy';
   END IF;
-  SELECT version INTO ver FROM memory WHERE id = p;
-  INSERT INTO approval_card (nonce, memory_id, version_at_issue, issued_to, platform)
-  VALUES (n, p, ver, nullif(current_setting('app.user_id', true), '')::uuid, 'slack');
-  RETURN app_sec.decide(n, p, ver, 'approve', current_setting('app.reason', true));
+  SELECT * INTO m FROM memory WHERE id = p;
+  PERFORM set_config('session_replication_role', 'replica', true);
+  UPDATE memory SET status = 'superseded', valid_to = coalesce(m.valid_from, current_date), version = version + 1
+  WHERE id <> m.id AND status IN ('active', 'provisional')
+    AND (id = m.supersedes_id OR (store_id = m.store_id AND subject_id = m.subject_id AND attribute = m.attribute))
+  RETURNING * INTO o;
+  IF o.id IS NOT NULL THEN
+    PERFORM app_sec.write_version(o, 'supersede', app_sec.ctx_user(), NULL);
+  END IF;
+  UPDATE memory SET status = 'active', version = version + 1, supersedes_id = coalesce(o.id, supersedes_id),
+    valid_from = CASE WHEN o.id IS NULL THEN valid_from ELSE coalesce(valid_from, current_date) END, last_confirmed_at = now()
+  WHERE id = p RETURNING * INTO m;
+  PERFORM app_sec.write_version(m, 'approve', app_sec.ctx_user(), current_setting('app.reason', true));
+  PERFORM set_config('session_replication_role', 'origin', true);
+  RETURN 'active';
 END $$;
 
 CREATE FUNCTION t.ctx(u uuid, a uuid) RETURNS void LANGUAGE plpgsql AS $$
@@ -157,10 +169,9 @@ BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 WITH u AS (UPDATE memory SET status='active' WHERE id='00000000-0000-0000-0000-0000000bb001' RETURNING 1)
 SELECT 'T4 alice approve rows = ' || count(*) FROM u; COMMIT;
 
--- 5) Carol(curator)도 review 없이 직접 UPDATE 로는 승인할 수 없다 (42501). decide() 를 거치면 active
+-- 5) 픽스처: bb001 을 승인된 모습으로 만든다 (옛 T5, T5b 는 decide() 와 함께 지웠다)
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.err('T5 carol direct UPDATE status=active without a review', $q$UPDATE memory SET status='active' WHERE id='00000000-0000-0000-0000-0000000bb001'$q$, '42501');
-SELECT t.eq('T5b carol approves through decide: result/status', $q$SELECT a || '/' || t.state('00000000-0000-0000-0000-0000000bb001') FROM (SELECT t.approve('00000000-0000-0000-0000-0000000bb001') AS a) AS s$q$, 'active/active/v2');
+SELECT t.approve('00000000-0000-0000-0000-0000000bb001');
 COMMIT;
 
 -- 6) Carol이 영업봇과 함께여도 봇 권한이 contributor라 승인 불가 (교집합)
@@ -248,7 +259,7 @@ BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-
 SELECT t.eq('X4a alice+bot hr memory_version rows', $q$SELECT count(*)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000aa001'$q$, '0');
 SELECT t.eq('X4b alice+bot hr review rows', $q$SELECT count(*)::text FROM review WHERE memory_id='00000000-0000-0000-0000-0000000aa001'$q$, '0');
 SELECT t.eq('X4c alice+bot sees sales memory_version rows (own store visible)', $q$SELECT (count(*) >= 1)::text FROM memory_version WHERE memory_id='00000000-0000-0000-0000-0000000bb001'$q$, 'true');
-SELECT t.eq('X4d alice+bot sales review verdicts (the decide() approval, then the seeded comment)', $q$SELECT string_agg(verdict, ',' ORDER BY id) FROM review$q$, 'approve,comment');
+SELECT t.eq('X4d alice+bot sales review verdicts (the seeded comment)', $q$SELECT string_agg(verdict, ',' ORDER BY id) FROM review$q$, 'comment');
 SELECT t.err('X4e insert version on hr memory', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000aa001',2,'edit','00000000-0000-0000-0000-0000000000d1','{}')$q$, '42501');
 SELECT t.err('X4f insert review on hr memory', $q$INSERT INTO review (memory_id, reviewer_id, verdict) VALUES ('00000000-0000-0000-0000-0000000aa001','00000000-0000-0000-0000-0000000000d1','comment')$q$, '42501');
 SELECT t.err('X4g version actor forged as carol', $q$INSERT INTO memory_version (memory_id, version, op, actor_id, snapshot) VALUES ('00000000-0000-0000-0000-0000000bb001',2,'edit','00000000-0000-0000-0000-0000000000c1','{}')$q$, '42501');
@@ -513,7 +524,7 @@ CREATE FUNCTION t.exec_list(r text DEFAULT 'app_rw') RETURNS text LANGUAGE sql A
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.entity_matches,app_sec.issue_card,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.pending_dm_cards,app_sec.quorum,app_sec.reconfirm_duplicate_note,app_sec.record_card_sent,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
+  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.entity_matches,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.pending_dm_cards,app_sec.reconfirm_duplicate_note,app_sec.record_card_sent,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
 SELECT t.eq('P3d nunchi_worker executes exactly the four worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
@@ -876,8 +887,8 @@ COMMIT;
 -- G1l, G1m) 등급과 전이는 코드가 아니라 표다
 SELECT t.eq('G1l approval_tier_rule', $q$SELECT string_agg(tier || ':' || initial_status || ':' || approvals_needed, ',' ORDER BY tier) FROM approval_tier_rule$q$,
   'auto:active:0,auto_labeled:provisional:1,one_curator:proposed:1,two_curators:proposed:2');
-SELECT t.eq('G1m memory_transition', $q$SELECT string_agg(from_status || '>' || to_status || ':' || op || ':' || array_to_string(by_roles, '|') || CASE WHEN reviewed THEN ':reviewed' ELSE '' END, ',' ORDER BY from_status, to_status, op) FROM memory_transition$q$,
-  'proposed>provisional:auto_activate:system,proposed>active:approve:curator:reviewed,proposed>rejected:reject:curator:reviewed,provisional>active:confirm:contributor:reviewed,provisional>active:promote:system,provisional>superseded:supersede:contributor|system,provisional>rejected:retract:contributor:reviewed,provisional>deleted:delete:curator,challenger>active:confirm:contributor,challenger>active:promote:system,challenger>rejected:retract:contributor,challenger>deleted:delete:curator,active>superseded:supersede:contributor|system,active>expired:retract:contributor,active>expired:expire:system,active>deleted:delete:curator,superseded>deleted:delete:curator,rejected>deleted:delete:curator,expired>deleted:delete:curator');
+SELECT t.eq('G1m memory_transition', $q$SELECT string_agg(from_status || '>' || to_status || ':' || op || ':' || array_to_string(by_roles, '|'), ',' ORDER BY from_status, to_status, op) FROM memory_transition$q$,
+  'provisional>active:confirm:contributor,provisional>active:promote:system,provisional>superseded:supersede:contributor|system,provisional>rejected:retract:contributor,provisional>deleted:delete:curator,challenger>active:confirm:contributor,challenger>active:promote:system,challenger>rejected:retract:contributor,challenger>deleted:delete:curator,active>superseded:supersede:contributor|system,active>expired:retract:contributor,active>expired:expire:system,active>deleted:delete:curator,superseded>deleted:delete:curator,rejected>deleted:delete:curator,expired>deleted:delete:curator');
 
 -- G4e-g) 신뢰: 20점이면 에이전트도 auto_labeled, 19점은 아니다, 강등 중이면 사람도 one_curator (점수 시드는 소유자 권한, 마지막에 ROLLBACK)
 BEGIN;
@@ -913,10 +924,6 @@ SELECT t.err('G3n tier change', $q$UPDATE memory SET tier = 'auto' WHERE id = '0
 SET LOCAL app.op = 'expire';
 SELECT t.err('G3o curator in a request runs the system transition active -> expired', $q$UPDATE memory SET status = 'expired' WHERE id = '00000000-0000-0000-0000-0000000bb001'$q$, '42501');
 ROLLBACK;
-BEGIN; RESET ROLE;
-SET LOCAL app.op = 'reject';
-SELECT t.err('G3p owner without a request context runs the curator transition proposed -> rejected', $q$UPDATE memory SET status = 'rejected' WHERE id = t.mid(2)$q$, '42501');
-ROLLBACK;
 SET ROLE app_rw;
 
 -- F6c) provisional 은 reader 에게도 보인다 / N10n) 검색 기본값은 active 만이고 provisional 은 명시해야 섞인다 (B9)
@@ -929,247 +936,13 @@ COMMIT;
 SELECT t.eq('B6a store has no auto_approve column', $q$SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'store' AND column_name = 'auto_approve'$q$, '0');
 RESET ROLE;
 
--- ═══ 승인 모델 B (B4, B7, B8): decide(), 정족수, 직무 분리, 신뢰 점수 ═══════════
 CREATE FUNCTION t.lastop(p uuid) RETURNS text LANGUAGE plpgsql AS $$
 DECLARE r text;
 BEGIN
   SELECT op::text INTO r FROM memory_version WHERE memory_id = p ORDER BY id DESC LIMIT 1;
   RETURN r;
 END $$;
-CREATE FUNCTION t.nreviews(p uuid) RETURNS bigint LANGUAGE plpgsql AS $$
-DECLARE r bigint;
-BEGIN
-  SELECT count(*) INTO r FROM review WHERE memory_id = p;
-  RETURN r;
-END $$;
-CREATE FUNCTION t.verdicts(p uuid) RETURNS text LANGUAGE plpgsql AS $$
-DECLARE r text;
-BEGIN
-  SELECT string_agg(verdict, ',' ORDER BY id) INTO r FROM review WHERE memory_id = p;
-  RETURN r;
-END $$;
--- t_errm = t_err 와 같되 SQLSTATE 대신 메시지(LIKE 패턴)를 본다: 같은 42501 이라도 정족수와 직무 분리를 구분한다
-CREATE FUNCTION t.errm(label text, q text, expected text) RETURNS void LANGUAGE plpgsql AS $$
-DECLARE m text;
-BEGIN
-  BEGIN EXECUTE q; EXCEPTION WHEN OTHERS THEN m := SQLERRM; END;
-  IF m LIKE expected THEN RAISE NOTICE '% -> % (ok)', label, expected;
-  ELSE RAISE NOTICE '% FAIL: expected %, got %', label, expected, coalesce(m, 'ok'); END IF;
-END $$;
 
--- 사전 데이터(소유자 권한): 큐레이터 Frank 와 Grace, 제안 15개, 카드 17장. 카드 발급은 앱 몫이라 여기서 직접 넣는다.
--- 새 표가 없는 v1.0 스키마에서는 아무것도 하지 않는다.
-INSERT INTO principal (id, tenant_id, kind, external_id, display_name) VALUES
- ('00000000-0000-0000-0000-0000000000f5','00000000-0000-0000-0000-000000000001','user','frank','Frank(영업 큐레이터2)'),
- ('00000000-0000-0000-0000-0000000000f6','00000000-0000-0000-0000-000000000001','user','grace','Grace(영업 큐레이터3)');
-INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
- ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f5','curator','00000000-0000-0000-0000-000000000001'),
- ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f6','curator','00000000-0000-0000-0000-000000000001');
-DO $do$
-DECLARE
-  bot constant uuid := '00000000-0000-0000-0000-0000000000d1';
-  alice constant uuid := '00000000-0000-0000-0000-0000000000a1';
-  carol constant uuid := '00000000-0000-0000-0000-0000000000c1';
-  dave constant uuid := '00000000-0000-0000-0000-0000000000f1';
-  fay constant uuid := '00000000-0000-0000-0000-0000000000f4';
-  frank constant uuid := '00000000-0000-0000-0000-0000000000f5';
-  r record;
-BEGIN
-  IF to_regclass('approval_card') IS NULL THEN RETURN; END IF;
-  FOR r IN SELECT * FROM (VALUES
-    (111, 'active', 'one_curator', bot, alice), (110, 'proposed', 'one_curator', bot, alice), (109, 'proposed', 'one_curator', bot, alice),
-    (108, 'proposed', 'one_curator', bot, alice), (107, 'proposed', 'one_curator', bot, alice), (106, 'proposed', 'two_curators', bot, alice),
-    (105, 'proposed', 'one_curator', bot, alice), (104, 'proposed', 'one_curator', carol, NULL), (103, 'proposed', 'one_curator', bot, alice),
-    (102, 'proposed', 'one_curator', bot, alice), (101, 'proposed', 'one_curator', bot, alice), (112, 'provisional', 'auto_labeled', fay, NULL),
-    (113, 'proposed', 'one_curator', fay, NULL), (114, 'proposed', 'two_curators', carol, NULL), (115, 'proposed', 'two_curators', bot, alice)
-  ) AS v (n, st, tr, author, behalf)
-  LOOP
-    INSERT INTO memory (id, tenant_id, store_id, kind, status, tier, title, body, source_refs, created_by, on_behalf_of, supersedes_id)
-    VALUES (t.mid(r.n), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', r.st::memory_status,
-      r.tr::approval_tier, 'decide ' || r.n, 'body ' || r.n, '[{"uri":"https://crm/acct/A"}]', r.author, r.behalf,
-      CASE r.n WHEN 102 THEN t.mid(111) END);
-  END LOOP;
-  UPDATE memory SET title = 'edited after the card was issued' WHERE id = t.mid(103);
-  INSERT INTO review (memory_id, reviewer_id, verdict) VALUES (t.mid(104), carol, 'approve'), (t.mid(114), carol, 'approve');
-  INSERT INTO approval_card (nonce, memory_id, version_at_issue, issued_to, platform, expires_at) VALUES
-   ('00000000-0000-0000-0000-0000000dd001', t.mid(101), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd002', t.mid(102), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd003', t.mid(103), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd004', t.mid(104), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd005', t.mid(105), 1, dave, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd006', t.mid(106), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd007', t.mid(106), 1, frank, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd008', t.mid(108), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd009', t.mid(109), 1, carol, 'slack', now() - interval '1 day'),
-   ('00000000-0000-0000-0000-0000000dd010', t.mid(108), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd011', t.mid(110), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd021', t.mid(1), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd030', t.mid(115), 1, frank, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd031', t.mid(115), 1, frank, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd032', t.mid(112), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd033', t.mid(113), 1, carol, 'slack', default),
-   ('00000000-0000-0000-0000-0000000dd034', t.mid(114), 1, frank, 'slack', default);
-END $do$;
-
-SET ROLE app_rw;
-
--- G3) decide() 반환표 (nonce 로만, 멱등, 낙관적 잠금, 클릭자 = 수신자)
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f5', NULL);
-SELECT t.eq('G3a card issued to carol clicked by frank', $q$SELECT d || '/' || t.state(t.mid(101)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd001', t.mid(101), 1, 'approve') AS d) AS s$q$, 'wrong_clicker/proposed/v1');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.eq('G3b carol approves: result/status', $q$SELECT d || '/' || t.state(t.mid(101)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd001', t.mid(101), 1, 'approve', 'ok') AS d) AS s$q$, 'active/active/v2');
-SELECT t.eq('G3c same nonce again: result/status/reviews', $q$SELECT d || '/' || t.state(t.mid(101)) || '/' || (SELECT count(*) FROM review WHERE card_nonce = '00000000-0000-0000-0000-0000000dd001') FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd001', t.mid(101), 1, 'approve') AS d) AS s$q$, 'duplicate:active/active/v2/1');
-SELECT t.eq('G3d forged nonce', $q$SELECT app_sec.decide(gen_random_uuid(), t.mid(101), 1, 'approve')$q$, 'unknown_nonce');
-SELECT t.eq('G3e approve a supersede: result/old/new', $q$SELECT d || '/' || t.state(t.mid(111)) || '/' || t.state(t.mid(102)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd002', t.mid(102), 1, 'approve') AS d) AS s$q$, 'active/superseded/v2/active/v2');
-SELECT t.eq('G3f memory changed after the card was issued: result/reviews', $q$SELECT d || '/' || t.nreviews(t.mid(103)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd003', t.mid(103), 1, 'approve') AS d) AS s$q$, 'stale/0');
-SELECT t.eq('G3g curator reviews her own proposal', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd004', t.mid(104), 1, 'approve')$q$, 'self_review');
-SELECT t.eq('G3i two_curators, first approval: result/status', $q$SELECT d || '/' || t.state(t.mid(106)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd006', t.mid(106), 1, 'approve') AS d) AS s$q$, 'pending_quorum:1/2/proposed/v1');
-SELECT t.eq('G3r comment: result/status/reviews', $q$SELECT d || '/' || t.state(t.mid(108)) || '/' || t.nreviews(t.mid(108)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd008', t.mid(108), 1, 'comment', 'looks fine') AS d) AS s$q$, 'comment/proposed/v1/1');
-SELECT t.eq('G3s expired card', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd009', t.mid(109), 1, 'approve')$q$, 'expired');
-SELECT t.eq('G3t card for another memory', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd010', t.mid(107), 1, 'approve')$q$, 'mismatch');
-SELECT t.eq('G3u reject: result/status', $q$SELECT d || '/' || t.state(t.mid(110)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd011', t.mid(110), 1, 'reject', 'no') AS d) AS s$q$, 'rejected/rejected/v2');
-SET LOCAL app.op = 'approve';
-SELECT t.errm('G3q carol updates her own proposal directly with a review of her own', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(104)$q$, '%separation of duties%');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', NULL);
-SELECT t.eq('G3h card issued to a reader', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd005', t.mid(105), 1, 'approve')$q$, 'not_curator');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f5', NULL);
-SELECT t.eq('G3v frank clicks carol''s consumed card', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd001', t.mid(101), 1, 'approve')$q$, 'wrong_clicker');
-SELECT t.eq('G3w frank approves a two_curators memory twice: still one distinct reviewer', $q$SELECT a || '/' || b || '/' || t.state(t.mid(115)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd030', t.mid(115), 1, 'approve') AS a) AS x, LATERAL (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd031', t.mid(115), 1, 'approve') AS b) AS y$q$, 'pending_quorum:1/2/pending_quorum:1/2/proposed/v1');
-SELECT t.eq('G3x the proposer''s own review does not count toward the quorum', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd034', t.mid(114), 1, 'approve')$q$, 'pending_quorum:1/2');
-SET LOCAL app.op = 'approve';
-SELECT t.errm('G3j frank updates a two_curators memory directly with one approval', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(106)$q$, '%quorum not met: 1 of 2%');
-SELECT t.eq('G3k second curator: result/status', $q$SELECT d || '/' || t.state(t.mid(106)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd007', t.mid(106), 1, 'approve') AS d) AS s$q$, 'active/active/v2');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f6', NULL);
-SET LOCAL app.op = 'approve';
-SELECT t.errm('G3l grace updates a proposal directly without any review', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(107)$q$, '%quorum not met: 0 of 1%');
-COMMIT;
-
--- G4a-d, h) 확인과 회수, 신뢰: 회수 1 + 승인 1 = -9 점과 강등 유지, 같은 사람의 다음 저위험 제안은 one_curator
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.eq('G4a carol confirms a provisional memory with approve: result/status/last op/review verdict', $q$SELECT d || '/' || t.state(t.mid(112)) || '/' || t.lastop(t.mid(112)) || '/' || t.verdicts(t.mid(112)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd032', t.mid(112), 1, 'approve') AS d) AS s$q$, 'active/active/v2/confirm/confirm');
-SELECT t.eq('G4b carol retracts the provisional memory: result/status/last op', $q$SELECT d || '/' || t.state(t.mid(1)) || '/' || t.lastop(t.mid(1)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd021', t.mid(1), 1, 'retract', 'wrong') AS d) AS s$q$, 'rejected/rejected/v2/retract');
-SELECT t.approve(t.mid(6));
-SELECT t.eq('G4h carol rejects fay''s proposal: result/status', $q$SELECT d || '/' || t.state(t.mid(113)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd033', t.mid(113), 1, 'reject', 'no') AS d) AS s$q$, 'rejected/rejected/v2');
-COMMIT;
-RESET ROLE;
-SELECT t.eq('G4c alice trust after 1 approval and 1 retraction: points/approved/retracted/demoted', $q$SELECT points || '/' || approved || '/' || retracted || '/' || (demoted_until > now()) FROM proposer_trust WHERE principal_id = '00000000-0000-0000-0000-0000000000a1' AND store_id = '00000000-0000-0000-0000-00000000f001'$q$, '-9/1/1/true');
-SELECT t.eq('G4i fay trust after 1 confirmation and 1 rejection: points/approved/rejected/demoted', $q$SELECT points || '/' || approved || '/' || rejected || '/' || coalesce(demoted_until > now(), false) FROM proposer_trust WHERE principal_id = '00000000-0000-0000-0000-0000000000f4' AND store_id = '00000000-0000-0000-0000-00000000f001'$q$, '-4/1/1/false');
-SET ROLE app_rw;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
-SELECT t.prop(30, 'fact', 'after the retraction');
-SELECT t.eq('G4d demoted human, next low-risk proposal', $q$SELECT tier || '/' || status FROM memory WHERE id = t.mid(30)$q$, 'one_curator/proposed');
-COMMIT;
-RESET ROLE;
-
--- G3y, G3z) 정족수는 결정 시점의 curator 만 센다: Heidi 가 승인한 뒤 grant 를 잃으면 그 승인은 세지 않고, Ivan 이 승인해도 1/2 로 대기한다.
--- 현재 curator 두 명(Ivan, Judy)이면 active 가 된다. 새 표가 없는 v1.0 스키마에서는 카드 INSERT 가 실패해 두 시험 모두 실패한다.
-INSERT INTO principal (id, tenant_id, kind, external_id, display_name) VALUES
- ('00000000-0000-0000-0000-0000000000f7','00000000-0000-0000-0000-000000000001','user','heidi','Heidi(영업 큐레이터4)'),
- ('00000000-0000-0000-0000-0000000000f8','00000000-0000-0000-0000-000000000001','user','ivan','Ivan(영업 큐레이터5)'),
- ('00000000-0000-0000-0000-0000000000f9','00000000-0000-0000-0000-000000000001','user','judy','Judy(영업 큐레이터6)');
-INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
- ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f7','curator','00000000-0000-0000-0000-000000000001'),
- ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f8','curator','00000000-0000-0000-0000-000000000001'),
- ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f9','curator','00000000-0000-0000-0000-000000000001');
-DO $do$
-BEGIN
-  IF to_regclass('approval_card') IS NULL THEN RETURN; END IF;
-  INSERT INTO memory (id, tenant_id, store_id, kind, status, tier, title, body, source_refs, created_by)
-  SELECT t.mid(n), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'proposed', 'two_curators',
-    'quorum ' || n, 'body ' || n, '[{"uri":"https://crm/acct/A"}]', '00000000-0000-0000-0000-0000000000a1'
-  FROM generate_series(116, 117) AS n;
-  INSERT INTO approval_card (nonce, memory_id, version_at_issue, issued_to, platform) VALUES
-   ('00000000-0000-0000-0000-0000000dd040', t.mid(116), 1, '00000000-0000-0000-0000-0000000000f7', 'slack'),
-   ('00000000-0000-0000-0000-0000000dd041', t.mid(116), 1, '00000000-0000-0000-0000-0000000000f8', 'slack'),
-   ('00000000-0000-0000-0000-0000000dd042', t.mid(117), 1, '00000000-0000-0000-0000-0000000000f8', 'slack'),
-   ('00000000-0000-0000-0000-0000000dd043', t.mid(117), 1, '00000000-0000-0000-0000-0000000000f9', 'slack');
-END $do$;
-SET ROLE app_rw;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f7', NULL);
-SELECT t.eq('G4j heidi approves while a curator: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd040', t.mid(116), 1, 'approve')$q$, 'pending_quorum:1/2');
-COMMIT;
-RESET ROLE;
-DELETE FROM store_grant WHERE store_id = '00000000-0000-0000-0000-00000000f001' AND principal_id = '00000000-0000-0000-0000-0000000000f7';
-SET ROLE app_rw;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f8', NULL);
-SELECT t.eq('G3y heidi lost the curator role, then ivan approves: result/status', $q$SELECT d || '/' || t.state(t.mid(116)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd041', t.mid(116), 1, 'approve') AS d) AS s$q$, 'pending_quorum:1/2/proposed/v1');
-SET LOCAL app.op = 'approve';
-SELECT t.errm('G4k heidi lost the curator role: direct UPDATE after ivan', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(116)$q$, '%quorum not met: 1 of 2%');
-SELECT t.eq('G4l ivan approves a second memory: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd042', t.mid(117), 1, 'approve')$q$, 'pending_quorum:1/2');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f9', NULL);
-SELECT t.eq('G3z judy, a second current curator: result/status', $q$SELECT d || '/' || t.state(t.mid(117)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd043', t.mid(117), 1, 'approve') AS d) AS s$q$, 'active/active/v2');
-COMMIT;
-RESET ROLE;
-
--- G5) review 는 자신이 판단한 memory 버전에 묶인다 (PR #29 검증자 지적 1). Ivan 이 v1 을 승인한 뒤 본문이 v2 로 바뀌면 Ivan 의 승인은 기록에만 남고 정족수에서 빠진다.
--- 118: 검증자 시나리오. 119: 역할 회수 후 복구하면 이전 승인이 다시 센다 (명시적 동작). 120: 본문이 먼저 바뀌면 낡은 버전의 승인은 stale 로 거절된다.
--- 새 표가 없는 v1.0 스키마에서는 카드 INSERT 가 실패해 모두 실패한다.
-DO $do$
-BEGIN
-  IF to_regclass('approval_card') IS NULL THEN RETURN; END IF;
-  INSERT INTO memory (id, tenant_id, store_id, kind, status, tier, title, body, source_refs, created_by)
-  SELECT t.mid(n), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'proposed', 'two_curators',
-    'version bound ' || n, 'body ' || n, '[{"uri":"https://crm/acct/A"}]', '00000000-0000-0000-0000-0000000000a1'
-  FROM generate_series(118, 120) AS n;
-  INSERT INTO approval_card (nonce, memory_id, version_at_issue, issued_to, platform) VALUES
-   ('00000000-0000-0000-0000-0000000dd050', t.mid(118), 1, '00000000-0000-0000-0000-0000000000f8', 'slack'),
-   ('00000000-0000-0000-0000-0000000dd051', t.mid(118), 2, '00000000-0000-0000-0000-0000000000f9', 'slack'),
-   ('00000000-0000-0000-0000-0000000dd052', t.mid(118), 2, '00000000-0000-0000-0000-0000000000f5', 'slack'),
-   ('00000000-0000-0000-0000-0000000dd053', t.mid(119), 1, '00000000-0000-0000-0000-0000000000f8', 'slack'),
-   ('00000000-0000-0000-0000-0000000dd054', t.mid(119), 1, '00000000-0000-0000-0000-0000000000f9', 'slack'),
-   ('00000000-0000-0000-0000-0000000dd055', t.mid(120), 1, '00000000-0000-0000-0000-0000000000f8', 'slack');
-END $do$;
-SET ROLE app_rw;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f8', NULL);
-SELECT t.eq('G5a ivan approves v1: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd050', t.mid(118), 1, 'approve')$q$, 'pending_quorum:1/2');
-COMMIT;
-RESET ROLE;
-UPDATE memory SET body = 'rewritten by another curator' WHERE id = t.mid(118);
-SELECT t.eq('G5b the body edit bumps the version', $q$SELECT t.state(t.mid(118))$q$, 'proposed/v2');
-SET ROLE app_rw;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f9', NULL);
-SELECT t.eq('G5c judy approves v2, ivan saw only v1: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd051', t.mid(118), 2, 'approve')$q$, 'pending_quorum:1/2');
-SET LOCAL app.op = 'approve';
-SELECT t.errm('G5d judy direct UPDATE cannot activate v2 on ivan''s v1 approval', $q$UPDATE memory SET status = 'active' WHERE id = t.mid(118)$q$, '%quorum not met: 1 of 2%');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f5', NULL);
-SELECT t.eq('G5e frank approves v2, two curators saw v2: result/status', $q$SELECT d || '/' || t.state(t.mid(118)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd052', t.mid(118), 2, 'approve') AS d) AS s$q$, 'active/active/v3');
-COMMIT;
-RESET ROLE;
-SELECT t.eq('G5f review versions stay as judged, the activation does not rewrite them', $q$SELECT string_agg(version::text, '/' ORDER BY id) FROM review WHERE memory_id = t.mid(118)$q$, '1/2/2');
-
-SET ROLE app_rw;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f8', NULL);
-SELECT t.eq('G5g ivan approves 119: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd053', t.mid(119), 1, 'approve')$q$, 'pending_quorum:1/2');
-COMMIT;
-RESET ROLE;
-DELETE FROM store_grant WHERE store_id = '00000000-0000-0000-0000-00000000f001' AND principal_id = '00000000-0000-0000-0000-0000000000f8';
-INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
- ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000000f8','curator','00000000-0000-0000-0000-000000000001');
-SET ROLE app_rw;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f9', NULL);
-SELECT t.eq('G5h ivan lost then regained curator: his earlier approval counts again', $q$SELECT d || '/' || t.state(t.mid(119)) FROM (SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd054', t.mid(119), 1, 'approve') AS d) AS s$q$, 'active/active/v2');
-COMMIT;
-RESET ROLE;
-
-UPDATE memory SET title = 'retitled before ivan clicked' WHERE id = t.mid(120);
-SET ROLE app_rw;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f8', NULL);
-SELECT t.eq('G5i ivan clicks a card for v1 after the edit: result', $q$SELECT app_sec.decide('00000000-0000-0000-0000-0000000dd055', t.mid(120), 1, 'approve')$q$, 'stale');
-COMMIT;
-RESET ROLE;
-SELECT t.eq('G5j the stale click left no review and the memory is untouched', $q$SELECT (SELECT count(*) FROM review WHERE memory_id = t.mid(120)) || '/' || t.state(t.mid(120))$q$, '0/proposed/v2');
-DO $do$ BEGIN
-  IF to_regclass('approval_card') IS NOT NULL THEN
-    INSERT INTO review (memory_id, reviewer_id, verdict, version) VALUES (t.mid(120), '00000000-0000-0000-0000-0000000000f8', 'comment', 99);
-  END IF;
-END $do$;
-SELECT t.eq('G5k a client-supplied review version is overwritten by the memory version', $q$SELECT version::text FROM review WHERE memory_id = t.mid(120)$q$, '2');
 -- ═══ Slack 신원 · 방 바인딩 · 청중 포함 · 서버 결정 origin (C1–C3, C6) ═══════════
 -- 사전 데이터(소유자 권한): 사람 reader 5명(g5-user-1..5, 2 = contributor, 5 = curator)인 store 와 방 5개.
 -- C5PUB 공개 전원 / C5PRV 비공개 1명만 / C5CON Slack Connect 전원 + 외부 1 / C5STALE 전원이지만 스냅샷 2시간 전 / C5EXT 공개 전원 + 외부 1
@@ -1390,13 +1163,6 @@ COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
 SELECT t.err('N28b carol saves it separately by changing the attribute', $q$UPDATE memory SET attribute = ' 기술 담당자' WHERE id = t.mid(302)$q$, 'ok');
 SELECT t.eq('N28c attribute normalized, conflict cleared', $q$SELECT attribute || '/' || coalesce(conflict_with::text, 'NULL') FROM memory WHERE id = t.mid(302)$q$, '기술 담당자/NULL');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
-SELECT t.eq('N29a a curator opens a card for a memory in their store', $q$SELECT (app_sec.issue_card(t.mid(302)) IS NOT NULL)::text$q$, 'true');
-SELECT t.eq('N29b asking again returns the same open card', $q$SELECT (app_sec.issue_card(t.mid(302)) = app_sec.issue_card(t.mid(302)))::text$q$, 'true');
-COMMIT;
-BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-0000000000d1');
-SELECT t.err('N29c an agent context cannot open a card', $q$SELECT app_sec.issue_card(t.mid(302))$q$, '42501');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
 SELECT t.err('N40 insert', $q$INSERT INTO memory (id, tenant_id, store_id, kind, title, body, source_refs, created_by, subject_id, attribute, value)

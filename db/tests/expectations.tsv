@@ -10,8 +10,6 @@ T1	= 0	pass
 T2	propose ok	pass
 T3	(ok)	fail
 T4	rows = 0	pass
-T5	-> 42501	fail
-T5b	= active/active/v2	fail
 T6	rows = 0	pass
 T7	(ok)	pass
 T7b	= true	pass
@@ -199,7 +197,7 @@ G1i	= one_curator/proposed	fail
 G1j	= auto/active/propose,auto_activate	fail
 G1k	= two_curators/proposed	fail
 G1l	= auto:active:0	fail
-G1m	= proposed>provisional:auto_activate:system	fail
+G1m	= provisional>active:confirm:contributor,provisional>active:promote:system	fail
 G1n	= one_curator/proposed/external	fail
 G1o	= two_curators/proposed	fail
 G1p	= two_curators/proposed	fail
@@ -209,55 +207,12 @@ G1s	= one_curator/proposed	fail
 G3m	-> P0001	fail
 G3n	-> P0001	fail
 G3o	-> 42501	fail
-G3p	-> 42501	fail
 G4e	= auto_labeled/provisional	fail
 G4f	= one_curator/proposed	fail
 G4g	= one_curator/proposed	fail
 F6c	= provisional	fail
 N10n	= 0/1	fail
 B6a	= 0	fail
-G3a	= wrong_clicker/proposed/v1	fail
-G3b	= active/active/v2	fail
-G3c	= duplicate:active/active/v2/1	fail
-G3d	= unknown_nonce	fail
-G3e	= active/superseded/v2/active/v2	fail
-G3f	= stale/0	fail
-G3g	= self_review	fail
-G3h	= not_curator	fail
-G3i	= pending_quorum:1/2/proposed/v1	fail
-G3j	-> %quorum not met: 1 of 2%	fail
-G3k	= active/active/v2	fail
-G3l	-> %quorum not met: 0 of 1%	fail
-G3q	-> %separation of duties%	fail
-G3r	= comment/proposed/v1/1	fail
-G3s	= expired	fail
-G3t	= mismatch	fail
-G3u	= rejected/rejected/v2	fail
-G4b	= rejected/rejected/v2/retract	fail
-G4c	= -9/1/1/true	fail
-G4d	= one_curator/proposed	fail
-G3v	= wrong_clicker	fail
-G3w	= pending_quorum:1/2/pending_quorum:1/2/proposed/v1	fail
-G3x	= pending_quorum:1/2	fail
-G4a	= active/active/v2/confirm/confirm	fail
-G4h	= rejected/rejected/v2	fail
-G4i	= -4/1/1/false	fail
-G4j	= pending_quorum:1/2	fail	first approval from a then-current curator
-G3y	= pending_quorum:1/2/proposed/v1	fail	an approval by a since-revoked curator does not count toward the quorum
-G4k	-> %quorum not met: 1 of 2%	fail	direct UPDATE cannot reach active on a revoked curator's approval
-G4l	= pending_quorum:1/2	fail	second memory, first current curator
-G3z	= active/active/v2	fail	two current curators reach quorum
-G5a	= pending_quorum:1/2	fail	ivan approves v1 (the verifier's scenario setup)
-G5b	= proposed/v2	fail	body edit bumps version
-G5c	= pending_quorum:1/2	fail	approval of v1 does not count after the body changed to v2
-G5d	-> %quorum not met: 1 of 2%	fail	direct UPDATE cannot activate v2 on a v1 approval
-G5e	= active/active/v3	fail	two curators who each saw v2 activate it
-G5f	= 1/2/2	fail	review rows keep the version they judged
-G5g	= pending_quorum:1/2	fail	first approval before role revoke
-G5h	= active/active/v2	fail	revoke then restore: earlier approval counts again
-G5i	= stale	fail	click on a card for the old version is stale
-G5j	= 0/proposed/v2	fail	stale click leaves no review
-G5k	= 2	fail	review version comes from the memory, not the client
 N17a	(ok)	fail
 N17b	(ok)	fail
 G7a	= true/0/0	fail	every human reader of the store is a member of the public room
@@ -327,9 +282,6 @@ N28	(ok)	fail	third value proposal
 N28a	= true	fail	conflicts with the live row
 N28b	(ok)	fail	curator edits the attribute of a proposal
 N28c	= 기술 담당자/NULL	fail	attribute normalized and conflict cleared
-N29a	= true	fail	curator opens a card
-N29b	= true	fail	opening a card twice returns the same card
-N29c	-> 42501	fail	agent context cannot open a card
 N40	(ok)	fail	first value with spaces is accepted
 N40a	= active/이민수	fail	value stored normalized (lower, trimmed)
 N41	(ok)	fail	same key and value in other words inserts no row
