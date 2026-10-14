@@ -20,6 +20,11 @@ class PairJudge:
     def same(self, first: str, second: str, first_title: str = "", second_title: str = "") -> bool:
         return {first, second} in SAME_PAIRS
 
+    def same_topic(
+        self, first: str, second: str, first_title: str = "", second_title: str = ""
+    ) -> bool:
+        return True
+
 
 def load() -> ModuleType:
     spec = importlib.util.spec_from_file_location("cleanup_u39", SCRIPT)
