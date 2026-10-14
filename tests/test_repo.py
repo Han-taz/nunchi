@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -7,6 +8,7 @@ import pytest
 from nunchi.db import Pool, request_tx
 from nunchi.domain import repo
 from nunchi.domain.models import (
+    Evidence,
     MemoryKind,
     MemoryOp,
     MemoryOrigin,
@@ -251,6 +253,48 @@ def test_propose_same_key_same_value_reconfirms(fresh_db: str, world: Pool) -> N
     )
     assert after > before
     assert count == 1
+
+
+def _post(n: int, author: str) -> Evidence:
+    return Evidence(
+        uri=f"https://mm.example/devshow/pl/{n}",
+        post_id=f"post-{n}",
+        author=author,
+        author_name=f"name-{author}",
+        said_at=datetime(2026, 10, 14, 9, n, tzinfo=UTC),
+    )
+
+
+@pytest.mark.db
+def test_agreed_consensus_with_evidence_creates_an_active_row_and_retract_expires_it(
+    fresh_db: str, world: Pool
+) -> None:
+    with request_tx(world, USER, None) as conn:
+        made = repo.remember(conn, _fact("Kim"), "agreed", (_post(1, "u1"), _post(2, "u2")))
+        gone = repo.retract(conn, STORE, made.memory_id, (_post(3, "u1"),))
+    rows = _scalar(
+        fresh_db,
+        "SELECT jsonb_agg(jsonb_build_array(op, post_id, author, basis) ORDER BY id)"
+        " FROM memory_evidence WHERE memory_id = %s",
+        made.memory_id,
+    )
+    assert (made.kind, made.status) == ("created", MemoryStatus.ACTIVE)
+    assert gone == ProposeOutcome(
+        kind="retracted", memory_id=made.memory_id, status=MemoryStatus.EXPIRED
+    )
+    assert rows == [
+        ["propose", "post-1", "u1", "agreed"],
+        ["propose", "post-2", "u2", "agreed"],
+        ["retract", "post-3", "u1", "stated"],
+    ]
+
+
+@pytest.mark.db
+def test_retracting_a_provisional_row_rejects_it(world: Pool) -> None:
+    with request_tx(world, USER, None) as conn:
+        made = repo.remember(conn, _fact("Kim"), "stated", (_post(1, "u1"),))
+        gone = repo.retract(conn, STORE, made.memory_id, (_post(2, "u1"),))
+    assert (made.status, gone.status) == (MemoryStatus.PROVISIONAL, MemoryStatus.REJECTED)
 
 
 def _valued(body: str, value: str | None) -> ProposeRequest:

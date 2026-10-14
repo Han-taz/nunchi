@@ -97,6 +97,17 @@ def check_sources(kind: MemoryKind, source_refs: tuple[SourceRef, ...]) -> None:
         raise ValueError(msg)
 
 
+class Evidence(Frozen):
+    """One post that states or confirms a memory (design v1.3 6). The server builds it from the
+    platform's data; a model only ever names a post number."""
+
+    uri: Annotated[str, Field(min_length=1, max_length=2048)]
+    post_id: str
+    author: str
+    author_name: str | None = None
+    said_at: datetime
+
+
 class ProposeRequest(Frozen):
     """What a caller may say. The server owns origin, author, delegate, tenant, status, version."""
 
@@ -197,16 +208,17 @@ class ProposeOutcome(Frozen):
     """What app_sec.remember did (design v1.3 5.1). created: a new row, provisional or active.
     challenged: a new challenger beside the live row it disagrees with (conflict_with).
     superseded: a newer value replaced the live row. confirmed: another author's statement made
-    a provisional row active. reconfirmed: the same value again, no new row. memory_id is the
+    a provisional row active. reconfirmed: the same value again, no new row. retracted: the target
+    was rejected (it was provisional or a challenger) or expired (it was active). memory_id is the
     row the call ended on and status is that row's status."""
 
-    kind: Literal["created", "challenged", "superseded", "confirmed", "reconfirmed"]
+    kind: Literal["created", "challenged", "superseded", "confirmed", "reconfirmed", "retracted"]
     memory_id: UUID
     status: MemoryStatus
     conflict_with: UUID | None = None
 
 
-class Evidence(Frozen):
+class VersionEvidence(Frozen):
     """One message behind a transition: its permalink, who said it and when."""
 
     uri: str | None
@@ -221,7 +233,7 @@ class MemoryVersion(Frozen):
     actor_id: UUID
     reason: str | None
     at: datetime
-    evidence: tuple[Evidence, ...]
+    evidence: tuple[VersionEvidence, ...]
 
 
 class EvidenceSummary(Frozen):

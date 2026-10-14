@@ -1,9 +1,11 @@
+from datetime import UTC, datetime
+
 import psycopg
 import pytest
 
 from nunchi.db import Pool, request_tx
 from nunchi.domain import repo
-from nunchi.domain.models import MemoryKind, ProposeOutcome, ProposeRequest
+from nunchi.domain.models import Evidence, MemoryKind, ProposeOutcome, ProposeRequest
 from tests.conftest import STORE, USER
 
 TITLE = "M1 백엔드 뼈대 작업 현황 (junho.park)"
@@ -22,11 +24,24 @@ SECOND = (
 )
 
 
-def note(pool: Pool, title: str, body: str) -> ProposeOutcome:
+def note(pool: Pool, title: str, body: str, evidence: tuple[Evidence, ...] = ()) -> ProposeOutcome:
     with request_tx(pool, USER, None) as conn:
         return repo.remember(
-            conn, ProposeRequest(store_id=STORE, kind=MemoryKind.NOTE, title=title, body=body)
+            conn,
+            ProposeRequest(store_id=STORE, kind=MemoryKind.NOTE, title=title, body=body),
+            "stated",
+            evidence,
         )
+
+
+def said(n: int, author: str) -> Evidence:
+    return Evidence(
+        uri=f"https://mm.example/devshow/pl/{n}",
+        post_id=f"post-{n}",
+        author=author,
+        author_name=f"name-{author}",
+        said_at=datetime(2026, 10, 14, 9, n, tzinfo=UTC),
+    )
 
 
 def titled(url: str, title: str) -> list[str]:
@@ -79,3 +94,25 @@ def test_a_note_last_confirmed_over_fourteen_days_ago_is_not_absorbed(
 
     assert again.kind == "created"
     assert again.memory_id != first.memory_id
+
+
+@pytest.mark.db
+def test_reconfirming_a_duplicate_note_records_each_new_post_once(
+    pool: Pool, fresh_db: str
+) -> None:
+    first = note(pool, TITLE, FIRST, (said(1, "u1"),))
+    note(pool, TITLE, SECOND, (said(2, "u2"),))
+    note(pool, TITLE, SECOND, (said(2, "u2"),))
+
+    with psycopg.connect(fresh_db) as conn:
+        rows = conn.execute(
+            "SELECT op, post_id, author, author_name, basis FROM memory_evidence"
+            " WHERE memory_id = %s ORDER BY id",
+            (first.memory_id,),
+        ).fetchall()
+        chain = conn.execute("SELECT app_sec.verify_chain(%s)", (first.memory_id,)).fetchone()
+    assert rows == [
+        ("propose", "post-1", "u1", "name-u1", "stated"),
+        ("reconfirm", "post-2", "u2", "name-u2", "stated"),
+    ]
+    assert chain == (True,)

@@ -14,6 +14,7 @@ from nunchi.db import Conn
 from nunchi.domain.models import (
     LABELS,
     DecideOutcome,
+    Evidence,
     EvidenceSummary,
     Memory,
     MemoryKind,
@@ -30,7 +31,6 @@ from nunchi.domain.models import (
 from nunchi.embed import Embedder, embed_query
 
 NOTE_DEDUPE_DAYS = 14
-CONSENSUS = "stated"
 
 _MEMORY_COLUMNS = sql.SQL(
     "id, store_id, kind, status, title, body, source_refs, origin, supersedes_id,"
@@ -113,17 +113,36 @@ def get(conn: Conn, memory_id: UUID) -> Memory | None:
         ).fetchone()
 
 
-def remember(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
+def _evidence_json(req: ProposeRequest, evidence: Sequence[Evidence]) -> Jsonb:
+    """The evidence lines app_sec.remember records. A caller with no platform posts (MCP) cites
+    its source refs, and the function fills in the caller as the author."""
+    if evidence:
+        return Jsonb([e.model_dump(mode="json") for e in evidence])
+    return Jsonb([{"uri": ref.uri} for ref in req.source_refs])
+
+
+def remember(
+    conn: Conn,
+    req: ProposeRequest,
+    consensus: Literal["agreed", "stated"] = "stated",
+    evidence: Sequence[Evidence] = (),
+) -> ProposeOutcome:
     """Write through app_sec.remember, the only way into memory: the function binds author,
     delegate and tenant to the request, decides the state from the key's live row and the
-    consensus, and records the evidence. Every caller says `stated` until U34/U35 bring the
-    consensus judgement; each source ref becomes one evidence line.
+    consensus the caller verified, and records the evidence.
     A keyless note has no key, so a near-duplicate of a recent note in the same store is
     reconfirmed by app_sec.reconfirm_duplicate_note instead of stored again."""
     if req.kind is MemoryKind.NOTE and req.subject_id is None:
         duplicate = conn.execute(
-            "SELECT app_sec.reconfirm_duplicate_note(%s, %s, %s, %s)",
-            (req.store_id, req.title, req.body, NOTE_DEDUPE_DAYS),
+            "SELECT app_sec.reconfirm_duplicate_note(%s, %s, %s, %s, %s, %s)",
+            (
+                req.store_id,
+                req.title,
+                req.body,
+                NOTE_DEDUPE_DAYS,
+                consensus,
+                _evidence_json(req, evidence),
+            ),
         ).fetchone()
         if duplicate is not None and duplicate[0] is not None:
             known = conn.execute(
@@ -146,11 +165,28 @@ def remember(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
             req.attribute,
             req.value,
             Jsonb({"flags": list(req.gate_flags)}),
-            CONSENSUS,
-            Jsonb([{"uri": ref.uri} for ref in req.source_refs]),
+            consensus,
+            _evidence_json(req, evidence),
         ),
     ).fetchone()
     assert row is not None  # noqa: S101 - a set-returning function that writes always returns its row
+    return ProposeOutcome.model_validate(
+        {"kind": row[0], "memory_id": row[1], "status": row[2], "conflict_with": row[3]}
+    )
+
+
+def retract(
+    conn: Conn, store_id: UUID, target: UUID, evidence: Sequence[Evidence]
+) -> ProposeOutcome:
+    """Table rows 9 and 10: a live or challenging row the people said was wrong is rejected
+    (provisional, challenger) or expired (active). The evidence is the posts that said so."""
+    row = conn.execute(
+        "SELECT r_outcome, r_id, r_status, r_conflict FROM app_sec.remember("
+        "%s, 'note'::memory_kind, 'retract', NULL, '[]'::jsonb, NULL, NULL, NULL, '{}'::jsonb,"
+        " 'stated', %s, %s)",
+        (store_id, Jsonb([e.model_dump(mode="json") for e in evidence]), target),
+    ).fetchone()
+    assert row is not None  # noqa: S101 - the function returns its row or raises
     return ProposeOutcome.model_validate(
         {"kind": row[0], "memory_id": row[1], "status": row[2], "conflict_with": row[3]}
     )
