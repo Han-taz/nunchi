@@ -524,7 +524,7 @@ CREATE FUNCTION t.exec_list(r text DEFAULT 'app_rw') RETURNS text LANGUAGE sql A
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.entity_matches,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.pending_dm_cards,app_sec.reconfirm_duplicate_note,app_sec.record_card_sent,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
+  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.pending_dm_cards,app_sec.reconfirm_duplicate_note,app_sec.record_card_sent,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
 SELECT t.eq('P3d nunchi_worker executes exactly the four worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
@@ -876,7 +876,7 @@ COMMIT;
 
 -- G1m) 전이는 코드가 아니라 표다
 SELECT t.eq('G1m memory_transition', $q$SELECT string_agg(from_status || '>' || to_status || ':' || op || ':' || array_to_string(by_roles, '|'), ',' ORDER BY from_status, to_status, op) FROM memory_transition$q$,
-  'provisional>active:confirm:contributor,provisional>active:promote:system,provisional>superseded:supersede:contributor|system,provisional>rejected:retract:contributor,provisional>deleted:delete:curator,challenger>active:confirm:contributor,challenger>active:promote:system,challenger>rejected:retract:contributor,challenger>deleted:delete:curator,active>superseded:supersede:contributor|system,active>expired:retract:contributor,active>expired:expire:system,active>deleted:delete:curator,superseded>deleted:delete:curator,rejected>deleted:delete:curator,expired>deleted:delete:curator');
+  'provisional>active:confirm:contributor,provisional>active:promote:system,provisional>superseded:supersede:contributor|system,provisional>rejected:retract:contributor,provisional>deleted:delete:curator,challenger>provisional:promote:contributor|system,challenger>active:confirm:contributor,challenger>active:promote:system,challenger>rejected:retract:contributor,challenger>deleted:delete:curator,active>superseded:supersede:contributor|system,active>expired:retract:contributor,active>expired:expire:system,active>deleted:delete:curator,superseded>deleted:delete:curator,rejected>deleted:delete:curator,expired>deleted:delete:curator');
 
 -- G3m-o) 전이는 표에 있는 길만, 표의 역할대로만: curator 전이는 요청 컨텍스트가 있어야 하고 system 전이는 없어야 한다
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
@@ -1307,6 +1307,87 @@ SELECT t.err('N33m a curator deletes the memory', $q$UPDATE memory SET status = 
 SELECT t.eq('N33n the delete scrubs the evidence name and keeps the link', $q$SELECT coalesce(author_name, 'NULL') || '/' || uri FROM memory_evidence WHERE memory_id = '00000000-0000-0000-0000-0000000033b5'$q$, 'NULL/https://chat.example/p/1');
 SELECT t.err('N33o scrubbing is the only change allowed, even on a deleted memory', $q$UPDATE memory_evidence SET uri = 'x' WHERE memory_id = '00000000-0000-0000-0000-0000000033b5'$q$, 'P0001');
 ROLLBACK;
+
+-- ═══ N7x) 증거 해시 체인과 쓰기 도우미 (v1.3 §6, U33d): remember() 가 부르는 내부 함수를 소유자 권한으로 직접 본다 ═══
+RESET ROLE;
+SELECT t.eq('N70 evidence_digest ignores the order of the lines', $q$SELECT (app_sec.evidence_digest(ARRAY['b', 'a']) = app_sec.evidence_digest(ARRAY['a', 'b']))::text$q$, 'true');
+SELECT t.eq('N70a evidence_digest follows the content', $q$SELECT (app_sec.evidence_digest(ARRAY['a']) <> app_sec.evidence_digest(ARRAY['a', 'b']))::text$q$, 'true');
+SELECT t.eq('N70b no lines hash the empty string', $q$SELECT app_sec.evidence_digest(ARRAY[]::text[])$q$, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+
+-- 증거 하나가 붙은 reconfirm 이 있는 active 행 (롤백되는 트랜잭션; 새 표가 없는 v1.0 스키마에서는 준비 단계가 건너뛰어지고 검사가 FAIL 한다)
+BEGIN;
+DO $do$ BEGIN
+  IF to_regclass('memory_evidence') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute)
+  VALUES (t.mid(700), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active', 'N71', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n71');
+  PERFORM set_config('app.op', 'reconfirm', true);
+  PERFORM set_config('app.reason', app_sec.evidence_reason('stated', '[{"uri":"https://chat.example/p1","post_id":"p1","author":"u1","author_name":"Yuna","said_at":"2026-01-01T00:00:00+00"}]'), true);
+  UPDATE memory SET last_confirmed_at = clock_timestamp() WHERE id = t.mid(700);
+  PERFORM app_sec.record_evidence(t.mid(700), 'reconfirm', 'stated', '[{"uri":"https://chat.example/p1","post_id":"p1","author":"u1","author_name":"Yuna","said_at":"2026-01-01T00:00:00+00"}]');
+END $do$;
+SELECT t.eq('N71 verify_chain holds and the version log carries evidence:<hex>', $q$SELECT app_sec.verify_chain(t.mid(700))::text || '/' || (SELECT (v.reason ~ '^evidence:[0-9a-f]{64}$')::text FROM memory_version AS v WHERE v.memory_id = t.mid(700) AND v.op = 'reconfirm')$q$, 'true/true');
+SELECT t.eq('N72 new_evidence drops a post already recorded for that op and keeps the rest', $q$SELECT jsonb_array_length(app_sec.new_evidence(t.mid(700), 'reconfirm', '[{"post_id":"p1"},{"post_id":"p2"},{"uri":"x"}]'))::text || '/' || jsonb_array_length(app_sec.new_evidence(t.mid(700), 'confirm', '[{"post_id":"p1"}]'))::text$q$, '2/1');
+SAVEPOINT tamper;
+DO $do$ BEGIN
+  IF to_regclass('memory_evidence') IS NULL THEN RETURN; END IF;
+  ALTER TABLE memory_evidence DISABLE TRIGGER memory_evidence_append_only;
+  UPDATE memory_evidence SET uri = 'https://forged.example/x' WHERE memory_id = t.mid(700);
+  ALTER TABLE memory_evidence ENABLE TRIGGER memory_evidence_append_only;
+END $do$;
+SELECT t.eq('N71a editing an evidence row breaks verify_chain', $q$SELECT app_sec.verify_chain(t.mid(700))::text$q$, 'false');
+ROLLBACK TO tamper;
+DO $do$ BEGIN
+  IF to_regclass('memory_evidence') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory_evidence (memory_id, version, op, uri, post_id, author, said_at, basis)
+  VALUES (t.mid(700), 2, 'reconfirm', 'https://extra.example/y', 'extra1', 'u2', now(), 'stated');
+END $do$;
+SELECT t.eq('N71b an extra evidence row breaks verify_chain', $q$SELECT app_sec.verify_chain(t.mid(700))::text$q$, 'false');
+ROLLBACK TO tamper;
+DO $do$ BEGIN
+  IF to_regclass('memory_evidence') IS NULL THEN RETURN; END IF;
+  ALTER TABLE memory_evidence DISABLE TRIGGER memory_evidence_append_only;
+  DELETE FROM memory_evidence WHERE memory_id = t.mid(700);
+  ALTER TABLE memory_evidence ENABLE TRIGGER memory_evidence_append_only;
+END $do$;
+SELECT t.eq('N71c removing the evidence breaks verify_chain', $q$SELECT app_sec.verify_chain(t.mid(700))::text$q$, 'false');
+ROLLBACK TO tamper;
+DO $do$ BEGIN
+  IF to_regclass('memory_evidence') IS NULL THEN RETURN; END IF;
+  PERFORM app_sec.move(t.mid(700), 'superseded', 'supersede', 'replaced by a newer value');
+END $do$;
+SELECT t.eq('N73 move: status / valid_to today / op / reason in the version log', $q$SELECT m.status::text || '/' || (m.valid_to = current_date)::text || '/' || v.op::text || '/' || v.reason FROM memory AS m, LATERAL (SELECT x.op, x.reason FROM memory_version AS x WHERE x.memory_id = m.id ORDER BY x.id DESC LIMIT 1) AS v WHERE m.id = t.mid(700)$q$, 'superseded/true/supersede/replaced by a newer value');
+ROLLBACK;
+
+-- 고아 challenger (결정 2): 살아 있는 행이 있는 동안은 그대로, 살아 있는 행이 사라지면 provisional 이 된다 (롤백되는 트랜잭션)
+BEGIN;
+DO $do$ BEGIN
+  IF to_regclass('memory_evidence') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, value)
+  VALUES (t.mid(701), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active', 'N74', 'a', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n74', 'a');
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, value, conflict_with, supersedes_id, promote_at)
+  VALUES (t.mid(702), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'challenger', 'N74', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n74', 'b', t.mid(701), t.mid(701), now() + interval '24 hours');
+  PERFORM app_sec.adopt_orphan_challenger('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', 'n74');
+END $do$;
+SELECT t.eq('N74 a challenger stays while its key has a live row', $q$SELECT string_agg(status::text, ',' ORDER BY status) FROM memory WHERE attribute = 'n74'$q$, 'challenger,active');
+DO $do$ BEGIN
+  IF to_regclass('memory_evidence') IS NULL THEN RETURN; END IF;
+  PERFORM app_sec.move(t.mid(701), 'expired', 'expire', 'valid_to passed');
+  PERFORM app_sec.adopt_orphan_challenger('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', 'n74');
+END $do$;
+SELECT t.eq('N74a the live row is gone: the challenger becomes the provisional live row and keeps promote_at', $q$SELECT string_agg(status::text, ',' ORDER BY status) || '/' || (SELECT (conflict_with IS NULL AND promote_at IS NOT NULL)::text FROM memory WHERE id = t.mid(702)) FROM memory WHERE attribute = 'n74'$q$, 'provisional,expired/true');
+ROLLBACK;
+BEGIN;
+DO $do$ BEGIN
+  IF to_regclass('memory_evidence') IS NULL THEN RETURN; END IF;
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, value, valid_to)
+  VALUES (t.mid(703), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active', 'N75', 'a', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n75', 'a', current_date - 1);
+  INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, value, conflict_with, supersedes_id, promote_at)
+  VALUES (t.mid(704), '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'challenger', 'N75', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n75', 'b', t.mid(703), t.mid(703), now() + interval '24 hours');
+END $do$;
+SELECT t.eq('N75 the worker expires the live row (valid_to passed)', $q$SELECT (app_sec.mark_expired() >= 1)::text$q$, 'true');
+SELECT t.eq('N75a decision 2 on expiry too: the challenger became the provisional live row', $q$SELECT string_agg(status::text, ',' ORDER BY status) FROM memory WHERE attribute = 'n75'$q$, 'provisional,expired');
+ROLLBACK;
+SET ROLE app_rw;
 
 RESET ROLE;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
