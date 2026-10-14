@@ -449,3 +449,10 @@ N97	= created/active challenged/challenger	fail
 N97a	= applied/expired/- a:expired,b:provisional	fail
 N97c	= refused/-/not_live	fail
 N97d	(ok)	fail
+N98	= true	fail
+N98a	= border-contrast|border 대비|라이트 테마 border 색의 대비 비율	fail
+N98b	= false/라이트 테마 border 색의 대비 비율	fail
+N98c	-> 23514	fail
+N98d	= 1	fail
+N98e	-> 42501	fail
+N98f	= 0	fail
