@@ -10,6 +10,8 @@ files: db/schema.sql, db/tests/smoke_test.sql, db/tests/expectations.tsv, src/nu
 
 이 문서는 지금 만들고 있는 설계를 적는다. [v1 설계서](team-memory-core-v1.md)에서 바뀌지 않은 부분은 v1이 여전히 기준이다. 바뀐 부분은 이 문서가 우선한다.
 
+5절(승인 모델 B)과 7.3절(승인 카드)은 [메모리 모델 v1.3](memory-model-v1.3.md)이 대체한다. v1.3에서는 쓰기 경로에 사람이 없다.
+
 표기 규칙은 다음과 같다.
 
 - 표기가 없는 내용은 작성 시점(2026-10-13)에 `develop`에 병합돼 있다.
