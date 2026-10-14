@@ -372,7 +372,7 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
 
 -- A10) 앱 역할은 LOGIN NOBYPASSRLS NOINHERIT, RLS 테이블은 소유자에게도 정책을 강제한다
 SELECT t.eq('A10a app_rw login/bypassrls/inherit', $q$SELECT rolcanlogin || '/' || rolbypassrls || '/' || rolinherit FROM pg_roles WHERE rolname = 'app_rw'$q$, 'true/false/false');
-SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,entity,entity_alias,group_member,inbound_event,memory,memory_embedding,memory_evidence,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
+SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'attribute_vocab,deleted_hash,entity,entity_alias,group_member,inbound_event,memory,memory_embedding,memory_evidence,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
 
 SET ROLE app_rw;
 
@@ -549,7 +549,7 @@ CREATE FUNCTION t.exec_list(r text DEFAULT 'app_rw') RETURNS text LANGUAGE sql A
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.reconfirm_duplicate_note,app_sec.remember,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.room_containment,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
+  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.reconfirm_duplicate_note,app_sec.register_attribute,app_sec.remember,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.room_containment,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
 SELECT t.eq('P3d nunchi_worker executes exactly the five worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
@@ -1722,6 +1722,19 @@ COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', NULL);
 SELECT t.eq('N97c a reader without contributor rights is refused as not_live', $q$SELECT t.dec(t.rid('n87', 'provisional'), 'retract')$q$, 'refused/-/not_live');
 SELECT t.err('N97d decide needs a source ref', $q$SELECT app_sec.decide(t.rid('n87', 'provisional'), 'retract', 1, '[]')$q$, '22023');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N98 a contributor registers a vocabulary entry', $q$SELECT app_sec.register_attribute('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', 'Border-Contrast', '  border 대비 ', '라이트 테마 border 색의 대비 비율')::text$q$, 'true');
+SELECT t.eq('N98a the key is stored normalized with its label and question', $q$SELECT key || '|' || label || '|' || question FROM attribute_vocab WHERE key = 'border-contrast'$q$, 'border-contrast|border 대비|라이트 테마 border 색의 대비 비율');
+SELECT t.eq('N98b registering the same key again keeps the first entry and says false', $q$SELECT app_sec.register_attribute('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', 'border-contrast', 'x', 'y')::text || '/' || (SELECT question FROM attribute_vocab WHERE key = 'border-contrast')$q$, 'false/라이트 테마 border 색의 대비 비율');
+SELECT t.err('N98c a key longer than 40 characters is refused', $q$SELECT app_sec.register_attribute('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', repeat('k', 41), 'l', 'q')$q$, '23514');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', NULL);
+SELECT t.eq('N98d a reader reads the entry', $q$SELECT count(*)::text FROM attribute_vocab WHERE key = 'border-contrast'$q$, '1');
+SELECT t.err('N98e a reader cannot register', $q$SELECT app_sec.register_attribute('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', 'reader-key', 'l', 'q')$q$, '42501');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000b1', NULL);
+SELECT t.eq('N98f a user without access to the store reads no entry', $q$SELECT count(*)::text FROM attribute_vocab$q$, '0');
 COMMIT;
 RESET ROLE;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
