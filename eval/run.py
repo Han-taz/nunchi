@@ -45,7 +45,8 @@ from nunchi.extract import (
 )
 
 RESULTS = Path(__file__).parent / "results"
-LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL)
+# The proposer reads its own proposals and nothing approves them now, so the search counts them.
+LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL, MemoryStatus.PROPOSED)
 SEARCH_DEPTH = 5
 
 
@@ -114,7 +115,7 @@ def _outcome(
     described: tuple[str, UUID | None, UUID | None] | None,
 ) -> Outcome:
     if isinstance(result, Created) and described is not None:
-        verdict = _approve(pool, result) if result.status is MemoryStatus.PROPOSED else "active"
+        verdict = result.status.value
         return Outcome(
             message=msg,
             result="created",
@@ -133,20 +134,6 @@ def _outcome(
             subject_id=described[1],
         )
     return Outcome(message=msg, result="rejected" if isinstance(result, Rejected) else "skipped")
-
-
-def _approve(pool: Pool, created: Created) -> str:
-    """Curators accept the proposal in turn, as curators who agree with every update would.
-    Returns the last answer of app_sec.decide; 'active' means the memory went live."""
-    verdict = "pending"
-    for curator in CURATORS:
-        with request_tx(pool, curator, None) as conn:
-            memory = repo.get(conn, created.memory_id)
-            assert memory is not None  # noqa: S101 - a curator of the store can read its proposals
-            verdict = repo.decide(conn, created.memory_id, None, "approve", memory.version)
-        if verdict == "active":
-            break
-    return verdict
 
 
 def run_search(  # noqa: PLR0913, PLR0917 - the knobs a sweep varies

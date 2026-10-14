@@ -6,7 +6,7 @@ visible; nothing here filters by caller."""
 
 from collections.abc import Awaitable, Callable
 from datetime import date
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
 import anyio.to_thread
@@ -17,7 +17,6 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.server import Settings as FastMcpSettings
 from mcp.server.transport_security import TransportSecuritySettings
-from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
 
 from nunchi.auth.identity import authenticate
@@ -212,8 +211,8 @@ def _add_write_tools(
     ) -> dict[str, Any]:
         """Save a durable fact, decision or procedure that the team should keep. Do not call this
         for chit-chat, temporary plans or open discussion. Always pass source_refs: a link to where
-        the text came from. Returns one of skipped, rejected (rule ids), created (id, status, tier,
-        conflict_with) or reconfirmed (id); a created memory may still wait for a curator."""
+        the text came from. Returns one of skipped, rejected (rule ids), created (id, status,
+        conflict_with) or reconfirmed (id)."""
         context = CaptureContext(
             store_id=store_id,
             origin=MemoryOrigin.EXTERNAL,
@@ -231,44 +230,6 @@ def _add_write_tools(
                 raise ToolError(msg) from exc
 
         return await run(ctx, work)
-
-    @mcp.tool()
-    async def decide(
-        ctx: Context,  # type: ignore[type-arg]
-        memory_id: UUID,
-        decision: Literal["approve", "reject"],
-        expected_version: int,
-    ) -> dict[str, Any]:
-        """Approve or reject a proposed memory. Human curators only: an agent is refused. Pass the
-        version you read from `get` or `history`. Returns outcome applied (status), pending (have,
-        needed approvals) or refused (reason)."""
-        if ctx.request_context.request.headers.get(AGENT_HEADER) is not None:  # type: ignore[union-attr]
-            return {"outcome": "refused", "reason": "agent_may_not_decide"}
-
-        def work(conn: Conn) -> dict[str, Any]:
-            nonce = conn.execute("SELECT app_sec.issue_card(%s)", (memory_id,)).fetchone()
-            assert nonce is not None  # noqa: S101 - a SELECT of a function always returns one row
-            row = conn.execute(
-                "SELECT app_sec.decide(%s, %s, %s, %s)",
-                (nonce[0], memory_id, expected_version, decision),
-            ).fetchone()
-            assert row is not None  # noqa: S101
-            return decided_outcome(str(row[0]))
-
-        try:
-            return await run(ctx, work)
-        except pg_errors.InsufficientPrivilege:
-            return {"outcome": "refused", "reason": "not_curator"}
-
-
-def decided_outcome(result: str) -> dict[str, Any]:
-    """decide() returns the new status, `pending_quorum:have/needed`, or a refusal word."""
-    if result in ("active", "rejected"):
-        return {"outcome": "applied", "status": result}
-    if result.startswith("pending_quorum:"):
-        have, needed = result.removeprefix("pending_quorum:").split("/")
-        return {"outcome": "pending", "have": int(have), "needed": int(needed)}
-    return {"outcome": "refused", "reason": result}
 
 
 def _present(mid: UUID, title: str, body: str | None, origin: Any, status: Any) -> dict[str, Any]:  # noqa: ANN401

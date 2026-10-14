@@ -5,9 +5,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from nunchi.api.deps import Runner, identity, runner
+from nunchi.api.deps import Runner, runner
 from nunchi.api.problems import ApiError
-from nunchi.auth.identity import Identity
 from nunchi.domain import repo
 from nunchi.domain.models import (
     Memory,
@@ -24,18 +23,6 @@ from nunchi.domain.models import (
 class ProposeOutcomeBody(BaseModel):
     id: UUID
     outcome: Literal["created", "reconfirmed"]
-
-
-class DecideRequest(BaseModel):
-    decision: Literal["approve", "reject"]
-    expected_version: int
-    nonce: UUID | None = None
-
-
-class DecisionBody(BaseModel):
-    outcome: Literal["active", "rejected", "pending_quorum"]
-    have: int | None = None
-    needed: int | None = None
 
 
 class ClientProposal(ProposeRequest):
@@ -106,38 +93,3 @@ def history(memory_id: UUID, run: Run) -> list[MemoryVersion]:
 def dependents(memory_id: UUID, run: Run) -> list[MemorySummary]:
     _visible(run, memory_id)
     return run(lambda c: repo.dependents(c, memory_id))
-
-
-REFUSALS: dict[str, HTTPStatus] = {
-    "unknown_nonce": HTTPStatus.NOT_FOUND,
-    "wrong_clicker": HTTPStatus.FORBIDDEN,
-    "not_curator": HTTPStatus.FORBIDDEN,
-    "self_review": HTTPStatus.FORBIDDEN,
-    "stale": HTTPStatus.CONFLICT,
-    "mismatch": HTTPStatus.CONFLICT,
-    "expired": HTTPStatus.CONFLICT,
-    "duplicate": HTTPStatus.CONFLICT,
-}
-
-
-def _decision_body(answer: str) -> DecisionBody:
-    if answer in ("active", "rejected"):
-        return DecisionBody(outcome=answer)
-    if answer.startswith("pending_quorum:"):
-        have, _, needed = answer.removeprefix("pending_quorum:").partition("/")
-        return DecisionBody(outcome="pending_quorum", have=int(have), needed=int(needed))
-    refusal = answer.partition(":")[0]
-    raise ApiError(REFUSALS.get(refusal, HTTPStatus.CONFLICT), answer)
-
-
-@router.post("/memories/{memory_id}/decide")
-def decide(
-    memory_id: UUID, body: DecideRequest, run: Run, who: Annotated[Identity, Depends(identity)]
-) -> DecisionBody:
-    """Humans decide; an agent identity never does, whatever its grants."""
-    if who.agent_id is not None:
-        raise ApiError(HTTPStatus.FORBIDDEN, "agents cannot decide")
-    answer = run(
-        lambda c: repo.decide(c, memory_id, body.nonce, body.decision, body.expected_version)
-    )
-    return _decision_body(answer)

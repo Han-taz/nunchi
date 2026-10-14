@@ -81,7 +81,7 @@ def test_harness_runs_five_messages_with_the_oracle(admin_url: str) -> None:
     assert report["extraction"]["precision"] == 1.0
     assert report["extraction"]["recall"] == 1.0
     assert report["fragmentation"]["entity_rows"] == 2
-    assert report["extraction"]["unapproved"] == 0
+    assert report["extraction"]["unapproved"] == 2
     assert report["search"] == {"recall@1": 1.0, "recall@5": 1.0}
     assert "extraction precision        1.0" in table(report)
 
@@ -181,10 +181,10 @@ def test_sweep_scores_trigram_then_every_embed_text_floor_and_k(admin_url: str) 
     assert grid[9] == ("title+body", 0.2, 20)
     assert grid[-1] == ("title+body", 0.5, 60)
     # Equal scores break ties by random row id, so recall wobbles by a query or two between runs.
-    # The ten multi-item windows add distractors to the same queries: the first 110 messages alone
-    # still score 0.62 and 0.667.
-    assert rows[0]["recall@1"] == pytest.approx(0.55, abs=0.05)
-    assert rows[0]["recall@5"] == pytest.approx(0.62, abs=0.05)
+    # Nothing approves a proposal any more, so a restated value sits next to the old one as a
+    # distractor: ten runs gave recall@1 0.500 or 0.524 and recall@5 0.643 or 0.667.
+    assert rows[0]["recall@1"] == pytest.approx(0.51, abs=0.02)
+    assert rows[0]["recall@5"] == pytest.approx(0.655, abs=0.02)
     assert sweep_table(rows).splitlines()[1].split()[:3] == ["trigram", "-", "-"]
 
 
@@ -293,20 +293,20 @@ def test_window_metrics_count_by_hand() -> None:
 
 
 @pytest.mark.db
-def test_v11_baseline_on_the_window_corpus_is_recorded_literally(
+def test_window_corpus_without_an_approval_path_is_recorded_literally(
     admin_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     windows = load_windows()
     report = run_window_eval(
         admin_url, OracleExtractor(window_messages(windows)), windows, judge=OracleJudge()
     )
-    assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 3
+    assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 5
     assert report["duplicate_per_key"]["rate"] == 0.143
-    assert report["wrongly_active"] == {"active": 5, "wrong": 2, "rate": 0.4}
+    assert report["wrongly_active"] == {"active": 0, "wrong": 0, "rate": None}
     assert report["retraction_recall"] == {"retractions": 2, "retracted": 0, "recall": 0.0}
     argv = ["--db", admin_url, "--extractor", "noisy", "--windows", "--out-dir", str(tmp_path)]
     assert main(argv) == 0
-    assert "live style rows (wm01)    3" in capsys.readouterr().out
+    assert "live style rows (wm01)    5" in capsys.readouterr().out
     saved = json.loads(next(tmp_path.glob("windows-*.json")).read_text())
     assert saved["duplicate_per_key"]["rate"] == 0.143
 

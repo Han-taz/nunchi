@@ -23,7 +23,7 @@ class Outcome(BaseModel):
     db_kind: str | None = None
     subject_id: UUID | None = None
     conflicted: bool = False
-    verdict: str = "active"  # last answer of decide(); anything else is left unapproved
+    verdict: str = "active"  # status right after capture; anything but active is not live yet
 
     @property
     def remembered(self) -> bool:
