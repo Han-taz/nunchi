@@ -310,9 +310,15 @@ def test_window_corpus_ends_where_the_gold_table_says_and_noisy_keys_drift_apart
     )
     assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 1
     assert report["duplicate_per_key"]["rate"] == 0.0
-    assert report["wrongly_active"] == {"active": 2, "wrong": 0, "rate": 0.0}
+    statuses = report["duplicate_per_key"]["statuses"]
+    assert (statuses["wm03"], statuses["wm04"], statuses["wm05"]) == (
+        ["active"],
+        ["provisional"],
+        ["provisional"],
+    )
+    assert report["wrongly_active"] == {"active": 3, "wrong": 0, "rate": 0.0}
     assert report["retraction_recall"] == {"retractions": 2, "retracted": 2, "recall": 1.0}
-    assert report["final_statuses"] == {"active": 2, "provisional": 3, "expired": 1, "rejected": 1}
+    assert report["final_statuses"] == {"active": 3, "provisional": 2, "expired": 1, "rejected": 1}
     assert report["consensus_check"] == {
         "items": 13,
         "claimed_agreed": 4,
@@ -327,7 +333,7 @@ def test_window_corpus_ends_where_the_gold_table_says_and_noisy_keys_drift_apart
         windows,
         judge=OracleJudge(),
     )
-    assert noisy["duplicate_per_key"]["statuses"]["wm01"] == ["active", "active", "provisional"]
+    assert noisy["duplicate_per_key"]["statuses"]["wm01"] == ["active", "active", "active"]
     assert noisy["retraction_recall"] == {"retractions": 2, "retracted": 2, "recall": 1.0}
     assert noisy["consensus_check"] == {
         "items": 13,
