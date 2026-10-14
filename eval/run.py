@@ -272,19 +272,24 @@ def run_window_eval(
     return {
         "windows": len(windows),
         **window_metrics(windows, outcomes, statuses),
+        "relation_accuracy": score.relation_accuracy(outcomes),
         "consensus_check": consensus_metrics(windows, checks),
         "final_statuses": dict(Counter(statuses.values())),
     }
 
 
 def window_table(report: dict[str, Any]) -> str:
-    wrong, dup, ret, con = (
+    lost, wrong, dup, ret, con = (
+        report["wrongly_superseded"],
         report["wrongly_active"],
         report["duplicate_per_key"],
         report["retraction_recall"],
         report["consensus_check"],
     )
+    rel = report["relation_accuracy"]
     rows = [
+        ("wrongly superseded", f"{lost['count']} {lost['memories']}"),
+        ("same / new / update", f"{rel['same']} / {rel['new']} / {rel['update']}"),
         ("wrongly active", f"{wrong['rate']} ({wrong['wrong']}/{wrong['active']})"),
         ("duplicate per key", f"{dup['rate']} ({dup['duplicated']}/{dup['memories']})"),
         ("live style rows (wm01)", dup["rows_per_memory"].get("wm01")),
@@ -392,6 +397,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="replay eval/corpus/windows.jsonl and print the v1.3 window metrics",
     )
+    parser.add_argument(
+        "--lenient-judge",
+        action="store_true",
+        help="fake extractors: the value judge that failed live, every pair the same topic",
+    )
     parser.add_argument("--limit", type=int, help="replay only the first N messages")
     parser.add_argument("--out-dir", type=Path, default=RESULTS)
     args = parser.parse_args(argv)
@@ -407,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         extractor = OracleExtractor(
             messages if args.windows else load_messages(), noisy=args.extractor == "noisy"
         )
-        judge = OracleJudge()
+        judge = OracleJudge(messages, lenient=args.lenient_judge)
     else:
         judge = build_judge(os.environ)
         extractor = build_extractor(os.environ)

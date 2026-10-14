@@ -9,6 +9,7 @@ means the questions differ: a new entry, and no existing decision is touched."""
 
 import re
 import unicodedata
+from collections.abc import Mapping
 from uuid import UUID
 
 from nunchi.db import Conn
@@ -53,22 +54,49 @@ def settle_attribute(
     conn: Conn, store_id: UUID, subject_id: UUID, draft: ProposalDraft, judge: ValueJudge | None
 ) -> ProposalDraft:
     """The draft with its attribute set to the key of the vocabulary entry it answers, registering
-    a new entry when it answers a question the subject has not got."""
+    a new entry when it answers a question the subject has not got. A key the subject has is
+    trusted, unless the draft states the question it answers and the judge says that is not the
+    key's question: a model that copied a neighbour's key must not replace its decision."""
     if draft.attribute is None:
         return draft
     entries = load(conn, store_id, subject_id)
-    known = {e.key for e in entries}
-    key = next((k for k in (_normalized(draft.attribute), slug(draft.attribute)) if k in known), "")
+    by_key = {e.key: e for e in entries}
+    key = next(
+        (k for k in (_normalized(draft.attribute), slug(draft.attribute)) if k in by_key), ""
+    )
+    asked = draft.attribute_question
+    wanted = draft.attribute
+    if key and _is_other_question(by_key[key], asked, judge):
+        entries, key, wanted = (
+            tuple(e for e in entries if e.key != key),
+            "",
+            draft.attribute_label or asked or "",
+        )
     if not key:
         label = (draft.attribute_label or draft.attribute)[:LABEL_CHARS]
-        question = (draft.attribute_question or label)[:QUESTION_CHARS]
-        key = _same_question_key(entries, question, judge) or slug(draft.attribute)
-        if key not in known:
+        question = (asked or label)[:QUESTION_CHARS]
+        key = _same_question_key(entries, question, judge) or _unused(by_key, wanted)
+        if key not in by_key:
             conn.execute(
                 "SELECT app_sec.register_attribute(%s, %s, %s, %s, %s)",
                 (store_id, subject_id, key, label, question),
             )
     return draft.model_copy(update={"attribute": key})
+
+
+def _is_other_question(entry: VocabEntry, asked: str | None, judge: ValueJudge | None) -> bool:
+    return bool(
+        asked
+        and judge
+        and asked != entry.question
+        and not judge.same_question(asked, entry.question)
+    )
+
+
+def _unused(taken: Mapping[str, VocabEntry], text: str) -> str:
+    base = slug(text)
+    numbered = (f"{base[: KEY_CHARS - 3]}-{n}" for n in range(2, 100))
+    return next(k for k in (base, *numbered) if k not in taken)
 
 
 def _same_question_key(

@@ -32,6 +32,7 @@ ATTRIBUTE_VARIANTS = {
     "알림 채널": ("알림 채널명", "알람 채널"),
     "DB 선택": ("데이터베이스 선택", "DB 종류"),
     "팀 정보 출처": ("_user_teams 조회 방식",),
+    "cloudflare beacon": ("v1.0 포함 여부",),
 }
 
 
@@ -62,10 +63,19 @@ GOLD_VALUES = {
 WINDOW_VALUES = {
     "wm01": "CSS Modules + CSS 커스텀 프로퍼티", "wm02": "12/18", "wm03": "#ops-alerts",
     "wm04": "목요일", "wm05": "warn", "wm06": "화요일", "wm07": "30일",
+    "wm08": "라이트 1.4:1 미달", "wm09": "라이트 2.46:1 미달",
+    "wm10": "resolvedTheme 동적 반영", "wm11": "v1.0에서 제거",
 }  # fmt: skip
 ALL_VALUES = {**GOLD_VALUES, **WINDOW_VALUES}
 # The live restatement: one model call wrote "CSS 변수" for "CSS 커스텀 프로퍼티".
-WINDOW_VARIANTS = {"wm01": ("CSS Modules + CSS 변수",)}
+WINDOW_VARIANTS = {
+    "wm01": ("CSS Modules + CSS 변수",),
+    "wm10": ("resolvedTheme 기준 동적 표시",),
+    "wm11": ("v1.0 범위에서 제외",),
+}
+# Noisy only. The live copy: asked about the tertiary text's contrast, a model took the key of the
+# border contrast row sitting among its candidates.
+COPIES_KEY = {"wm09": "border 대비"}
 
 # Noisy only. Person values come back with an honorific or a title on later mentions.
 HONORIFIC_SUFFIXES = ("님", " 매니저님")
@@ -94,7 +104,6 @@ def _wording(m: Message) -> str:
 
 
 _QUESTION_SUFFIX = "은(는) 무엇인가"
-_CONCEPT = {variant: gold for gold, variants in ATTRIBUTE_VARIANTS.items() for variant in variants}
 
 
 def question_of(attribute: str) -> str:
@@ -103,28 +112,38 @@ def question_of(attribute: str) -> str:
 
 
 def _concept(question: str) -> str:
-    name = question.removesuffix(_QUESTION_SUFFIX)
-    return _CONCEPT.get(name, name)
+    return question.removesuffix(_QUESTION_SUFFIX)
 
 
 class OracleJudge:
     """Gold knowledge: values are the same when they spell one gold value (the database stores
-    them lowercased)."""
+    them lowercased), and two questions are the same when they name one gold attribute.
+    `lenient` is the value judge that failed live: it calls every pair of values the same topic.
+    It leaves same_question gold, so a run measures where the server asks the judge, not how good
+    a model is at questions; that needs `--extractor claude` and an API key."""
 
-    def __init__(self) -> None:
+    def __init__(self, messages: Sequence[Message] = (), *, lenient: bool = False) -> None:
+        self._lenient = lenient
+        variants = {**VALUE_VARIANTS, **WINDOW_VARIANTS}
         self._group = {
             spelling.casefold(): m
-            for m, variants in {**VALUE_VARIANTS, **WINDOW_VARIANTS}.items()
-            for spelling in (ALL_VALUES[m], *variants)
+            for m, gold in ALL_VALUES.items()
+            for spelling in (gold, *variants.get(m, ()))
         }
+        self._attribute = {m.memory: m.attribute for m in messages}
 
     def same(self, first: str, second: str, first_title: str = "", second_title: str = "") -> bool:
         a, b = self._group.get(first.casefold()), self._group.get(second.casefold())
         return a is not None and a == b
 
+    def same_topic(
+        self, first: str, second: str, first_title: str = "", second_title: str = ""
+    ) -> bool:
+        """The pre-U41 question: do two values answer one gold attribute? Unknown values do."""
+        a, b = (self._attribute.get(self._group.get(v.casefold())) for v in (first, second))
+        return self._lenient or a is None or b is None or a == b
+
     def same_question(self, first: str, second: str) -> bool:
-        """Gold knowledge: two questions ask the same thing when they name one gold attribute,
-        whichever spelling of it they use."""
         return _concept(first) == _concept(second)
 
 
@@ -175,6 +194,8 @@ class OracleExtractor:
             return None
         text = _wording(gold) if self._noisy else self._first[gold.memory]
         attribute = self._spell(gold.attribute, ATTRIBUTE_VARIANTS, gold.subject or "")
+        if self._noisy and not self._said[gold.memory]:
+            attribute = COPIES_KEY.get(gold.memory, attribute)
         draft = ProposalDraft(
             kind=gold.kind,
             title=text[:_TITLE_CHARS],
@@ -182,7 +203,7 @@ class OracleExtractor:
             value=self._value(gold.memory),
             subject_name=self._spell(gold.subject, SUBJECT_VARIANTS, ""),
             attribute=attribute,
-            attribute_question=question_of(attribute) if attribute else None,
+            attribute_question=question_of(gold.attribute) if gold.attribute else None,
             source_refs=context.source_refs,
             origin=context.origin,
             **self._claim(gold),
