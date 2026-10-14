@@ -1,4 +1,4 @@
--- Forward migration 0028: challenger status, memory_evidence, store_autonomy, basis and promote_at (design v1.3 U32a).
+-- Forward migration 0028: challenger, memory_evidence, store_autonomy, basis, promote_at (design v1.3 U32a).
 -- Statements are copied from db/schema.sql (the schema-drift job compares the two).
 -- ALTER TYPE ... ADD VALUE cannot be used again inside the transaction that adds it, and the migration runner
 -- applies every pending migration in one transaction. The challenger index and the promote_at check use the new
@@ -6,7 +6,9 @@
 -- is dropped first and recreated below in its final form.
 ALTER TYPE memory_status RENAME TO memory_status_old;
 ALTER TYPE memory_op RENAME TO memory_op_old;
-CREATE TYPE memory_status AS ENUM ('proposed', 'provisional', 'challenger', 'active', 'superseded', 'rejected', 'expired', 'deleted');
+CREATE TYPE memory_status AS ENUM (
+  'proposed', 'provisional', 'challenger', 'active', 'superseded', 'rejected', 'expired', 'deleted'
+);
 -- 현재 상태에 이른 근거 (v1.3 §3.1)
 CREATE TYPE promotion_basis AS ENUM ('agreed', 'stated', 'timer', 'agent', 'user_store', 'migrated');
 CREATE TYPE memory_op AS ENUM (
@@ -18,7 +20,8 @@ DROP POLICY memory_read ON memory;
 DROP POLICY memory_propose ON memory;
 ALTER TABLE memory DROP CONSTRAINT memory_check;
 DROP INDEX memory_live_key_uidx;
-DROP FUNCTION app_sec.search(text, uuid[], memory_status_old[], memory_kind[], real[], text, real, integer);
+DROP FUNCTION
+app_sec.search(text, uuid[], memory_status_old[], memory_kind[], real[], text, real, integer);
 DROP FUNCTION app_sec.write_version(memory, memory_op_old, uuid, text);
 DROP FUNCTION app_sec.quorum(memory, memory_status_old);
 DROP FUNCTION app_sec.is_stale(memory_status_old, uuid, memory_kind, timestamptz);
@@ -41,7 +44,7 @@ ALTER TABLE memory
 ADD COLUMN basis promotion_basis,
 ADD COLUMN promote_at timestamptz,
 ADD CONSTRAINT memory_check CHECK (status <> 'deleted' OR body IS null),
-ADD CONSTRAINT memory_promote_at_state CHECK (promote_at IS NULL OR status IN ('provisional', 'challenger'));
+ADD CONSTRAINT memory_promote_at_state CHECK (promote_at IS null OR status IN ('provisional', 'challenger'));
 -- 한 스토어 안에서 키마다 살아 있는 기억은 최대 하나다. 교체는 decide() 가 이전 행을 먼저 superseded 로 바꾼 뒤 새 행을 활성화한다
 CREATE UNIQUE INDEX memory_live_key_uidx ON memory (store_id, subject_id, attribute)
 WHERE status IN ('active', 'provisional');
@@ -283,7 +286,9 @@ REVOKE ALL ON FUNCTION app_sec.write_version(memory, memory_op, uuid, text) FROM
 REVOKE ALL ON FUNCTION app_sec.is_stale(memory_status, uuid, memory_kind, timestamptz) FROM public, app_rw;
 REVOKE ALL ON FUNCTION app_sec.quorum(memory, memory_status) FROM public, app_rw;
 REVOKE ALL ON FUNCTION app_sec.memory_as_of(uuid, uuid, text, date) FROM public, app_rw;
-REVOKE ALL ON FUNCTION app_sec.search(text, uuid[], memory_status[], memory_kind[], real[], text, real, integer) FROM public, app_rw;
+REVOKE ALL ON FUNCTION
+app_sec.search(text, uuid[], memory_status[], memory_kind[], real[], text, real, integer)
+FROM public, app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.quorum(memory, memory_status) TO app_rw;
 GRANT EXECUTE ON FUNCTION app_sec.memory_as_of(uuid, uuid, text, date) TO app_rw;
 GRANT EXECUTE ON FUNCTION

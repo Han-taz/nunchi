@@ -136,7 +136,9 @@ CREATE TABLE entity_alias (
 -- ── 메모리 ───────────────────────────────────────────────
 CREATE TYPE memory_kind AS ENUM ('fact', 'decision', 'procedure', 'note');
 -- provisional = 검토 전에 이미 노출된 상태. 불리언이 아니라 상태다 (전이 표가 허용하는 길만 있다)
-CREATE TYPE memory_status AS ENUM ('proposed', 'provisional', 'challenger', 'active', 'superseded', 'rejected', 'expired', 'deleted');
+CREATE TYPE memory_status AS ENUM (
+  'proposed', 'provisional', 'challenger', 'active', 'superseded', 'rejected', 'expired', 'deleted'
+);
 -- 현재 상태에 이른 근거 (v1.3 §3.1)
 CREATE TYPE promotion_basis AS ENUM ('agreed', 'stated', 'timer', 'agent', 'user_store', 'migrated');
 -- 위험 등급: risk_tier() 가 정하고 approval_tier_rule 이 등급마다 최초 상태와 승인 정족수를 정한다
@@ -172,7 +174,7 @@ CREATE TABLE memory (
   last_confirmed_at timestamptz NOT NULL DEFAULT now(), -- 생성, 같은 값 재수집(reconfirm), curator 확인 때 갱신
   value text,                                           -- 짧은 정규 답 (예: 이민수), norm_text() 로 정규화. NULL = 옛 행
   basis promotion_basis,                                -- 현재 상태에 이른 근거 (v1.3 §3.1)
-  promote_at timestamptz,                               -- provisional 과 challenger 가 반박 없이 active 가 되는 시각. 그 외 상태에서는 NULL
+  promote_at timestamptz,                               -- provisional 과 challenger 가 반박 없이 active 가 되는 시각. 그 외에는 null
   CONSTRAINT memory_subject_same_tenant FOREIGN KEY (tenant_id, subject_id) REFERENCES entity (tenant_id, id),
   CONSTRAINT memory_key_by_kind CHECK (
     CASE
@@ -182,7 +184,7 @@ CREATE TABLE memory (
   ),
   CONSTRAINT memory_store_same_tenant FOREIGN KEY (tenant_id, store_id) REFERENCES store (tenant_id, id),
   CHECK (status <> 'deleted' OR body IS null),
-  CONSTRAINT memory_promote_at_state CHECK (promote_at IS NULL OR status IN ('provisional', 'challenger')),
+  CONSTRAINT memory_promote_at_state CHECK (promote_at IS null OR status IN ('provisional', 'challenger')),
   CHECK (kind = 'note' OR jsonb_array_length(source_refs) > 0)  -- note 외에는 출처 필수
 );
 
