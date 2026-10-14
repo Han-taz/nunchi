@@ -195,7 +195,7 @@ memory_evidence(
 
 1. `status = 'provisional' AND promote_at <= p_now`인 행을 active로 바꾼다(`promote`, `basis = timer`). 그 키에 열린 challenger가 있으면 승격하지 않는다(challenger 쪽 규칙이 먼저 결론을 낸다).
 2. `status = 'challenger' AND promote_at <= p_now`인 행마다 한 트랜잭션에서 살아 있는 행을 superseded(`valid_to = 오늘`)로, challenger를 active로 바꾼다.
-3. 기억의 출처가 digest 바인딩이면, 그 바인딩의 `digest_cursor`가 `promote_at`을 지났을 때만 1, 2를 한다. digest가 밀려서 아직 읽지 않은 반박이 있을 수 있기 때문이다. 바인딩 출처가 없는 기억(MCP, 📌)은 시각만 본다.
+3. 기억의 출처가 digest 바인딩이면, 그 바인딩의 `digest_cursor`가 `promote_at`을 지났을 때만 1, 2를 한다. digest가 밀려서 아직 읽지 않은 반박이 있을 수 있기 때문이다. 바인딩 출처가 없는 기억(MCP, 📌)은 시각만 본다. digest가 꺼진 바인딩도 시각만 본다. `origin = external`인 행은 `promote_at`이 남아 있어도 건드리지 않는다. 결과는 `(promoted, replaced)` 개수이고, 이미 올린 행은 다시 걸리지 않아 몇 번을 불러도 같은 상태가 된다.
 4. `mark_expired()`(지금과 같다).
 
 `stale` 라벨은 지금처럼 검색 결과에만 붙는다. v1.2 4절의 "아직 맞나요?" 카드는 만들지 않는다.

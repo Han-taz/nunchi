@@ -68,7 +68,10 @@ def main(argv: list[str] | None = None) -> int:
     with psycopg.connect(url) as conn:
         while True:
             result = run_once(conn)
-            sys.stdout.write(f"worker: expired {result.expired}, stale {len(result.stale)}\n")
+            sys.stdout.write(
+                f"worker: promoted {result.promoted}, replaced {result.replaced},"
+                f" expired {result.expired}, stale {len(result.stale)}\n"
+            )
             if embedder is not None:
                 sys.stdout.write(_embed_all(conn, embedder))
             sys.stdout.flush()

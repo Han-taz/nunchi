@@ -8,7 +8,8 @@ import json
 import os
 import sys
 from collections import Counter
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -16,7 +17,7 @@ from uuid import UUID
 import psycopg
 
 from eval import score
-from eval.corpus import Message, Query, load_messages, load_queries, window_groups
+from eval.corpus import START, Message, Query, load_messages, load_queries, window_groups
 from eval.db import CONTRIBUTOR, CURATORS, STORE, fresh_database, superuser_url
 from eval.embedding import embed_documents
 from eval.oracle import ConceptEmbedder, OracleExtractor, OracleJudge
@@ -52,6 +53,7 @@ from nunchi.extract import (
     build_extractor,
     build_judge,
 )
+from nunchi.worker.freshness import run_once
 
 RESULTS = Path(__file__).parent / "results"
 LIVE = (MemoryStatus.ACTIVE, MemoryStatus.PROVISIONAL)
@@ -210,6 +212,29 @@ def run_eval(  # noqa: PLR0913, PLR0917 - one run's inputs
     }
 
 
+def worker_clock(url: str, first_day: date) -> Callable[[Pool, date], None]:
+    """The `tick` of replay_windows: the worker runs once at each day boundary. Timers are stamped
+    with the real clock, so the tick moves them instead: every timer that already existed at the
+    previous tick gets the days that passed taken off, and the worker then runs at the real now.
+    A row written during a day is a day old at the second boundary after it, not the first."""
+    previous = first_day - timedelta(days=1)
+    seen: list[UUID] = []
+
+    def tick(_pool: Pool, day: date) -> None:
+        nonlocal previous, seen
+        elapsed, previous = day - previous, day
+        with psycopg.connect(url) as conn:
+            conn.execute(
+                "UPDATE memory SET promote_at = promote_at - %s WHERE id = ANY(%s)", (elapsed, seen)
+            )
+            run_once(conn)
+            seen = [
+                r[0] for r in conn.execute("SELECT id FROM memory WHERE promote_at IS NOT NULL")
+            ]
+
+    return tick
+
+
 def run_window_eval(
     admin_url: str,
     extractor: Extractor,
@@ -232,7 +257,12 @@ def run_window_eval(
     with fresh_database(admin_url) as app_url:
         pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
         try:
-            outcomes, statuses = replay_windows(pool, windows, replay_checked)
+            outcomes, statuses = replay_windows(
+                pool,
+                windows,
+                replay_checked,
+                worker_clock(superuser_url(admin_url, app_url), START),
+            )
         finally:
             pool.close()
     return {

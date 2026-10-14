@@ -66,11 +66,15 @@ def test_cli_embeds_after_the_freshness_pass(
     monkeypatch.setenv("NUNCHI_DATABASE_URL", fresh_db)
     monkeypatch.setattr("nunchi.worker.__main__.embedder_from_settings", lambda s: embedded)
     assert main(["--once"]) == 0
-    assert capsys.readouterr().out == "worker: expired 0, stale 0\nworker: embedded 1\n"
+    assert (
+        capsys.readouterr().out
+        == "worker: promoted 0, replaced 0, expired 0, stale 0\nworker: embedded 1\n"
+    )
     monkeypatch.setattr("nunchi.worker.__main__.embedder_from_settings", lambda s: DownEmbedder())
     with psycopg.connect(fresh_db) as conn:
         conn.execute("UPDATE memory SET body = '또 바뀜' WHERE id = %s", (FIRST,))
     assert main(["--once"]) == 0
     assert capsys.readouterr().out == (
-        "worker: expired 0, stale 0\nworker: embedded 0, stopped: service is down\n"
+        "worker: promoted 0, replaced 0, expired 0, stale 0\n"
+        "worker: embedded 0, stopped: service is down\n"
     )

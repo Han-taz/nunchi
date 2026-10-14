@@ -1,5 +1,7 @@
 import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -8,7 +10,7 @@ import pytest
 from nunchi import migrate
 from nunchi.worker.__main__ import main
 from nunchi.worker.freshness import run_once
-from tests.conftest import REPO, USER
+from tests.conftest import OTHER, REPO, USER
 
 TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000c1")
 STORE = uuid.UUID("00000000-0000-0000-0000-0000000000d1")
@@ -129,6 +131,140 @@ def test_search_reports_stale_and_last_confirmed(
     assert (row[0], row[1], row[2]) == (mid, True, True)
 
 
+T0 = datetime(2026, 8, 5, 9, 0, tzinfo=UTC)
+CHANNEL = "c" * 26
+
+
+@dataclass(frozen=True)
+class Row:
+    attr: str
+    value: str
+    status: str
+    promote_at: datetime | None = None
+    origin: str = "internal"
+    refs: str = '[{"uri":"x"}]'
+
+
+def live_row(c: psycopg.Connection[tuple[object, ...]], r: Row) -> uuid.UUID:
+    row = c.execute(
+        "INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, origin,"
+        " created_by, subject_id, attribute, value, promote_at, basis)"
+        " VALUES (%s, %s, 'fact', %s, %s, 'b', %s, %s, %s, %s, %s, %s, %s, 'stated') RETURNING id",
+        (
+            TENANT,
+            STORE,
+            r.status,
+            f"{r.attr} {r.value}",
+            r.refs,
+            r.origin,
+            USER,
+            SUBJECT,
+            r.attr,
+            r.value,
+            r.promote_at,
+        ),
+    ).fetchone()
+    assert row is not None
+    return uuid.UUID(str(row[0]))
+
+
+def statuses(c: psycopg.Connection[tuple[object, ...]], attr: str) -> dict[str, str]:
+    rows = c.execute(
+        "SELECT value, status::text FROM memory WHERE attribute = %s", (attr,)
+    ).fetchall()
+    return {str(v): str(st) for v, st in rows}
+
+
+def test_provisional_is_promoted_at_24_hours_and_not_a_minute_before(
+    conn: psycopg.Connection[tuple[object, ...]],
+) -> None:
+    mid = live_row(conn, Row("owner", "a", "provisional", T0 + timedelta(hours=24)))
+    early = run_once(conn, now=T0 + timedelta(hours=23, minutes=59))
+    assert (early.promoted, statuses(conn, "owner")) == (0, {"a": "provisional"})
+    due = run_once(conn, now=T0 + timedelta(hours=24))
+    assert (due.promoted, due.replaced, statuses(conn, "owner")) == (1, 0, {"a": "active"})
+    row = conn.execute(
+        "SELECT basis::text, promote_at, (SELECT count(*) FROM memory_evidence"
+        " WHERE memory_id = %s AND op = 'promote' AND basis = 'timer') FROM memory WHERE id = %s",
+        (mid, mid),
+    ).fetchone()
+    assert row == ("timer", None, 1)
+    again = run_once(conn, now=T0 + timedelta(hours=48))
+    assert (again.promoted, again.replaced) == (0, 0)
+
+
+def test_challenger_replaces_the_live_row_when_its_time_comes(
+    conn: psycopg.Connection[tuple[object, ...]],
+) -> None:
+    live_row(conn, Row("lead", "old", "active"))
+    live_row(conn, Row("lead", "new", "challenger", T0 + timedelta(hours=24)))
+    assert run_once(conn, now=T0 + timedelta(hours=23)).replaced == 0
+    assert statuses(conn, "lead") == {"old": "active", "new": "challenger"}
+    result = run_once(conn, now=T0 + timedelta(hours=24))
+    assert (result.promoted, result.replaced) == (0, 1)
+    assert statuses(conn, "lead") == {"old": "superseded", "new": "active"}
+    ended = conn.execute(
+        "SELECT valid_to = current_date FROM memory WHERE attribute = 'lead' AND value = 'old'"
+    ).fetchone()
+    assert ended == (True,)
+
+
+def test_an_open_challenger_holds_back_the_provisional_row_of_its_key(
+    conn: psycopg.Connection[tuple[object, ...]],
+) -> None:
+    live_row(conn, Row("role", "a", "provisional", T0 + timedelta(hours=24)))
+    live_row(conn, Row("role", "b", "challenger", T0 + timedelta(hours=25)))
+    run_once(conn, now=T0 + timedelta(hours=24, minutes=30))
+    assert statuses(conn, "role") == {"a": "provisional", "b": "challenger"}
+    run_once(conn, now=T0 + timedelta(hours=25))
+    assert statuses(conn, "role") == {"a": "superseded", "b": "active"}
+
+
+def test_external_origin_is_never_promoted_by_the_timer(
+    conn: psycopg.Connection[tuple[object, ...]],
+) -> None:
+    live_row(conn, Row("ext", "a", "provisional", T0 + timedelta(hours=24), origin="external"))
+    result = run_once(conn, now=T0 + timedelta(days=3650))
+    assert (result.promoted, statuses(conn, "ext")) == (0, {"a": "provisional"})
+
+
+def test_the_digest_cursor_must_be_past_promote_at(
+    conn: psycopg.Connection[tuple[object, ...]],
+) -> None:
+    conn.execute(
+        "INSERT INTO principal (id, tenant_id, kind, external_id, display_name)"
+        " VALUES (%s, %s, 'user', 'v', 'y')",
+        (OTHER, TENANT),
+    )
+    conn.execute(
+        "INSERT INTO store_grant (store_id, principal_id, role, tenant_id)"
+        " VALUES (%s, %s, 'curator', %s)",
+        (STORE, OTHER, TENANT),
+    )
+    conn.execute(
+        "INSERT INTO room_member (tenant_id, platform, workspace_id, channel_id, platform_user_id)"
+        " VALUES (%s, 'mattermost', 'team1', %s, 'u1')",
+        (TENANT, CHANNEL),
+    )
+    binding = conn.execute(
+        "INSERT INTO room_binding (tenant_id, platform, workspace_id, channel_id, kind, store_id,"
+        " bound_by, confirmed_by, confirmed_at, digest_enabled)"
+        " VALUES (%s, 'mattermost', 'team1', %s, 'public', %s, %s, %s, now(), true) RETURNING id",
+        (TENANT, CHANNEL, STORE, USER, OTHER),
+    ).fetchone()
+    assert binding is not None
+    refs = f'[{{"uri":"u","system":"mattermost","workspace_id":"team1","channel_id":"{CHANNEL}"}}]'
+    due_at = T0 + timedelta(hours=24)
+    live_row(conn, Row("slot", "a", "provisional", due_at, refs=refs))
+    due_ms = int(due_at.timestamp() * 1000)
+    conn.execute("UPDATE room_binding SET digest_cursor = %s", (due_ms - 1,))
+    assert run_once(conn, now=due_at).promoted == 0
+    conn.execute("UPDATE room_binding SET digest_cursor = %s", (due_ms,))
+    assert run_once(conn, now=due_at).promoted == 1
+    post = conn.execute("SELECT post_id FROM memory_evidence WHERE op = 'promote'").fetchone()
+    assert post == (str(due_ms),)
+
+
 def test_cli_once_prints_counts(
     fresh_db: str,
     conn: psycopg.Connection[tuple[object, ...]],
@@ -140,7 +276,7 @@ def test_cli_once_prints_counts(
     conn.commit()
     monkeypatch.setenv("NUNCHI_DATABASE_URL", fresh_db)
     assert main(["--once"]) == 0
-    assert capsys.readouterr().out == "worker: expired 1, stale 1\n"
+    assert capsys.readouterr().out == "worker: promoted 0, replaced 0, expired 1, stale 1\n"
 
 
 def test_cli_every_repeats_after_sleeping(
@@ -161,7 +297,10 @@ def test_cli_every_repeats_after_sleeping(
     monkeypatch.setattr("nunchi.worker.__main__.time.sleep", fake_sleep)
     with pytest.raises(KeyboardInterrupt):
         main(["--every", "60"])
-    assert (sleeps, capsys.readouterr().out) == ([60.0, 60.0], "worker: expired 0, stale 0\n" * 2)
+    assert (sleeps, capsys.readouterr().out) == (
+        [60.0, 60.0],
+        "worker: promoted 0, replaced 0, expired 0, stale 0\n" * 2,
+    )
 
 
 def test_cli_needs_exactly_one_mode() -> None:

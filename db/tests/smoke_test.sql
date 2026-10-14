@@ -552,8 +552,8 @@ SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exe
   'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.reconfirm_duplicate_note,app_sec.remember,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
-SELECT t.eq('P3d nunchi_worker executes exactly the four worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
-  'app_sec.mark_expired,app_sec.memories_to_embed,app_sec.put_embedding,app_sec.stale_memories | tables=0');
+SELECT t.eq('P3d nunchi_worker executes exactly the five worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
+  'app_sec.mark_expired,app_sec.memories_to_embed,app_sec.promote_due,app_sec.put_embedding,app_sec.stale_memories | tables=0');
 BEGIN;
 CREATE FUNCTION public.t_eq() RETURNS void LANGUAGE sql AS $$ SELECT $$;
 SELECT t.eq('P3b a production function named public.t_eq is listed', $q$SELECT (t.exec_list() LIKE '%public.t_eq%')::text$q$, 'true');
@@ -1581,6 +1581,80 @@ BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
 SELECT t.eq('N69 no value: the body hash decides, a restatement with a value is the same, another body is a challenger', $q$SELECT t.remb('n69', '본문 69', NULL, 'agreed') || ' ' || t.remb('n69', '본문 69', 'v69') || ' ' || t.remb('n69', '다른 본문', 'w69')$q$, 'created/active reconfirmed/active challenged/challenger');
 SELECT t.eq('N69a the restatement filled in the value', $q$SELECT t.col('n69', 'active', 'value')$q$, 'v69');
 COMMIT;
+
+-- 타이머 승격 promote_due(p_now) (U36): 시각, digest 커서, 열린 challenger, 출처 origin 이 조건이다. p_now 로 시계를 넘긴다
+-- t_after = 시계를 p_at 으로 두고 워커를 한 번 돌린 뒤 그 속성의 행들을 '값:상태' 로 보여 준다 (다른 테스트가 남긴 행도 같이 올라가므로 개수는 보지 않는다)
+RESET ROLE;
+CREATE FUNCTION t.after(p_at timestamptz, p_attr text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM app_sec.promote_due(p_at);
+  RETURN t.states(p_attr);
+END $$;
+CREATE FUNCTION t.pat(p_attr text, p_status memory_status) RETURNS timestamptz LANGUAGE plpgsql STABLE AS $$
+DECLARE r timestamptz;
+BEGIN
+  EXECUTE format('SELECT promote_at FROM memory WHERE id = t.rid(%L, %L)', p_attr, p_status) INTO r;
+  RETURN r;
+END $$;
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N80s setup: a stated memory is provisional', $q$SELECT t.rem('n70', 'a')$q$, 'created/provisional');
+COMMIT;
+RESET ROLE;
+SELECT t.eq('N80a a minute before promote_at a provisional memory stays provisional', $q$SELECT t.after(t.pat('n70', 'provisional') - interval '1 minute', 'n70')$q$, 'a:provisional');
+SELECT t.eq('N80b at promote_at it is active', $q$SELECT t.after(t.pat('n70', 'provisional'), 'n70')$q$, 'a:active');
+SELECT t.eq('N80d by timer, promote_at cleared, one timer evidence row, valid chain', $q$SELECT m.basis::text || '/' || (SELECT count(*) FROM memory_evidence AS e WHERE e.memory_id = m.id AND e.op = 'promote' AND e.basis = 'timer') || '/' || app_sec.verify_chain(m.id) || '/' || (m.promote_at IS NULL) FROM memory AS m WHERE m.id = t.rid('n70', 'active')$q$, 'timer/1/true/true');
+SELECT t.eq('N80c running again at the same time adds no evidence and changes nothing', $q$SELECT t.after((SELECT said_at FROM memory_evidence WHERE memory_id = t.rid('n70', 'active') AND op = 'promote'), 'n70') || ' ' || (SELECT count(*) FROM memory_evidence WHERE memory_id = t.rid('n70', 'active') AND op = 'promote')$q$, 'a:active 1');
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N81s setup: agreed active, then another value is a challenger', $q$SELECT t.rem('n71', 'a', 'agreed') || ' ' || t.rem('n71', 'b')$q$, 'created/active challenged/challenger');
+COMMIT;
+RESET ROLE;
+SELECT t.eq('N81 a challenger one minute early changes nothing', $q$SELECT t.after(t.pat('n71', 'challenger') - interval '1 minute', 'n71')$q$, 'a:active,b:challenger');
+SELECT t.eq('N81a at promote_at the old row is superseded and the challenger is active', $q$SELECT t.after(t.pat('n71', 'challenger'), 'n71')$q$, 'a:superseded,b:active');
+SELECT t.eq('N81b the old row ends today, the new one is active by timer and supersedes it, chain valid', $q$SELECT t.col('n71', 'superseded', 'valid_to = current_date') || ' ' || t.col('n71', 'active', 'basis::text || ''/'' || (supersedes_id = t.rid(''n71'', ''superseded''))::text') || ' ' || app_sec.verify_chain(t.rid('n71', 'active'))$q$, 'true timer/true true');
+
+-- 열린 challenger 가 있으면 그 키의 provisional 은 따로 승격하지 않는다. challenger 의 시각이 되면 둘이 한 번에 정리된다
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N82s setup: provisional with an open challenger', $q$SELECT t.rem('n72', 'a') || ' ' || t.rem('n72', 'b')$q$, 'created/provisional challenged/challenger');
+COMMIT;
+RESET ROLE;
+DO $do$ BEGIN
+  UPDATE memory SET promote_at = promote_at + interval '1 hour' WHERE id = t.rid('n72', 'challenger');
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup failed: % %', SQLSTATE, SQLERRM;
+END $do$;
+SELECT t.eq('N82a the provisional is due but the open challenger blocks it', $q$SELECT t.after(t.pat('n72', 'provisional'), 'n72')$q$, 'a:provisional,b:challenger');
+SELECT t.eq('N82b when the challenger is due it replaces the provisional row', $q$SELECT t.after(t.pat('n72', 'challenger'), 'n72')$q$, 'a:superseded,b:active');
+
+-- 외부 출처는 시간으로 승격하지 않는다 (결정 1): promote_at 이 남아 있어도 걸리지 않는다
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N83s setup', $q$SELECT t.rem('n73', 'a')$q$, 'created/provisional');
+COMMIT;
+RESET ROLE;
+DO $do$ BEGIN
+  UPDATE memory SET origin = 'external' WHERE id = t.rid('n73', 'provisional');
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup failed: % %', SQLSTATE, SQLERRM;
+END $do$;
+SELECT t.eq('N83a an external-origin provisional row with a due promote_at stays provisional', $q$SELECT t.after(now() + interval '100 years', 'n73')$q$, 'a:provisional');
+
+-- digest 커서: 바인딩의 digest 가 켜져 있으면 커서가 promote_at 을 지나야 한다. 꺼져 있으면 시각만 본다
+DO $do$ BEGIN
+  INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, value, promote_at, basis) VALUES
+ ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000005f1', 'fact', 'provisional', 'N84 on', 'b', t.slack_ref('C5PUB'), t.g5(1), '00000000-0000-0000-0000-0000000e0a01', 'n74on', 'n74on', now() + interval '24 hours', 'stated'),
+ ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000005f1', 'fact', 'provisional', 'N84 off', 'b', t.slack_ref('C5STALE'), t.g5(1), '00000000-0000-0000-0000-0000000e0a01', 'n74off', 'n74off', now() + interval '24 hours', 'stated');
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup failed: % %', SQLSTATE, SQLERRM;
+END $do$;
+DO $do$ BEGIN
+  UPDATE room_binding SET digest_enabled = true, digest_cursor = floor(extract(EPOCH FROM now() + interval '24 hours') * 1000)::bigint - 1000 WHERE channel_id = 'C5PUB';
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup failed: % %', SQLSTATE, SQLERRM;
+END $do$;
+SELECT t.eq('N84 the digest has not read up to promote_at: the memory waits', $q$SELECT t.after(now() + interval '25 hours', 'n74on')$q$, 'n74on:provisional');
+SELECT t.eq('N84a a binding with digest off does not hold the memory back', $q$SELECT t.after(now() + interval '25 hours', 'n74off')$q$, 'n74off:active');
+DO $do$ BEGIN
+  UPDATE room_binding SET digest_cursor = ceil(extract(EPOCH FROM now() + interval '24 hours') * 1000)::bigint WHERE channel_id = 'C5PUB';
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup failed: % %', SQLSTATE, SQLERRM;
+END $do$;
+SELECT t.eq('N84b once the cursor passes promote_at it is promoted', $q$SELECT t.after(now() + interval '25 hours', 'n74on')$q$, 'n74on:active');
+SELECT t.eq('N84c and the evidence post_id is the cursor', $q$SELECT e.post_id = b.digest_cursor::text FROM memory_evidence AS e, room_binding AS b WHERE e.memory_id = t.rid('n74on', 'active') AND e.op = 'promote' AND b.channel_id = 'C5PUB'$q$, 'true');
 RESET ROLE;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;
