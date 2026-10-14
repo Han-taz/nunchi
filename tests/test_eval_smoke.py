@@ -301,7 +301,7 @@ def test_window_metrics_count_by_hand() -> None:
 
 
 @pytest.mark.db
-def test_window_corpus_without_an_approval_path_is_recorded_literally(
+def test_window_corpus_ends_with_the_timer_promotions_and_without_retractions(
     admin_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     windows = load_windows()
@@ -310,7 +310,13 @@ def test_window_corpus_without_an_approval_path_is_recorded_literally(
     )
     assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 3
     assert report["duplicate_per_key"]["rate"] == 0.143
-    assert report["wrongly_active"] == {"active": 0, "wrong": 0, "rate": None}
+    statuses = report["duplicate_per_key"]["statuses"]
+    assert (statuses["wm03"], statuses["wm04"], statuses["wm05"]) == (
+        ["active"],
+        ["provisional"],
+        ["provisional"],
+    )
+    assert report["wrongly_active"] == {"active": 7, "wrong": 2, "rate": 0.286}
     assert report["retraction_recall"] == {"retractions": 2, "retracted": 0, "recall": 0.0}
     assert report["consensus_check"] == {
         "items": 13,

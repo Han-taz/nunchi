@@ -20,14 +20,19 @@ class StaleMemory(Frozen):
 
 
 class RunResult(Frozen):
+    promoted: int
+    replaced: int
     expired: int
     stale: tuple[StaleMemory, ...]
 
 
-def run_once(conn: Conn, stale_limit: int = STALE_LIMIT) -> RunResult:
-    """Expire rows whose valid_to has passed, then list the stale ones (oldest first).
-    Sending the "still correct?" cards is the caller's job."""
+def run_once(conn: Conn, stale_limit: int = STALE_LIMIT, now: datetime | None = None) -> RunResult:
+    """Promote provisional and challenger rows whose time has come, expire rows whose valid_to
+    has passed, then list the stale ones (oldest first). `now` is the promotion clock."""
     with conn.transaction():
+        promoted, replaced = conn.execute(
+            "SELECT promoted, replaced FROM app_sec.promote_due(coalesce(%s, now()))", (now,)
+        ).fetchall()[0]
         expired = conn.execute("SELECT app_sec.mark_expired()").fetchall()[0][0]
         with conn.cursor(row_factory=class_row(StaleMemory)) as cur:
             stale = cur.execute(
@@ -35,4 +40,9 @@ def run_once(conn: Conn, stale_limit: int = STALE_LIMIT) -> RunResult:
                 " FROM app_sec.stale_memories(%s)",
                 (stale_limit,),
             ).fetchall()
-    return RunResult(expired=int(str(expired)), stale=tuple(stale))
+    return RunResult(
+        promoted=int(str(promoted)),
+        replaced=int(str(replaced)),
+        expired=int(str(expired)),
+        stale=tuple(stale),
+    )

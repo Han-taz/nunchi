@@ -23,6 +23,6 @@ openssl genrsa -out deploy/.dev/private.pem 2048 2>/dev/null
 uv run --locked python scripts/e2e/story.py keys deploy/.dev
 "${compose[@]}" up -d --build --wait
 uv run --locked python scripts/e2e/story.py run deploy/.dev "http://127.0.0.1:${MCP_PORT}/mcp"
-"${compose[@]}" logs worker | grep -q "worker: expired 0, stale 0"
+"${compose[@]}" logs worker | grep -q "worker: promoted 0, replaced 0, expired 0, stale 0"
 echo "worker pass: ok"
 echo "e2e: all steps passed"
