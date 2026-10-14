@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from eval.db import CONTRIBUTOR, CURATORS, STORE, fresh_database, superuser_url
 from eval.embedding import embed_documents
 from eval.oracle import ConceptEmbedder, OracleExtractor, OracleJudge
 from eval.score import Outcome
+from eval.windows import Window, load_windows, replay_windows, window_messages, window_metrics
 from nunchi.capture import (
     CaptureContext,
     CaptureResult,
@@ -213,6 +215,46 @@ def run_eval(  # noqa: PLR0913, PLR0917 - one run's inputs
     }
 
 
+def run_window_eval(
+    admin_url: str,
+    extractor: Extractor,
+    windows: list[Window],
+    embedder: Embedder | None = None,
+    judge: ValueJudge | None = None,
+) -> dict[str, Any]:
+    """Replay the window corpus in day order and score where each gold memory ended up."""
+    with fresh_database(admin_url) as app_url:
+        pool = open_pool(Settings(database_url=app_url, pool_max_size=2))
+        try:
+            outcomes, statuses = replay_windows(
+                pool,
+                windows,
+                lambda p, group: replay_group(p, extractor, group, embedder, judge),
+            )
+        finally:
+            pool.close()
+    return {
+        "windows": len(windows),
+        **window_metrics(windows, outcomes, statuses),
+        "final_statuses": dict(Counter(statuses.values())),
+    }
+
+
+def window_table(report: dict[str, Any]) -> str:
+    wrong, dup, ret = (
+        report["wrongly_active"],
+        report["duplicate_per_key"],
+        report["retraction_recall"],
+    )
+    rows = [
+        ("wrongly active", f"{wrong['rate']} ({wrong['wrong']}/{wrong['active']})"),
+        ("duplicate per key", f"{dup['rate']} ({dup['duplicated']}/{dup['memories']})"),
+        ("live style rows (wm01)", dup["rows_per_memory"].get("wm01")),
+        ("retraction recall", f"{ret['recall']} ({ret['retracted']}/{ret['retractions']})"),
+    ]
+    return "\n".join([f"{report['windows']} windows", *(f"{n:<26}{v}" for n, v in rows)])
+
+
 def table(report: dict[str, Any]) -> str:
     ex, rel, frag, srch = (
         report["extraction"],
@@ -263,6 +305,24 @@ def _resolve_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _save_windows(
+    args: argparse.Namespace,
+    extractor: Extractor,
+    windows: list[Window],
+    embedder: Embedder | None,
+    judge: ValueJudge | None,
+) -> int:
+    report = run_window_eval(args.db, extractor, windows, embedder, judge)
+    report["config"] = {"extractor": args.extractor, "embedder": args.embedder}
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    (args.out_dir / f"windows-{stamp}.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=1)
+    )
+    sys.stdout.write(window_table(report) + "\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m eval.run")
     parser.add_argument("--db", help="superuser URL of a Postgres server (not needed for sweeps)")
@@ -283,6 +343,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="attribute cosine floors, and the value judge when an API key is set, on gold pairs",
     )
+    parser.add_argument(
+        "--windows",
+        action="store_true",
+        help="replay eval/corpus/windows.jsonl and print the v1.3 window metrics",
+    )
     parser.add_argument("--limit", type=int, help="replay only the first N messages")
     parser.add_argument("--out-dir", type=Path, default=RESULTS)
     args = parser.parse_args(argv)
@@ -290,11 +355,14 @@ def main(argv: list[str] | None = None) -> int:
         return _resolve_sweep(args)
     if args.db is None:
         parser.error("--db is required")
-    messages = load_messages(args.limit)
+    windows = load_windows()
+    messages = window_messages(windows) if args.windows else load_messages(args.limit)
     extractor: Extractor
     judge: ValueJudge | None = None
     if args.extractor in ("fake", "noisy"):
-        extractor = OracleExtractor(load_messages(), noisy=args.extractor == "noisy")
+        extractor = OracleExtractor(
+            messages if args.windows else load_messages(), noisy=args.extractor == "noisy"
+        )
         judge = OracleJudge()
     else:
         judge = build_judge(os.environ)
@@ -319,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
         (args.out_dir / f"sweep-{stamp}.json").write_text(json.dumps(rows, indent=1))
         sys.stdout.write(sweep_table(rows) + "\n")
         return 0
+    if args.windows:
+        return _save_windows(args, extractor, windows, embedder, judge)
     report = run_eval(args.db, extractor, messages, load_queries(), embedder, judge)
     report["config"] = {
         "extractor": args.extractor,
