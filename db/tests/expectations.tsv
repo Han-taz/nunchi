@@ -387,3 +387,16 @@ G10d	= U5X1=false,U5X2=true	fail	snapshot equals the new list
 G10e	-> 42501	fail	unknown binding refused
 G11a	= false	fail	an unissued card cannot be marked sent
 G12a	= NULL	fail	no absorb outside contributor stores
+N32a	= challenger,active	fail	live row and challenger coexist
+N32b	-> 23505	fail	one challenger per key
+N32c	(ok)	fail	challenger on another key
+N32d	-> 23514	fail	promote_at only while provisional or challenger
+N32e	= true/stated	fail	promote_at and basis columns
+N32f	= 24:00:00	fail	store_autonomy default
+N32g	-> 23514	fail	promote_after must be positive
+N32h	-> P0001	fail	evidence is append-only: update
+N32i	-> P0001	fail	evidence is append-only: delete
+N32j	-> 23505	fail	one evidence row per post
+N32k	= Yuna	fail	evidence follows memory visibility
+N32l	-> 42501	fail	app_rw cannot write evidence
+N32m	-> 42501	fail	app_rw cannot read store_autonomy
