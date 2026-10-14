@@ -289,9 +289,22 @@ def _gold_window_outcomes() -> tuple[list[Outcome], dict[UUID, str]]:
     return outcomes, statuses
 
 
+def test_a_gold_active_memory_left_with_no_live_row_is_wrongly_superseded() -> None:
+    outcomes, statuses = _gold_window_outcomes()
+    messages = {m.id: m for m in window_messages(load_windows())}
+    kept, lost = (
+        Outcome(message=messages[i], result="created", memory_id=UUID(int=n), db_kind="decision")
+        for i, n in (("w-u41-tertiary.0", 5), ("w-u41-border.0", 6))
+    )
+    statuses |= {UUID(int=5): "active", UUID(int=6): "superseded"}
+    report = window_metrics(load_windows(), [*outcomes, kept, lost], statuses)
+    assert report["wrongly_superseded"] == {"memories": ["wm08"], "count": 1}
+
+
 def test_window_metrics_count_by_hand() -> None:
     outcomes, statuses = _gold_window_outcomes()
     report = window_metrics(load_windows(), outcomes, statuses)
+    assert report["wrongly_superseded"] == {"memories": [], "count": 0}
     assert report["wrongly_active"] == {"active": 3, "wrong": 1, "rate": 0.333}
     assert report["duplicate_per_key"]["rows_per_memory"] == {  # type: ignore[index]
         "wm01": 2, "wm02": 0, "wm04": 1,
@@ -305,8 +318,9 @@ def test_window_corpus_ends_where_the_gold_table_says_and_noisy_keys_drift_apart
     admin_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     windows = load_windows()
+    messages = window_messages(windows)
     report = run_window_eval(
-        admin_url, OracleExtractor(window_messages(windows)), windows, judge=OracleJudge()
+        admin_url, OracleExtractor(messages), windows, judge=OracleJudge(messages)
     )
     assert report["duplicate_per_key"]["rows_per_memory"]["wm01"] == 1
     assert report["duplicate_per_key"]["rate"] == 0.0
@@ -316,38 +330,40 @@ def test_window_corpus_ends_where_the_gold_table_says_and_noisy_keys_drift_apart
         ["provisional"],
         ["provisional"],
     )
-    assert report["wrongly_active"] == {"active": 3, "wrong": 0, "rate": 0.0}
+    assert report["wrongly_superseded"] == {"memories": [], "count": 0}
+    assert report["wrongly_active"] == {"active": 7, "wrong": 0, "rate": 0.0}
     assert report["retraction_recall"] == {"retractions": 2, "retracted": 2, "recall": 1.0}
-    assert report["final_statuses"] == {"active": 3, "provisional": 2, "expired": 1, "rejected": 1}
+    assert report["final_statuses"] == {"active": 7, "provisional": 2, "expired": 1, "rejected": 1}
     assert report["consensus_check"] == {
-        "items": 13,
-        "claimed_agreed": 4,
+        "items": 19,
+        "claimed_agreed": 8,
         "lowered": 0,
-        "verified_agreed": 4,
+        "verified_agreed": 8,
         "wrongly_agreed": {"count": 0, "rate": 0.0},
-        "missed_agreed": {"count": 0, "gold_agreed": 4},
+        "missed_agreed": {"count": 0, "gold_agreed": 8},
     }
     noisy = run_window_eval(
         admin_url,
-        OracleExtractor(window_messages(windows), noisy=True),
+        OracleExtractor(messages, noisy=True),
         windows,
-        judge=OracleJudge(),
+        judge=OracleJudge(messages, lenient=True),
     )
+    assert noisy["wrongly_superseded"] == {"memories": [], "count": 0}
     assert noisy["duplicate_per_key"]["statuses"]["wm01"] == ["active", "active", "active"]
     assert noisy["retraction_recall"] == {"retractions": 2, "retracted": 2, "recall": 1.0}
     assert noisy["consensus_check"] == {
-        "items": 13,
-        "claimed_agreed": 13,
-        "lowered": 9,
-        "verified_agreed": 4,
+        "items": 19,
+        "claimed_agreed": 19,
+        "lowered": 11,
+        "verified_agreed": 8,
         "wrongly_agreed": {"count": 0, "rate": 0.0},
-        "missed_agreed": {"count": 0, "gold_agreed": 4},
+        "missed_agreed": {"count": 0, "gold_agreed": 8},
     }
     argv = ["--db", admin_url, "--extractor", "noisy", "--windows", "--out-dir", str(tmp_path)]
     assert main(argv) == 0
     assert "live style rows (wm01)    3" in capsys.readouterr().out
     saved = json.loads(next(tmp_path.glob("windows-*.json")).read_text())
-    assert saved["duplicate_per_key"]["rate"] == 0.143
+    assert saved["duplicate_per_key"]["rate"] == 0.091
 
 
 @pytest.mark.db

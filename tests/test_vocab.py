@@ -200,3 +200,25 @@ def test_a_note_has_no_attribute_to_settle(world: Pool) -> None:
     note = ProposalDraft(kind=MemoryKind.NOTE, title="메모", origin=MemoryOrigin.EXTERNAL)
     with request_tx(world, USER, None) as c:
         assert settle_attribute(c, STORE, STORE, note, None) is note
+
+
+@pytest.mark.db
+def test_a_copied_key_whose_stated_question_differs_gets_a_key_of_its_own(world: Pool) -> None:
+    say(world, "border-contrast", BORDER_Q, BORDER, "라이트 1.4:1 미달", 1)
+    judge = ByQuestion()
+    copied = say(
+        world, "border-contrast", TERTIARY_Q, TERTIARY, "라이트 2.46:1 미달", 2, judge=judge
+    )
+    assert (copied.change, judge.asked) == ("created", 1)
+    assert rows(world) == [
+        ("border-contrast", "라이트 1.4:1 미달", "active"),
+        ("border-contrast-2", "라이트 2.46:1 미달", "active"),
+    ]
+
+
+@pytest.mark.db
+def test_a_copied_key_whose_stated_question_matches_is_trusted(world: Pool) -> None:
+    say(world, "border-contrast", BORDER_Q, BORDER, "라이트 1.4:1 미달", 1)
+    judge = ByQuestion(merge=True)
+    again = say(world, "border-contrast", "border 색 대비는?", BORDER, "3.1:1", 2, judge=judge)
+    assert (again.change, judge.asked) == ("superseded", 1)

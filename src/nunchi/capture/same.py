@@ -10,7 +10,6 @@ the trigger stays the single decider and a missing judge, a judge error or any d
 values different (an update, never a false merge)."""
 
 import re
-from collections.abc import Sequence
 from uuid import UUID
 
 from nunchi.db import Conn
@@ -54,20 +53,6 @@ def canonical_value(
         if same_decision(new, draft.title, value, title, judge):
             return draft.model_copy(update={"value": value})
     return draft.model_copy(update={"value": new})
-
-
-_TITLE_ATTRIBUTE_CHARS = 60
-
-
-def free_attribute(conn: Conn, store_id: UUID, subject_id: UUID, wanted: Sequence[str]) -> str:
-    """The first wanted name no open row of the subject holds, else the last wanted name with a
-    number. Names are cut to a title-sized length."""
-    names = [w.strip()[:_TITLE_ATTRIBUTE_CHARS] for w in wanted if w.strip()]
-    base = names[-1]
-    for name in [*names, *(f"{base} ({n})" for n in range(2, 100))]:
-        if not _open_rows(conn, store_id, subject_id, name):
-            return name
-    raise ValueError("no free attribute")  # pragma: no cover - 100 numbered titles for one subject
 
 
 def _open_rows(

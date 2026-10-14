@@ -4,7 +4,7 @@ import pytest
 
 from nunchi.capture import CaptureContext, Created, Reconfirmed, capture
 from nunchi.capture.resolve import ResolveConfig
-from nunchi.capture.same import free_attribute, numbers_conflict, strip_honorific
+from nunchi.capture.same import numbers_conflict, strip_honorific
 from nunchi.db import Pool, request_tx
 from nunchi.domain.models import MemoryKind, MemoryOrigin, SourceRef
 from nunchi.extract import ExtractContext, ProposalDraft, ValueJudge
@@ -287,14 +287,3 @@ def test_title_glued_to_a_word_is_not_a_person(world: Pool) -> None:
     other = say("영업팀장", attribute="담당")
     assert isinstance(other, Created)
     assert other.conflict_with == first.memory_id
-
-
-@pytest.mark.db
-def test_free_attribute_skips_the_names_open_rows_hold_and_numbers_the_last(world: Pool) -> None:
-    Say(world)("이민수")
-    with request_tx(world, USER, None) as conn:
-        row = conn.execute("SELECT subject_id FROM memory WHERE attribute = '담당자'").fetchone()
-        assert row is not None
-        subject = row[0]
-        assert free_attribute(conn, STORE, subject, ["담당자", " 새 이름 "]) == "새 이름"  # type: ignore[arg-type]
-        assert free_attribute(conn, STORE, subject, ["담당자"]) == "담당자 (2)"  # type: ignore[arg-type]

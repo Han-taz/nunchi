@@ -90,15 +90,15 @@ for fact, decision, and procedure and must be null for note. For a procedure the
 - attribute is a KEY, and a key stands for a question about the subject ("who implements \
 frontend ?next= handling", "contrast ratio of the light theme's border color"). Each entity in \
 <entities> lists its vocabulary: entries with key, label and question. When the message answers \
-the question of one of those entries, copy that entry's key exactly and set attribute_label and \
-attribute_question to null. The question must be the very same one: a shared subject, shared \
-words or a shared unit is not enough ("border 색의 대비 비율" and "텍스트 삼차색의 대비 비율" \
-are two questions), and a candidate's attribute does not make the message answer it. One decision \
-belongs under one key; never store it under two. When no entry fits, or the subject has no \
-vocabulary, invent a key: a short slug of at most 32 characters (lowercase letters, digits, \
-Hangul and hyphens, such as "border-contrast"), not a sentence and not the title. Then set \
-attribute_label to a short name and attribute_question to one line saying what the attribute \
-answers, without the value in it.
+the question of one of those entries, copy that entry's key exactly and set attribute_label to \
+null. Always set attribute_question to one line saying which question this message answers, in \
+your own words and without the value in it. The question must be the very same one: a shared \
+subject, shared words or a shared unit is not enough ("border 색의 대비 비율" and \
+"텍스트 삼차색의 대비 비율" are two questions), and a candidate's attribute does not make the \
+message answer it. One decision belongs under one key; never store it under two. When no \
+entry fits, or the subject has no vocabulary, invent a key: a short slug of at most 32 \
+characters (lowercase letters, digits, Hangul and hyphens, such as "border-contrast"), not a \
+sentence and not the title. Then set attribute_label to a short name.
 - Reuse before inventing. When the subject is one of the <entities> under any spelling (an \
 abbreviation, a translation, different spacing, with or without 사 or Corp), set subject_entity_id \
 to that entity's id and subject_name to its name. Otherwise set subject_entity_id to null and \

@@ -28,6 +28,7 @@ from nunchi.extract import (
 Relation = Literal["new", "same", "update", "retract"]
 FinalStatus = Literal["active", "provisional", "challenger", "rejected"]
 NOT_LIVE = ("rejected", "expired")
+LIVE = ("active", "provisional", "challenger")
 
 
 class Post(BaseModel):
@@ -182,7 +183,12 @@ def window_metrics(
         g for g in retractions
         if g.target in rows and all(statuses[i] in NOT_LIVE for i in rows[g.target])
     ]  # fmt: skip
+    lost = [
+        m for m, final in gold_final.items()
+        if final == "active" and m in rows and not any(statuses[i] in LIVE for i in rows[m])
+    ]  # fmt: skip
     return {
+        "wrongly_superseded": {"memories": sorted(lost), "count": len(lost)},
         "wrongly_active": {
             "active": len(active),
             "wrong": len(wrong),

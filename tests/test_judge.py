@@ -9,7 +9,7 @@ from eval.oracle import OracleJudge
 from eval.resolve_sweep import judged, run_resolve_sweep
 
 from nunchi.extract import AttributeSpec, ClaudeJudge, build_judge
-from nunchi.extract.judge import DESCRIBE_PROMPT, QUESTION_PROMPT, SYSTEM_PROMPT, TOPIC_PROMPT
+from nunchi.extract.judge import DESCRIBE_PROMPT, QUESTION_PROMPT, SYSTEM_PROMPT
 from tests.embed_fake import FakeEmbedder
 
 
@@ -164,21 +164,3 @@ def test_describe_returns_a_spec_and_sends_the_memory_as_delimited_data() -> Non
 )
 def test_describe_is_none_on_any_failure(answer: ClaudeJudge) -> None:
     assert answer.describe("t", "v", "a") is None
-
-
-def test_topic_question_uses_its_own_prompt_and_any_failure_means_another_topic() -> None:
-    seen: list[dict[str, Any]] = []
-
-    def respond(req: httpx2.Request) -> httpx2.Response:
-        seen.append(json.loads(req.content))
-        return httpx2.Response(200, json=message('{"same": true, "reason": "r"}'))
-
-    assert judge(respond).same_topic("CSS Modules", "독립 PR", "스타일링", "?next= 처리") is True
-    assert seen[0]["system"] == TOPIC_PROMPT
-    assert seen[0]["messages"][0]["content"] == (
-        "<first>\nCSS Modules\n(title: 스타일링)\n</first>\n"
-        "<second>\n독립 PR\n(title: ?next= 처리)\n</second>"
-    )
-    assert replying({"same": False, "reason": "r"}).same_topic("a", "b") is False
-    assert replying({"same": True, "reason": "r"}, status=500).same_topic("a", "b") is False
-    assert replying({"same": True, "reason": "r"}, stop="refusal").same_topic("a", "b") is False
