@@ -524,7 +524,7 @@ CREATE FUNCTION t.exec_list(r text DEFAULT 'app_rw') RETURNS text LANGUAGE sql A
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.pending_dm_cards,app_sec.reconfirm_duplicate_note,app_sec.record_card_sent,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
+  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.issue_dm_cards,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.pending_dm_cards,app_sec.reconfirm_duplicate_note,app_sec.record_card_sent,app_sec.remember,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
 SELECT t.eq('P3d nunchi_worker executes exactly the four worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
@@ -1388,6 +1388,195 @@ SELECT t.eq('N75 the worker expires the live row (valid_to passed)', $q$SELECT (
 SELECT t.eq('N75a decision 2 on expiry too: the challenger became the provisional live row', $q$SELECT string_agg(status::text, ',' ORDER BY status) FROM memory WHERE attribute = 'n75'$q$, 'provisional,expired');
 ROLLBACK;
 SET ROLE app_rw;
+
+-- ═══ N5x) app_sec.remember() (v1.3 §5.1): 표의 10행과 결정 1, 2, 3 ═══════════
+-- 작성자 셋(n1, n2, n3)은 영업 store 의 contributor 다. 키는 (A사, 시험마다 다른 속성)이고 행은 롤백하지 않는다 (작성자가 바뀌려면 트랜잭션이 갈려야 한다).
+-- t_rem = remember 한 번을 'outcome/status' 로 돌려준다. t_rid = 키와 상태로 행 id 를 찾는다. t_retract = 철회 한 번.
+RESET ROLE;
+INSERT INTO principal (id, tenant_id, kind, external_id, display_name) VALUES
+ ('00000000-0000-0000-0000-0000000005a1','00000000-0000-0000-0000-000000000001','user','n1','N5x 작성자 1'),
+ ('00000000-0000-0000-0000-0000000005a2','00000000-0000-0000-0000-000000000001','user','n2','N5x 작성자 2');
+INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
+ ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000005a1','contributor','00000000-0000-0000-0000-000000000001'),
+ ('00000000-0000-0000-0000-00000000f001','00000000-0000-0000-0000-0000000005a2','contributor','00000000-0000-0000-0000-000000000001');
+CREATE FUNCTION t.rem(
+  p_attr text, p_value text, p_consensus text DEFAULT 'stated', p_ev jsonb DEFAULT '[]', p_gate jsonb DEFAULT '{}',
+  p_store uuid DEFAULT '00000000-0000-0000-0000-00000000f001', p_refs jsonb DEFAULT '[{"uri":"https://crm/acct/A"}]'
+) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r record;
+BEGIN
+  SELECT * INTO r FROM app_sec.remember(p_store, 'fact', 'A사 ' || p_attr, p_value, p_refs, '00000000-0000-0000-0000-0000000e0a01', p_attr, p_value, p_gate, p_consensus, p_ev, NULL);
+  RETURN r.r_outcome || '/' || r.r_status;
+END $$;
+CREATE FUNCTION t.rid(p_attr text, p_status memory_status, p_value text DEFAULT NULL) RETURNS uuid LANGUAGE plpgsql STABLE AS $$
+DECLARE r uuid;
+BEGIN
+  SELECT id INTO r FROM memory WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = p_attr AND status = p_status
+    AND (p_value IS NULL OR value = p_value) ORDER BY created_at DESC, id LIMIT 1;
+  RETURN r;
+END $$;
+CREATE FUNCTION t.retract(p_id uuid) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r record;
+BEGIN
+  SELECT * INTO r FROM app_sec.remember('00000000-0000-0000-0000-00000000f001', 'fact', 'retract', NULL, '[]', NULL, NULL, NULL, '{}', 'stated', '[]', p_id);
+  RETURN r.r_outcome || '/' || r.r_status;
+END $$;
+-- t_ridv = t_rid 의 volatile 판: 같은 문장 안에서 remember 가 방금 쓴 행을 찾는다
+CREATE FUNCTION t.ridv(p_attr text, p_status memory_status) RETURNS uuid LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN t.rid(p_attr, p_status);
+END $$;
+-- t_states = 한 속성의 행들을 '값:상태' 로 값 순서대로 이어 붙인다
+CREATE FUNCTION t.states(p_attr text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r text;
+BEGIN
+  SELECT string_agg(value || ':' || status, ',' ORDER BY value, status) INTO r FROM memory
+  WHERE subject_id = '00000000-0000-0000-0000-0000000e0a01' AND attribute = p_attr;
+  RETURN r;
+END $$;
+-- t_del = 활성 행 하나를 삭제 상태로 (실패는 NOTICE 로만 남겨 v1.0 스키마에서도 끝까지 돈다)
+CREATE FUNCTION t.del(p_attr text) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE memory SET status = 'deleted' WHERE id = t.rid(p_attr, 'active');
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup delete % failed: % %', p_attr, SQLSTATE, SQLERRM;
+END $$;
+-- t_col = 키와 상태로 찾은 행의 식 하나 (volatile 이라 같은 문장 안에서 remember 뒤의 행을 본다)
+CREATE FUNCTION t.col(p_attr text, p_status memory_status, p_expr text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r text;
+BEGIN
+  EXECUTE format('SELECT (%s)::text FROM memory WHERE id = t.rid(%L, %L)', p_expr, p_attr, p_status) INTO r;
+  RETURN r;
+END $$;
+SET ROLE app_rw;
+
+
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N50 row 1: no live row, agreed -> a new active row', $q$SELECT t.rem('n50', 'a', 'agreed')$q$, 'created/active');
+SELECT t.eq('N50a basis / promote_at / ops / evidence rows', $q$SELECT m.basis::text || '/' || coalesce(m.promote_at::text, '-') || '/' || (SELECT string_agg(v.op::text, ',' ORDER BY v.id) FROM memory_version AS v WHERE v.memory_id = m.id) || '/' || (SELECT count(*) FROM memory_evidence AS e WHERE e.memory_id = m.id) FROM memory AS m WHERE m.id = t.rid('n50', 'active')$q$, 'agreed/-/propose/1');
+SELECT t.eq('N51 row 2: no live row, stated -> a new provisional row', $q$SELECT t.rem('n51', 'a')$q$, 'created/provisional');
+SELECT t.eq('N51a basis and the promotion window', $q$SELECT m.basis::text || '/' || (m.promote_at - m.created_at)::text FROM memory AS m WHERE m.id = t.rid('n51', 'provisional')$q$, 'stated/1 day');
+SELECT t.eq('N52 the first author states a value', $q$SELECT t.rem('n52', 'a')$q$, 'created/provisional');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a2', NULL);
+SELECT t.eq('N52a row 3: another author says the same value -> confirmed', $q$SELECT t.rem('n52', 'a')$q$, 'confirmed/active');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N52b confirmed row: basis / promote_at / ops / distinct evidence authors', $q$SELECT m.basis::text || '/' || coalesce(m.promote_at::text, '-') || '/' || (SELECT string_agg(v.op::text, ',' ORDER BY v.id) FROM memory_version AS v WHERE v.memory_id = m.id) || '/' || (SELECT count(DISTINCT e.author) FROM memory_evidence AS e WHERE e.memory_id = m.id) FROM memory AS m WHERE m.id = t.rid('n52', 'active')$q$, 'agreed/-/propose,confirm/2');
+SELECT t.eq('N52c the same author again is not a confirmation', $q$SELECT t.rem('n52c', 'a') || ' then ' || t.rem('n52c', 'a')$q$, 'created/provisional then reconfirmed/provisional');
+SELECT t.eq('N53 row 4: the same value in other words reconfirms', $q$SELECT t.rem('n53', 'a', 'agreed') || ' then ' || t.rem('n53', '  a ')$q$, 'created/active then reconfirmed/active');
+SELECT t.eq('N53a one row, ops and evidence rows', $q$SELECT (SELECT count(*) FROM memory WHERE attribute = 'n53') || '/' || (SELECT string_agg(v.op::text, ',' ORDER BY v.id) FROM memory_version AS v WHERE v.memory_id = t.rid('n53', 'active')) || '/' || (SELECT count(*) FROM memory_evidence AS e WHERE e.memory_id = t.rid('n53', 'active'))$q$, '1/propose,reconfirm/2');
+SELECT t.eq('N53b an open challenger plus a later post that restates the live value', $q$SELECT t.rem('n53b', 'a', 'agreed') || ' ' || t.rem('n53b', 'b') || ' ' || t.rem('n53b', 'a', 'stated', '[{"post_id":"p1","said_at":"2099-01-01T00:00:00+00"}]')$q$, 'created/active challenged/challenger reconfirmed/active');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N53c the challenger is rejected, with the reason reaffirmed', $q$SELECT t.states('n53b') || '/' || (SELECT v.reason FROM memory_version AS v WHERE v.memory_id = t.rid('n53b', 'rejected') ORDER BY v.id DESC LIMIT 1)$q$, 'a:active,b:rejected/reaffirmed');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N54 a live value and a challenger', $q$SELECT t.rem('n54', 'a', 'agreed') || ' ' || t.rem('n54', 'b')$q$, 'created/active challenged/challenger');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a2', NULL);
+SELECT t.eq('N54a row 5: another author says the challenger value -> it replaces the live row', $q$SELECT t.rem('n54', 'b') || ' ' || t.states('n54')$q$, 'superseded/active a:superseded,b:active');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N54c the old row was superseded first: its version id comes before the new row confirm; valid_to; supersedes_id', $q$SELECT ((SELECT v.id FROM memory_version AS v WHERE v.memory_id = t.rid('n54', 'superseded') AND v.op = 'supersede') < (SELECT v.id FROM memory_version AS v WHERE v.memory_id = t.rid('n54', 'active') AND v.op = 'confirm'))::text || '/' || (SELECT (valid_to = current_date)::text FROM memory WHERE id = t.rid('n54', 'superseded')) || '/' || (SELECT (supersedes_id = t.rid('n54', 'superseded'))::text FROM memory WHERE id = t.rid('n54', 'active'))$q$, 'true/true/true');
+SELECT t.eq('N54d row 5 also fires when the challenger value comes agreed, from the same author', $q$SELECT t.rem('n54d', 'a', 'agreed') || ' ' || t.rem('n54d', 'b') || ' ' || t.rem('n54d', 'b', 'agreed') || ' ' || t.states('n54d')$q$, 'created/active challenged/challenger superseded/active a:superseded,b:active');
+SELECT t.eq('N55 a live value and a challenger', $q$SELECT t.rem('n55', 'a', 'agreed') || ' ' || t.rem('n55', 'b')$q$, 'created/active challenged/challenger');
+SELECT t.eq('N55a row 6: the same author restates the challenger value -> only a reconfirm', $q$SELECT t.rem('n55', 'b', 'stated', '[{"post_id":"p5"}]')$q$, 'reconfirmed/challenger');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N55b promote_at did not move (still created_at + 24h) and the ops', $q$SELECT (m.promote_at - m.created_at)::text || '/' || (SELECT string_agg(v.op::text, ',' ORDER BY v.id) FROM memory_version AS v WHERE v.memory_id = m.id) FROM memory AS m WHERE m.id = t.rid('n55', 'challenger')$q$, '1 day/propose,reconfirm');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N56 a live value and an open challenger', $q$SELECT t.rem('n56', 'a', 'agreed') || ' ' || t.rem('n56', 'c')$q$, 'created/active challenged/challenger');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N56a row 7: a different value, agreed -> the live row is superseded, the new row is active', $q$SELECT t.rem('n56', 'b', 'agreed') || ' ' || t.states('n56')$q$, 'superseded/active a:superseded,b:active,c:rejected');
+SELECT t.eq('N56c old valid_to is today, the challenger was closed as replaced', $q$SELECT (SELECT (valid_to = current_date)::text FROM memory WHERE id = t.rid('n56', 'superseded')) || '/' || (SELECT v.reason FROM memory_version AS v WHERE v.memory_id = t.rid('n56', 'rejected') ORDER BY v.id DESC LIMIT 1)$q$, 'true/replaced');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N57 row 8: a different value, stated -> a challenger', $q$SELECT t.rem('n57', 'a', 'agreed') || ' ' || t.rem('n57', 'b')$q$, 'created/active challenged/challenger');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N57a the challenger points at the live row and carries the stated basis', $q$SELECT (conflict_with = t.rid('n57', 'active'))::text || '/' || (supersedes_id = t.rid('n57', 'active'))::text || '/' || basis::text || '/' || (promote_at - created_at)::text FROM memory WHERE id = t.rid('n57', 'challenger')$q$, 'true/true/stated/1 day');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N57b a third value replaces the open challenger', $q$SELECT t.rem('n57', 'c') || ' ' || t.states('n57')$q$, 'challenged/challenger a:active,b:rejected,c:challenger');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N58 a provisional row', $q$SELECT t.rem('n58', 'a')$q$, 'created/provisional');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a2', NULL);
+SELECT t.eq('N58a row 9: a provisional row is retracted -> rejected', $q$SELECT t.retract(t.rid('n58', 'provisional'))$q$, 'retracted/rejected');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N58b row 9 on a challenger: rejected, the live row stays', $q$SELECT t.rem('n58b', 'a', 'agreed') || ' ' || t.rem('n58b', 'b') || ' ' || t.retract(t.ridv('n58b', 'challenger')) || ' ' || t.states('n58b')$q$, 'created/active challenged/challenger retracted/rejected a:active,b:rejected');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N59 an active row', $q$SELECT t.rem('n59', 'a', 'agreed')$q$, 'created/active');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a2', NULL);
+SELECT t.eq('N59a row 10: an active row is retracted -> expired today, with the ops', $q$SELECT t.retract(t.rid('n59', 'active')) || ' ' || t.col('n59', 'expired', '(valid_to = current_date)::text || ''/'' || (SELECT string_agg(v.op::text, '','' ORDER BY v.id) FROM memory_version AS v WHERE v.memory_id = memory.id)')$q$, 'retracted/expired true/propose,retract');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N60 a live value with a challenger', $q$SELECT t.rem('n60', 'a', 'agreed') || ' ' || t.rem('n60', 'b')$q$, 'created/active challenged/challenger');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a2', NULL);
+SELECT t.eq('N60a the live row is retracted', $q$SELECT t.retract(t.rid('n60', 'active'))$q$, 'retracted/expired');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N60b decision 2: the orphan challenger becomes the provisional live row', $q$SELECT t.states('n60')$q$, 'a:expired,b:provisional');
+SELECT t.eq('N60c it keeps its promote_at, loses the conflict, and the key has one live row', $q$SELECT (m.promote_at - m.created_at)::text || '/' || (m.conflict_with IS NULL)::text || '/' || (SELECT count(*) FROM memory WHERE attribute = 'n60' AND status IN ('active', 'provisional')) || '/' || (SELECT string_agg(v.op::text, ',' ORDER BY v.id) FROM memory_version AS v WHERE v.memory_id = m.id) FROM memory AS m WHERE m.id = t.rid('n60', 'provisional')$q$, '1 day/true/1/propose,promote');
+SELECT t.eq('N61 decision 1: a flagged statement is stored without a timer (promote_at is empty)', $q$SELECT t.rem('n61', 'a', 'stated', '[]', '{"flags":["imperative"]}') || ' ' || t.col('n61', 'provisional', '(promote_at IS NULL)::text')$q$, 'created/provisional true');
+SELECT t.eq('N61b a flagged challenger over a live value', $q$SELECT t.rem('n61b', 'a', 'agreed') || ' ' || t.rem('n61b', 'b', 'stated', '[]', '{"flags":["imperative"]}')$q$, 'created/active challenged/challenger');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N61d a flagged challenger never auto-supersedes: no promote_at', $q$SELECT (promote_at IS NULL)::text FROM memory WHERE id = t.rid('n61b', 'challenger')$q$, 'true');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N61c a statement derived from an external memory has no timer either', $q$SELECT t.rem('n61c', 'a', 'stated', '[]', '{}', '00000000-0000-0000-0000-00000000f001', '[{"uri":"memory://00000000-0000-0000-0000-0000000ee001"}]') || ' ' || t.col('n61c', 'provisional', 'origin::text || ''/'' || (promote_at IS NULL)::text')$q$, 'created/provisional external/true');
+SELECT t.eq('N62 the chain holds and every version of an evidenced write carries evidence:<hex>', $q$SELECT app_sec.verify_chain(t.rid('n52', 'active'))::text || '/' || (SELECT bool_and(v.reason ~ '^evidence:[0-9a-f]{64}$')::text FROM memory_version AS v WHERE v.memory_id = t.rid('n52', 'active'))$q$, 'true/true');
+SELECT t.eq('N63b the delete scrub of author_name keeps the chain valid', $q$SELECT t.rem('n63', 'z63', 'agreed', '[{"author_name":"Yuna","post_id":"p63"}]')$q$, 'created/active');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SET LOCAL app.op = 'delete';
+SELECT t.del('n63');
+SELECT t.eq('N63c after the delete: chain valid / author_name scrubbed', $q$SELECT app_sec.verify_chain(t.rid('n63', 'deleted'))::text || '/' || (SELECT coalesce(string_agg(author_name, ','), 'NULL') FROM memory_evidence WHERE memory_id = t.rid('n63', 'deleted'))$q$, 'true/NULL');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SELECT t.eq('N65 a personal store: stated is still active, basis user_store', $q$SELECT t.rem('n65', 'a', 'stated', '[]', '{}', '00000000-0000-0000-0000-00000000f0a1')$q$, 'created/active');
+SELECT t.eq('N65a basis', $q$SELECT basis::text FROM memory WHERE id = t.rid('n65', 'active')$q$, 'user_store');
+SELECT t.eq('N65b a different value replaces at once in a personal store', $q$SELECT t.rem('n65', 'b', 'stated', '[]', '{}', '00000000-0000-0000-0000-00000000f0a1') || ' ' || t.states('n65')$q$, 'superseded/active a:superseded,b:active');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N66 the same post restated twice counts once: one reconfirm evidence row, one reconfirm version', $q$SELECT t.rem('n66', 'a', 'agreed') || ' ' || t.rem('n66', 'a', 'stated', '[{"post_id":"pp1"}]') || ' ' || t.rem('n66', 'a', 'stated', '[{"post_id":"pp1"}]') || ' ' || t.col('n66', 'active', '(SELECT count(*) FROM memory_evidence AS e WHERE e.memory_id = memory.id AND e.op = ''reconfirm'')::text || ''/'' || (SELECT string_agg(v.op::text, '','' ORDER BY v.id) FROM memory_version AS v WHERE v.memory_id = memory.id)')$q$, 'created/active reconfirmed/active reconfirmed/active 1/propose,reconfirm');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', NULL);
+SELECT t.err('N68 a reader cannot remember', $q$SELECT t.rem('n68', 'a')$q$, '42501');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000b1', NULL);
+SELECT t.err('N68a a user with no grant on the store cannot remember', $q$SELECT t.rem('n68', 'a')$q$, '42501');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.eq('N68b a contributor agent on behalf of a contributor user: author and delegate are bound to the context', $q$SELECT t.rem('n68b', 'a') || ' ' || t.col('n68b', 'provisional', '(created_by = ''00000000-0000-0000-0000-0000000000d1'')::text || ''/'' || (on_behalf_of = ''00000000-0000-0000-0000-0000000000a1'')::text')$q$, 'created/provisional true/true');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.err('N68c an unknown consensus value', $q$SELECT t.rem('n68c', 'a', 'maybe')$q$, '22023');
+COMMIT;
+BEGIN;
+SELECT t.err('N68d no request context', $q$SELECT t.rem('n68d', 'a')$q$, '28000');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.err('setup n67 live value', $q$SELECT t.rem('n67', 'a', 'agreed')$q$, 'ok');
+SELECT t.err('setup n67 challenger', $q$SELECT t.rem('n67', 'b')$q$, 'ok');
+COMMIT;
+RESET ROLE;
+DO $do$ BEGIN
+  IF to_regclass('entity') IS NULL THEN RETURN; END IF;
+  UPDATE memory SET valid_to = current_date - 1 WHERE id = t.rid('n67', 'active');
+END $do$;
+SELECT t.eq('N67 the worker expires the live row (valid_to passed)', $q$SELECT (app_sec.mark_expired() >= 1)::text$q$, 'true');
+SELECT t.eq('N67a decision 2 on expiry too: the challenger became the provisional live row', $q$SELECT t.states('n67')$q$, 'a:expired,b:provisional');
+SET ROLE app_rw;
+
 
 RESET ROLE;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
