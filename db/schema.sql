@@ -136,7 +136,11 @@ CREATE TABLE entity_alias (
 -- ── 메모리 ───────────────────────────────────────────────
 CREATE TYPE memory_kind AS ENUM ('fact', 'decision', 'procedure', 'note');
 -- provisional = 검토 전에 이미 노출된 상태. 불리언이 아니라 상태다 (전이 표가 허용하는 길만 있다)
-CREATE TYPE memory_status AS ENUM ('proposed', 'provisional', 'active', 'superseded', 'rejected', 'expired', 'deleted');
+CREATE TYPE memory_status AS ENUM (
+  'proposed', 'provisional', 'challenger', 'active', 'superseded', 'rejected', 'expired', 'deleted'
+);
+-- 현재 상태에 이른 근거 (v1.3 §3.1)
+CREATE TYPE promotion_basis AS ENUM ('agreed', 'stated', 'timer', 'agent', 'user_store', 'migrated');
 -- 위험 등급: risk_tier() 가 정하고 approval_tier_rule 이 등급마다 최초 상태와 승인 정족수를 정한다
 CREATE TYPE approval_tier AS ENUM ('auto', 'auto_labeled', 'one_curator', 'two_curators');
 CREATE TYPE memory_origin AS ENUM ('internal', 'external');
@@ -169,6 +173,8 @@ CREATE TABLE memory (
   attribute text,                                       -- app_sec.norm_text() 로 정규화 (트리거)
   last_confirmed_at timestamptz NOT NULL DEFAULT now(), -- 생성, 같은 값 재수집(reconfirm), curator 확인 때 갱신
   value text,                                           -- 짧은 정규 답 (예: 이민수), norm_text() 로 정규화. NULL = 옛 행
+  basis promotion_basis,                                -- 현재 상태에 이른 근거 (v1.3 §3.1)
+  promote_at timestamptz,                               -- provisional 과 challenger 가 반박 없이 active 가 되는 시각. 그 외에는 null
   CONSTRAINT memory_subject_same_tenant FOREIGN KEY (tenant_id, subject_id) REFERENCES entity (tenant_id, id),
   CONSTRAINT memory_key_by_kind CHECK (
     CASE
@@ -178,6 +184,7 @@ CREATE TABLE memory (
   ),
   CONSTRAINT memory_store_same_tenant FOREIGN KEY (tenant_id, store_id) REFERENCES store (tenant_id, id),
   CHECK (status <> 'deleted' OR body IS null),
+  CONSTRAINT memory_promote_at_state CHECK (promote_at IS null OR status IN ('provisional', 'challenger')),
   CHECK (kind = 'note' OR jsonb_array_length(source_refs) > 0)  -- note 외에는 출처 필수
 );
 
@@ -188,6 +195,9 @@ CREATE INDEX memory_hash_idx ON memory (store_id, content_hash);
 -- 한 스토어 안에서 키마다 살아 있는 기억은 최대 하나다. 교체는 decide() 가 이전 행을 먼저 superseded 로 바꾼 뒤 새 행을 활성화한다
 CREATE UNIQUE INDEX memory_live_key_uidx ON memory (store_id, subject_id, attribute)
 WHERE status IN ('active', 'provisional');
+-- 키마다 열린 변경 제안(challenger)은 하나다. 살아 있는 행과는 별개의 유일성이다
+CREATE UNIQUE INDEX memory_challenger_uidx ON memory (store_id, subject_id, attribute)
+WHERE status = 'challenger';
 
 -- 삭제된 내용 재유입 방지 (정리 작업·재제안이 되살리지 못하게)
 CREATE TABLE deleted_hash (
@@ -201,7 +211,7 @@ CREATE TABLE deleted_hash (
 -- append-only 버전 기록 = 감사 로그
 CREATE TYPE memory_op AS ENUM (
   'propose', 'auto_activate', 'approve', 'confirm', 'reject', 'retract',
-  'edit', 'supersede', 'expire', 'delete', 'redact', 'reconfirm'
+  'edit', 'supersede', 'expire', 'delete', 'redact', 'reconfirm', 'promote'
 );
 
 CREATE TABLE memory_version (
@@ -217,6 +227,22 @@ CREATE TABLE memory_version (
   prev_hash text,          -- 같은 memory 의 직전 row_hash
   row_hash text,           -- sha256(prev_hash | memory | version | op | actor | snapshot_hash | at | reason)
   UNIQUE (memory_id, version, op)
+);
+
+-- 증거 (v1.3 §6): 전이와 reconfirm 의 근거 메시지. append-only 다 (삭제 때 author_name 을 지우는 예외는 U32b).
+-- 해시 체인에는 sha256 을 memory_version.reason 의 evidence:<hex> 로 묶는다 (그 함수는 U33).
+CREATE TABLE memory_evidence (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  memory_id uuid NOT NULL REFERENCES memory (id),
+  version integer NOT NULL,   -- 이 증거가 만든 memory_version 의 version
+  op memory_op NOT NULL,
+  uri text,                   -- 게시물 permalink 또는 memory://<id>. 타이머 승격은 NULL
+  post_id text,               -- 플랫폼 게시물 id. MCP 는 NULL, 타이머 승격은 digest 커서 값
+  author text,                -- 플랫폼 사용자 id 또는 MCP principal id
+  author_name text,           -- 기록 시점의 표시 이름
+  said_at timestamptz,        -- 게시물 작성 시각
+  basis promotion_basis NOT NULL,
+  UNIQUE (memory_id, op, post_id)
 );
 
 -- 승인 카드: nonce 1개 = (memory, 수신 curator) 1장. 클릭은 nonce 로만 들어오고 decide() 만 읽고 쓴다 (app_rw 권한 없음).
@@ -288,6 +314,11 @@ CREATE TABLE store_freshness (
   days integer NOT NULL CHECK (days > 0),
   PRIMARY KEY (store_id, kind)
 );
+-- store 별 승격 기간 (v1.3 §3.1). 행이 없으면 24시간. 앱 롤에는 권한이 없다
+CREATE TABLE store_autonomy (
+  store_id uuid PRIMARY KEY REFERENCES store (id),
+  promote_after interval NOT NULL DEFAULT '24 hours' CHECK (promote_after > interval '0')
+);
 
 -- 등급 -> 최초 상태와 승인 정족수. INSERT 정책, 등급 트리거, 버전 기록이 모두 이 표 하나를 본다.
 CREATE TABLE approval_tier_rule (
@@ -346,6 +377,8 @@ END $$;
 CREATE TRIGGER memory_version_append_only BEFORE UPDATE OR DELETE ON memory_version
 FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
 CREATE TRIGGER review_append_only BEFORE UPDATE OR DELETE ON review
+FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+CREATE TRIGGER memory_evidence_append_only BEFORE UPDATE OR DELETE ON memory_evidence
 FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
 
 -- ── 권한: 실효 권한 = 사용자 권한 ∩ 에이전트 권한 ──────────
@@ -548,6 +581,14 @@ CREATE POLICY memory_version_read ON memory_version FOR SELECT USING (
   EXISTS (
     SELECT 1 FROM memory AS m
     WHERE m.id = memory_version.memory_id
+  )
+);
+ALTER TABLE memory_evidence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memory_evidence FORCE ROW LEVEL SECURITY;
+CREATE POLICY memory_evidence_read ON memory_evidence FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM memory AS m
+    WHERE m.id = memory_evidence.memory_id
   )
 );
 -- 쓰기 정책은 없다: 버전은 memory 트리거(SECURITY DEFINER)만, review 는 승인 함수만 기록한다 (app_rw 에는 INSERT/UPDATE 권한도 없다)
@@ -1705,7 +1746,7 @@ GRANT SELECT ON entity, entity_alias TO app_rw;
 -- principal.external_id(IdP subject, SCIM id)는 숨긴다: 컬럼 단위 GRANT 에서 뺀다. SELECT * 는 42501 이다.
 -- 필요한 조회는 SECURITY DEFINER 함수(app_sec.resolve_principal)로 낸다.
 GRANT SELECT (id, tenant_id, kind, display_name, active) ON principal TO app_rw;
-GRANT SELECT ON memory_version, review, deleted_hash, room_binding, source_system TO app_rw;
+GRANT SELECT ON memory_version, memory_evidence, review, deleted_hash, room_binding, source_system TO app_rw;
 GRANT SELECT, INSERT, UPDATE ON memory TO app_rw;
 
 -- 함수 실행 권한은 허용 목록뿐이다. 내부 함수(write_version, content_hmac, is_deleted_content, 트리거 함수)는

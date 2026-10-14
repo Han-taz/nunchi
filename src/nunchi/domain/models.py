@@ -16,6 +16,7 @@ class MemoryKind(StrEnum):
 class MemoryStatus(StrEnum):
     PROPOSED = "proposed"
     PROVISIONAL = "provisional"
+    CHALLENGER = "challenger"
     ACTIVE = "active"
     SUPERSEDED = "superseded"
     REJECTED = "rejected"
@@ -41,6 +42,16 @@ class MemoryOp(StrEnum):
     DELETE = "delete"
     REDACT = "redact"
     RECONFIRM = "reconfirm"
+    PROMOTE = "promote"
+
+
+class PromotionBasis(StrEnum):
+    AGREED = "agreed"
+    STATED = "stated"
+    TIMER = "timer"
+    AGENT = "agent"
+    USER_STORE = "user_store"
+    MIGRATED = "migrated"
 
 
 class StoreKind(StrEnum):

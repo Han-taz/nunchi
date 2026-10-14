@@ -326,7 +326,7 @@ INSERT INTO store_grant (store_id, principal_id, role, tenant_id) VALUES
 
 -- A10) 앱 역할은 LOGIN NOBYPASSRLS NOINHERIT, RLS 테이블은 소유자에게도 정책을 강제한다
 SELECT t.eq('A10a app_rw login/bypassrls/inherit', $q$SELECT rolcanlogin || '/' || rolbypassrls || '/' || rolinherit FROM pg_roles WHERE rolname = 'app_rw'$q$, 'true/false/false');
-SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,entity,entity_alias,group_member,inbound_event,memory,memory_embedding,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
+SELECT t.eq('A10b tables with FORCE ROW LEVEL SECURITY', $q$SELECT string_agg(relname::text, ',' ORDER BY relname) FROM pg_class WHERE relforcerowsecurity$q$, 'deleted_hash,entity,entity_alias,group_member,inbound_event,memory,memory_embedding,memory_evidence,memory_version,principal,principal_identity,review,room_binding,room_member,source_system,store,store_grant,tenant');
 
 SET ROLE app_rw;
 
@@ -1503,6 +1503,36 @@ SELECT t.eq('N31o a second put_embedding upserts instead of adding a row', $q$SE
 SELECT t.eq('N31n a vector stamped before the last memory update is stale again', $q$SELECT count(*)::text FROM app_sec.memories_to_embed('m', 100) WHERE title = 'Q31 plain'$q$, '1');
 ROLLBACK;
 SET ROLE app_rw;
+
+-- N32) challenger 상태, memory_evidence, store_autonomy, basis/promote_at (v1.3 §3, §6; 롤백되는 트랜잭션 안의 임시 행)
+-- m1 = 키 k1 의 active, m2 = 같은 키의 challenger, m3 = 다른 키의 provisional(promote_at 있음), m4 = hr store 의 active
+BEGIN; RESET ROLE;
+DO $setup$ BEGIN
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute) VALUES ('00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'active', 'N32 n32k1', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n32k1');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, promote_at) VALUES ('00000000-0000-0000-0000-0000000032a2', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'challenger', 'N32 n32k1', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n32k1', now() + interval '24 hours');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute, promote_at, basis) VALUES ('00000000-0000-0000-0000-0000000032a3', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'provisional', 'N32 n32k3', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n32k3', now() + interval '24 hours', 'stated');
+INSERT INTO memory (id, tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute) VALUES ('00000000-0000-0000-0000-0000000032a4', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f002', 'fact', 'active', 'N32 n32k4', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n32k4');
+INSERT INTO memory_evidence (memory_id, version, op, uri, post_id, author, author_name, said_at, basis)
+  VALUES ('00000000-0000-0000-0000-0000000032a1', 1, 'confirm', 'https://chat.example/p/1', 'p1', 'u1', 'Yuna', now(), 'agreed'),
+         ('00000000-0000-0000-0000-0000000032a4', 1, 'confirm', 'https://chat.example/p/2', 'p2', 'u2', 'Hyun', now(), 'agreed');
+EXCEPTION WHEN OTHERS THEN NULL;
+END $setup$;
+SELECT t.eq('N32a a live row and its challenger share a key', $q$SELECT string_agg(status::text, ',' ORDER BY status) FROM memory WHERE attribute = 'n32k1'$q$, 'challenger,active');
+SELECT t.err('N32b a second challenger on the same key', $q$INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute) VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'challenger', 'N32 x', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n32k1')$q$, '23505');
+SELECT t.err('N32c a challenger on another key is fine', $q$INSERT INTO memory (tenant_id, store_id, kind, status, title, body, source_refs, created_by, subject_id, attribute) VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'fact', 'challenger', 'N32 x', 'b', '[{"uri":"x"}]', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000e0a01', 'n32k3')$q$, 'ok');
+SELECT t.err('N32d promote_at on an active row', $q$UPDATE memory SET promote_at = now() WHERE id = '00000000-0000-0000-0000-0000000032a1'$q$, '23514');
+SELECT t.eq('N32e provisional keeps promote_at and basis', $q$SELECT (promote_at IS NOT NULL)::text || '/' || basis FROM memory WHERE id = '00000000-0000-0000-0000-0000000032a3'$q$, 'true/stated');
+SELECT t.eq('N32f store_autonomy defaults to 24 hours', $q$INSERT INTO store_autonomy (store_id) VALUES ('00000000-0000-0000-0000-00000000f001') RETURNING promote_after::text$q$, '24:00:00');
+SELECT t.err('N32g a zero promote_after', $q$INSERT INTO store_autonomy (store_id, promote_after) VALUES ('00000000-0000-0000-0000-00000000f002', interval '0')$q$, '23514');
+SELECT t.err('N32h evidence UPDATE', $q$UPDATE memory_evidence SET uri = 'https://chat.example/forged' WHERE memory_id = '00000000-0000-0000-0000-0000000032a1'$q$, 'P0001');
+SELECT t.err('N32i evidence DELETE', $q$DELETE FROM memory_evidence WHERE memory_id = '00000000-0000-0000-0000-0000000032a1'$q$, 'P0001');
+SELECT t.err('N32j the same post cannot be counted twice', $q$INSERT INTO memory_evidence (memory_id, version, op, post_id, basis) VALUES ('00000000-0000-0000-0000-0000000032a1', 2, 'confirm', 'p1', 'agreed')$q$, '23505');
+SELECT t.ctx('00000000-0000-0000-0000-0000000000a1', NULL);
+SET LOCAL ROLE app_rw;
+SELECT t.eq('N32k alice reads the evidence of a memory she can read, not of the hr one', $q$SELECT string_agg(author_name, ',' ORDER BY author_name) FROM memory_evidence$q$, 'Yuna');
+SELECT t.err('N32l app_rw cannot write evidence', $q$INSERT INTO memory_evidence (memory_id, version, op, basis) VALUES ('00000000-0000-0000-0000-0000000032a1', 2, 'reconfirm', 'agreed')$q$, '42501');
+SELECT t.err('N32m app_rw cannot read store_autonomy', $q$SELECT count(*) FROM store_autonomy$q$, '42501');
+ROLLBACK;
 
 RESET ROLE;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
