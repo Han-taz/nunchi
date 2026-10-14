@@ -67,7 +67,7 @@ class FakeJudge:
         self.answer = answer
         self.asked: list[tuple[str, str]] = []
 
-    def same(self, first: str, second: str) -> bool:
+    def same(self, first: str, second: str, first_title: str = "", second_title: str = "") -> bool:
         self.asked.append((first, second))
         return self.answer
 
@@ -205,19 +205,77 @@ def test_differing_numbers_are_different_without_asking_the_judge(world: Pool) -
 
 
 @pytest.mark.db
-def test_short_fact_values_never_reach_the_judge(world: Pool) -> None:
+def test_short_paraphrase_reconfirms_when_the_judge_says_same(world: Pool) -> None:
     judge = FakeJudge(True)
     say = Say(world, judge)
-    first = say("백업 보관", attribute="주기")
-    again = say("보관 백업", attribute="주기")
-    assert isinstance(again, Created)
-    assert again.conflict_with == first.memory_id
+    first = say("v1.0에서 제거", attribute="v1.0 포함 여부")
+    again = say("v1.0 범위에서 제외", attribute="v1.0 포함 여부")
+    assert isinstance(again, Reconfirmed)
+    assert again.memory_id == first.memory_id
+    assert stored(world) == [("v1.0 포함 여부", "v1.0에서 제거")]
+    assert judge.asked == [("v1.0 범위에서 제외", "v1.0에서 제거")]
+
+
+@pytest.mark.db
+def test_short_value_the_judge_calls_different_is_a_challenger(world: Pool) -> None:
+    say = Say(world, FakeJudge(False))
+    first = say("Mattermost API로 조회", attribute="조회 방식")
+    other = say("User.teams 읽기", attribute="조회 방식")
+    assert isinstance(other, Created)
+    assert other.status.value == "challenger"
+    assert other.conflict_with == first.memory_id
+
+
+@pytest.mark.db
+def test_a_paraphrase_of_the_open_challenger_reconfirms_the_challenger(world: Pool) -> None:
+    class ByWord:
+        def same(
+            self, first: str, second: str, first_title: str = "", second_title: str = ""
+        ) -> bool:
+            return ("읽기" in first) == ("읽기" in second)
+
+    say = Say(world, ByWord())
+    live = say("Mattermost API로 조회", attribute="조회 방식")
+    challenger = say("User.teams 읽기", attribute="조회 방식")
+    again = say("User.teams 를 읽기", attribute="조회 방식")
+    assert isinstance(challenger, Created)
+    assert isinstance(again, Reconfirmed)
+    assert again.memory_id == challenger.memory_id
+    assert challenger.conflict_with == live.memory_id
+
+
+@pytest.mark.db
+def test_same_decision_under_another_attribute_lands_on_the_existing_key(world: Pool) -> None:
+    judge = FakeJudge(True)
+    say = Say(world, judge)
+    first = say("Mattermost 팀 멤버십", attribute="팀 정보 출처")
+    again = say("Mattermost API 팀 멤버십 조회", attribute="_user_teams 조회 방식")
+    assert isinstance(again, Reconfirmed)
+    assert again.memory_id == first.memory_id
+    assert stored(world) == [("팀 정보 출처", "mattermost 팀 멤버십")]
+
+
+@pytest.mark.db
+def test_other_attribute_with_a_different_decision_stays_a_new_key(world: Pool) -> None:
+    say = Say(world, FakeJudge(False))
+    say("Mattermost 팀 멤버십", attribute="팀 정보 출처")
+    other = say("Mattermost API 팀 멤버십 조회", attribute="_user_teams 조회 방식")
+    assert isinstance(other, Created)
+    assert [a for a, _ in stored(world)] == ["팀 정보 출처", "_user_teams 조회 방식"]
+
+
+@pytest.mark.db
+def test_unrelated_values_under_another_attribute_never_reach_the_judge(world: Pool) -> None:
+    judge = FakeJudge(True)
+    say = Say(world, judge)
+    say("이민수", attribute="담당자")
+    say("매월 1일", attribute="정산일")
     assert judge.asked == []
 
 
 @pytest.mark.db
 def test_title_glued_to_a_word_is_not_a_person(world: Pool) -> None:
-    say = Say(world, FakeJudge(True))
+    say = Say(world, None)
     first = say("영업부장", attribute="담당")
     other = say("영업팀장", attribute="담당")
     assert isinstance(other, Created)

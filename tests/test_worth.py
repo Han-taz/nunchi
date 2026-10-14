@@ -1,0 +1,56 @@
+import pytest
+
+from nunchi.capture.worth import not_worth
+from nunchi.domain.models import MemoryKind, MemoryOrigin
+from nunchi.extract import ProposalDraft
+
+
+def draft(title: str, value: str = "값") -> ProposalDraft:
+    return ProposalDraft(
+        kind=MemoryKind.FACT,
+        title=title,
+        subject_name="S",
+        attribute="a",
+        value=value,
+        origin=MemoryOrigin.INTERNAL,
+    )
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "로그인 페이지 OAuth URL을 /auth/mattermost/authorize로 수정 필요",
+        "S2 간격 토큰은 foundation.md 용어(spacing-xs~2xl)로 통일 필요",
+        "OAuth 콜백 경로 확인해야 합니다",
+        "백엔드 로그아웃 엔드포인트 구현 완료 (POST /auth/mattermost/logout)",
+        "docs/design/foundation.md 머지 완료, §6 스타일 방식 기준 문서",
+        "로그인 라우터를 푸시했다",
+        "M1 백엔드 뼈대 작업 현황 (junho.park)",
+        "PR #11 올렸습니다",
+    ],
+)
+def test_todos_and_status_claims_are_not_worth_keeping(title: str) -> None:
+    assert not_worth(draft(title)) is True
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "CI 파이프라인(lint·타입·테스트)은 M1 완료 조건",
+        "F2 팀 정보 출처를 Mattermost 팀 멤버십으로 결정",
+        "Cloudflare beacon은 v1.0에서 제거",
+        "마이그레이션 완료일은 3월 31일",
+        "PR 머지 후 릴리즈 태그를 단다",
+        "API 키는 서버에서만 사용해야 한다",
+        "DB는 Postgres 사용 필요",
+        "작업 현황 대시보드는 v1.0에서 제외",
+        "배포 스크립트를 정리해야 한다",
+    ],
+)
+def test_decisions_and_facts_stay(title: str) -> None:
+    assert not_worth(draft(title)) is False
+
+
+@pytest.mark.parametrize("value", ["5초로 수정했다", "추가했음", "구현 완료"])
+def test_the_value_is_never_scanned(value: str) -> None:
+    assert not_worth(draft("타임아웃 기본값", value)) is False

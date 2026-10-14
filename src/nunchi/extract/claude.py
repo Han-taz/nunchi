@@ -47,10 +47,16 @@ Describe each entry as follows. Pick relation:
 - not_worth for something not worth keeping; prefer leaving it out of "items". Not worth \
 remembering: chit-chat or social talk; transient logistics such as meeting times or who is out \
 today; progress or status reports ("X worked on Y, tests pass", "작업 현황", updates in the \
-"했습니다/통과했습니다" style, PR or branch announcements) that go stale as soon as the work moves \
-on; debate that has not reached a decision; a personal matter or an evaluation of a person; \
+"했습니다/통과했습니다" style, "구현 완료", "푸시했다", "머지했다", PR or branch announcements) \
+that go stale as soon as the work moves on; a todo naming a concrete fix \
+("~수정 필요", "~구현 필요", "~확인 필요"), because it states no decision (a policy such as \
+"~해야 한다" is a decision, keep it); debate that has not reached a decision; \
+a personal matter or an evaluation of a person; \
 something already well documented at its source, where a link is enough.
-- same_as when a candidate already states the same value for the same subject and attribute.
+- same_as when a candidate already states the same value for the same subject and attribute. A \
+candidate's status may be provisional or challenger; an open challenger counts as a candidate too. \
+Restating a candidate's decision in other words ("v1.0에서 제거" and "v1.0 범위에서 제외") is \
+same_as, not updates.
 - updates when the message gives a new value for the subject and attribute of a candidate.
 - retracts when the message takes back what a candidate states ("그거 아니야", "취소", "번복", \
 "없던 걸로"). The entry describes that candidate; copy its subject_name, attribute and \
@@ -81,6 +87,10 @@ subject (for example subject_name "deploy pipeline", attribute "rollback owner")
 required for fact, decision, and procedure and must be null for note. For a procedure the \
 attribute is "procedure". When you pick same_as or updates, copy the candidate's subject_name \
 and attribute exactly, character for character, so the keys match.
+- Reuse the attribute before inventing one. When a candidate of the same subject already states \
+this decision under any attribute, even one worded differently from the property you would name, \
+use that candidate's attribute and relation same_as or updates; never store one decision under \
+two attributes of a subject.
 - Reuse before inventing. When the subject is one of the <entities> under any spelling (an \
 abbreviation, a translation, different spacing, with or without 사 or Corp), set subject_entity_id \
 to that entity's id and subject_name to its name. Otherwise set subject_entity_id to null and \
