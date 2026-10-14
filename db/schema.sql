@@ -1521,7 +1521,8 @@ END $$;
 -- MCP decide (v1.3 §8): contributor 이상이면 사람이든 에이전트든 provisional/challenger 를 확정(confirm)하거나 모든 살아 있는 행을 철회(retract)한다.
 -- 증거(source_refs)는 필수이고, 작성자는 호출자로 고정한다 (클라이언트가 보낸 author 는 무시한다).
 -- 기존 증거에 이미 있는 작성자의 confirm 은 4행처럼 reconfirm 만 한다: 혼자서 확정하지 못한다. active 행의 confirm 도 reconfirm 이다.
--- 결과: applied(r_status = 새 상태), reconfirmed, refused(r_reason = stale 이면 expected_version 이 다름, not_live 이면 대상이 없거나 살아 있지 않거나 contributor 가 아님).
+-- 결과: applied(r_status = 새 상태), reconfirmed, refused.
+-- refused 의 r_reason: stale 이면 expected_version 이 다르고, not_live 이면 대상이 없거나 살아 있지 않거나 contributor 가 아니다.
 CREATE FUNCTION app_sec.decide(p_memory uuid, p_verdict text, p_expected_version integer, p_evidence jsonb)
 RETURNS TABLE (r_outcome text, r_status memory_status, r_reason text)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
