@@ -115,7 +115,7 @@ relation:  new | same_as | updates | retracts | not_worth   # retracts 가 새�
 
 ### 5.2 전이 표
 
-`memory_transition`의 행은 아래가 전부다. 표에 없는 `(from, to, op)`는 `P0001`이다. `contributor`는 그 store에 contributor 이상인 요청 컨텍스트(digest 봇, MCP를 쓰는 에이전트나 사람)이고, `system`은 컨텍스트 없는 워커다.
+`memory_transition`의 행은 아래가 전부다. 표에 없는 `(from, to, op)`는 `P0001`이다. `contributor`는 그 store에 contributor 이상인 요청 컨텍스트(digest 봇, MCP를 쓰는 에이전트나 사람)이고, `system`은 컨텍스트 없는 워커다. 카드 경로가 남아 있는 동안(U33 전까지)은 `proposed`에서 나가는 옛 행 세 개와 `reviewed` 열이 표에 함께 남고, U33이 지운다.
 
 | from | to | op | by_roles | 언제 |
 |---|---|---|---|---|
