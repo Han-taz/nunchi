@@ -164,7 +164,7 @@ def test_a_decision_nobody_outside_the_conversation_approved_waits_for_the_timer
 
 
 @pytest.mark.db
-def test_a_click_from_the_memorys_own_speaker_does_not_activate_it(live_shape: str) -> None:
+def test_a_click_from_the_speaker_of_the_memory_does_not_activate_it(live_shape: str) -> None:
     with psycopg.connect(live_shape) as conn:
         conn.execute(
             "UPDATE principal SET display_name = 'minji.kim' WHERE display_name = 'curator'"
