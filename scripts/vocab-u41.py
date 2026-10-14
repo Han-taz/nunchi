@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """One-shot, idempotent U41 migration of the live database to the attribute vocabulary.
 
-usage: vocab-u41.py repair [--dsn URL] [--days N] [--only ID,ID]
-                           [--dry-run | --apply --as-user UUID]
-       vocab-u41.py backfill [--dsn URL] [--dry-run | --apply]
+usage:
+  vocab-u41.py repair [--dsn URL] [--days N] [--only ID,ID] [--dry-run | --apply --as-user UUID]
+  vocab-u41.py backfill [--dsn URL] [--dry-run | --apply]
 
 Run repair first, then backfill. Both default to --dry-run, print the plan and write nothing.
 
