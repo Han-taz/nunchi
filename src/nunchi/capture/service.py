@@ -183,16 +183,12 @@ def _capture_draft(  # noqa: PLR0913, PLR0917
         draft = canonical_value(conn, extract_context.store_id, subject_id, draft, judge, cfg)
     request = to_propose_request(draft, extract_context, lambda _name: subject_id)
     flags = tuple(f.rule_id for f in gate.flags)
-    outcome = repo.propose(conn, request.model_copy(update={"gate_flags": flags}))
-    if outcome.kind == "reconfirmed":
+    outcome = repo.remember(conn, request.model_copy(update={"gate_flags": flags}))
+    if outcome.kind in ("confirmed", "reconfirmed"):
         return Reconfirmed(memory_id=outcome.memory_id)
-    row = conn.execute(
-        "SELECT status, conflict_with FROM memory WHERE id = %s", (outcome.memory_id,)
-    ).fetchone()
-    assert row is not None  # noqa: S101 - the proposer can read the row it just inserted
     return Created(
         memory_id=outcome.memory_id,
-        status=MemoryStatus(str(row[0])),
-        conflict_with=row[1],
+        status=outcome.status,
+        conflict_with=outcome.conflict_with,
         flags=flags,
     )

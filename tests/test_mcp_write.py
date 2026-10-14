@@ -140,7 +140,7 @@ def test_new_then_reconfirm_then_conflict(url: str, script: Script) -> None:
 
     changed = remember(url, script, "박OO")
     assert (changed["outcome"], changed["conflict_with"]) == ("created", first["memory_id"])
-    assert changed["status"] == "proposed"
+    assert changed["status"] == "challenger"
 
 
 def test_secret_is_rejected_and_chit_chat_is_skipped(url: str, script: Script) -> None:

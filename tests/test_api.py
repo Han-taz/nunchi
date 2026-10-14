@@ -138,7 +138,7 @@ def test_propose_rejections(client: TestClient) -> None:
     assert propose(client, h, subject_id=str(API_SUBJECT)).status_code == 422
     assert propose(client, as_user(OTHER)).status_code == 403
     assert propose(client, as_user(USER, AGENT)).status_code == 403
-    assert propose(client, h, supersedes_id=str(uuid.uuid4())).status_code == 404
+    assert propose(client, h, supersedes_id=str(uuid.uuid4())).status_code == 422
 
 
 @pytest.mark.parametrize(

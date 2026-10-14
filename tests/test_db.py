@@ -7,7 +7,7 @@ from psycopg_pool import ConnectionPool, PoolTimeout
 
 from nunchi.config import Settings
 from nunchi.db import bind_identity, open_pool, request_tx
-from tests.conftest import AGENT, AGENT_NO_GRANT, OTHER, STORE, TENANT, USER
+from tests.conftest import AGENT, AGENT_NO_GRANT, OTHER, STORE, USER
 
 
 def count_visible(
@@ -65,9 +65,9 @@ def test_exception_rolls_back_the_transaction(
 ) -> None:
     with pytest.raises(RuntimeError), request_tx(pool, USER, None) as conn:
         conn.execute(
-            "INSERT INTO memory (tenant_id, store_id, kind, status, title, created_by)"
-            " VALUES (%s, %s, 'note', 'proposed', 'x', %s)",
-            (TENANT, STORE, USER),
+            "SELECT app_sec.remember(%s, 'note', 'x', NULL, '[]', NULL, NULL, NULL, '{}',"
+            " 'stated', '[]', NULL)",
+            (STORE,),
         )
         raise RuntimeError
     assert count_visible(pool, USER, None) == 1

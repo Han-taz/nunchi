@@ -77,10 +77,11 @@ def get_memory(memory_id: UUID, run: Run) -> Memory:
 
 @router.post("/memories", responses={HTTPStatus.CREATED: {"model": ProposeOutcomeBody}})
 def propose(body: ClientProposal, run: Run, response: Response) -> ProposeOutcomeBody:
-    outcome = run(lambda c: repo.propose(c, body.model_copy(update={"gate_flags": ()})))
-    response.status_code = HTTPStatus.CREATED if outcome.kind == "created" else HTTPStatus.OK
+    outcome = run(lambda c: repo.remember(c, body.model_copy(update={"gate_flags": ()})))
+    created = outcome.kind in ("created", "challenged", "superseded")
+    response.status_code = HTTPStatus.CREATED if created else HTTPStatus.OK
     response.headers["Location"] = f"/v1/memories/{outcome.memory_id}"
-    return ProposeOutcomeBody(id=outcome.memory_id, outcome=outcome.kind)
+    return ProposeOutcomeBody(id=outcome.memory_id, outcome="created" if created else "reconfirmed")
 
 
 @router.get("/memories/{memory_id}/history")

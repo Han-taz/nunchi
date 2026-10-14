@@ -90,10 +90,11 @@ async def story(directory: Path, url: str) -> None:
             writer, "remember", text="A사 담당자는 박민수", store_id=STORE, source_refs=SOURCE
         )
         check("remember 박민수 -> created", second["outcome"], "created")
+        check("remember 박민수 -> challenger", second["status"], "challenger")
         check("conflict_with the first", second["conflict_with"], first["memory_id"])
 
         waiting = await call(writer, "get", memory_id=second["memory_id"])
-        check("the conflicting value waits", waiting["data"]["status"], "proposed")
+        check("the conflicting value waits", waiting["data"]["status"], "challenger")
 
         hits = await call(writer, "search", query="담당자")
         check("search 담당자 -> only the first", [h["id"] for h in hits], [first["memory_id"]])

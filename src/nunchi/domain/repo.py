@@ -24,6 +24,7 @@ from nunchi.domain.models import (
 from nunchi.embed import Embedder, embed_query
 
 NOTE_DEDUPE_DAYS = 14
+CONSENSUS = "stated"
 
 _MEMORY_COLUMNS = sql.SQL(
     "id, store_id, kind, status, title, body, source_refs, origin, supersedes_id,"
@@ -89,13 +90,12 @@ def get(conn: Conn, memory_id: UUID) -> Memory | None:
         ).fetchone()
 
 
-def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
-    """Insert a proposed memory. The trigger and the memory_propose policy bind author, tenant,
-    status and version, and a lineage walk sets origin. Only the delegate is spelled out because the
-    policy requires on_behalf_of = the user exactly when an agent is present.
-    A same-key same-value proposal is a reconfirm: the trigger returns NULL, RETURNING yields no
-    row, and the live row's id is looked up under the same request context.
-    A keyless note has no such key, so a near-duplicate of a recent note in the same store is
+def remember(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
+    """Write through app_sec.remember, the only way into memory: the function binds author,
+    delegate and tenant to the request, decides the state from the key's live row and the
+    consensus, and records the evidence. Every caller says `stated` until U34/U35 bring the
+    consensus judgement; each source ref becomes one evidence line.
+    A keyless note has no key, so a near-duplicate of a recent note in the same store is
     reconfirmed by app_sec.reconfirm_duplicate_note instead of stored again."""
     if req.kind is MemoryKind.NOTE and req.subject_id is None:
         duplicate = conn.execute(
@@ -103,39 +103,34 @@ def propose(conn: Conn, req: ProposeRequest) -> ProposeOutcome:
             (req.store_id, req.title, req.body, NOTE_DEDUPE_DAYS),
         ).fetchone()
         if duplicate is not None and duplicate[0] is not None:
-            return ProposeOutcome(kind="reconfirmed", memory_id=duplicate[0])
-    with conn.cursor() as cur:
-        rows = cur.execute(
-            sql.SQL(
-                "INSERT INTO memory"
-                " (store_id, kind, title, body, source_refs, supersedes_id,"
-                " subject_id, attribute, value, gate_result, on_behalf_of)"
-                " VALUES (%s, %s::memory_kind, %s, %s, %s, %s, %s, %s, %s, %s,"
-                " CASE WHEN app_sec.ctx_agent() IS NOT NULL THEN app_sec.ctx_user() END)"
-                " RETURNING id"
-            ),
-            (
-                req.store_id,
-                req.kind.value,
-                req.title,
-                req.body,
-                Jsonb([ref.model_dump(mode="json") for ref in req.source_refs]),
-                req.supersedes_id,
-                req.subject_id,
-                req.attribute,
-                req.value,
-                Jsonb({"flags": list(req.gate_flags)}),
-            ),
-        ).fetchall()
-        if rows:
-            return ProposeOutcome(kind="created", memory_id=rows[0][0])
-        live = cur.execute(
-            "SELECT id FROM memory WHERE store_id = %s AND subject_id = %s"
-            " AND attribute = app_sec.norm_text(%s) AND status IN ('active', 'provisional')",
-            (req.store_id, req.subject_id, req.attribute),
-        ).fetchone()
-    assert live is not None  # noqa: S101 - the trigger returned NULL only because this row matched
-    return ProposeOutcome(kind="reconfirmed", memory_id=live[0])
+            known = conn.execute(
+                "SELECT status FROM memory WHERE id = %s", (duplicate[0],)
+            ).fetchone()
+            assert known is not None  # noqa: S101 - the function just refreshed this row
+            return ProposeOutcome.model_validate(
+                {"kind": "reconfirmed", "memory_id": duplicate[0], "status": known[0]}
+            )
+    row = conn.execute(
+        "SELECT r_outcome, r_id, r_status, r_conflict FROM app_sec.remember("
+        "%s, %s::memory_kind, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            req.store_id,
+            req.kind.value,
+            req.title,
+            req.body,
+            Jsonb([ref.model_dump(mode="json") for ref in req.source_refs]),
+            req.subject_id,
+            req.attribute,
+            req.value,
+            Jsonb({"flags": list(req.gate_flags)}),
+            CONSENSUS,
+            Jsonb([{"uri": ref.uri} for ref in req.source_refs]),
+        ),
+    ).fetchone()
+    assert row is not None  # noqa: S101 - a set-returning function that writes always returns its row
+    return ProposeOutcome.model_validate(
+        {"kind": row[0], "memory_id": row[1], "status": row[2], "conflict_with": row[3]}
+    )
 
 
 def history(conn: Conn, memory_id: UUID) -> list[MemoryVersion]:
