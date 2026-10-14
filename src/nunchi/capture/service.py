@@ -10,7 +10,8 @@ from typing import Literal
 from uuid import UUID
 
 from nunchi.capture.resolve import ResolveConfig, known_entities, resolve_attribute, resolve_subject
-from nunchi.capture.same import canonical_value, keep_topic, reuse_attribute
+from nunchi.capture.same import canonical_value
+from nunchi.capture.vocab import settle_attribute
 from nunchi.capture.worth import not_worth
 from nunchi.db import Conn
 from nunchi.domain import repo
@@ -163,9 +164,7 @@ def _resolve_key(
         conn.execute("SELECT app_sec.add_entity_alias(%s, %s)", (subject_id, draft.subject_name))
     else:
         subject_id = resolve_subject(conn, draft.subject_name, embedder, cfg)
-    attribute = resolve_attribute(
-        conn, context.store_id, subject_id, draft.attribute, embedder, cfg
-    )
+    attribute = resolve_attribute(conn, context.store_id, subject_id, draft.attribute)
     return subject_id, draft.model_copy(update={"attribute": attribute})
 
 
@@ -246,13 +245,11 @@ def _capture_draft(  # noqa: PLR0913, PLR0917
     if gate.verdict is Verdict.REJECT:
         return Rejected(reasons=tuple(f.rule_id for f in gate.flags if f.action is Action.REJECT))
 
-    proposed = draft.attribute
     subject_id, draft = _resolve_key(conn, draft, extract_context, embedder, cfg)
     if subject_id is not None:
         store_id = extract_context.store_id
-        draft = reuse_attribute(conn, store_id, subject_id, draft, judge, cfg)
+        draft = settle_attribute(conn, store_id, subject_id, draft, judge)
         draft = canonical_value(conn, store_id, subject_id, draft, judge)
-        draft = keep_topic(conn, store_id, subject_id, draft, proposed, judge)
     request = to_propose_request(draft, extract_context, lambda _name: subject_id)
     flags = tuple(f.rule_id for f in gate.flags)
     outcome = repo.remember(

@@ -115,19 +115,24 @@ def test_different_subjects_stay_apart(world: Pool) -> None:
 
 
 @pytest.mark.db
-def test_trigram_reuses_a_close_spelling_and_attribute(world: Pool) -> None:
+def test_trigram_reuses_a_close_subject_spelling_but_not_a_close_attribute_name(
+    world: Pool,
+) -> None:
     ex = Scripted()
     say(world, ex, "Payment Gateway", "알림 채널", "#pay")
     say(world, ex, "Payment Gateways", "알림 채널명", "#pay-ops")
-    assert [k[:2] for k in keys(world)] == [("Payment Gateway", "알림 채널")] * 2
+    assert [k[:2] for k in keys(world)] == [
+        ("Payment Gateway", "알림-채널"),
+        ("Payment Gateway", "알림-채널명"),
+    ]
 
 
 @pytest.mark.db
-def test_attribute_below_the_trigram_floor_stays_a_new_key(world: Pool) -> None:
+def test_attributes_with_other_questions_stay_two_keys(world: Pool) -> None:
     ex = Scripted()
     say(world, ex, "A사", "계약 만료일", "2027-01-01")
     say(world, ex, "A사", "계약 시작일", "2026-01-01")
-    assert [k[1] for k in keys(world)] == ["계약 만료일", "계약 시작일"]
+    assert [k[1] for k in keys(world)] == ["계약-만료일", "계약-시작일"]
 
 
 EMBED = FakeEmbedder({"결제 모듈": 1, "payment module": 1, "컨택": 2, "담당자": 2, "계약": 3})
@@ -175,17 +180,17 @@ def test_the_cosine_floor_decides_the_embedding_merge(
 
 
 @pytest.mark.db
-def test_the_extractor_is_offered_known_entities_with_attributes(world: Pool) -> None:
+def test_the_extractor_is_offered_known_entities_with_their_vocabulary(world: Pool) -> None:
     ex = Scripted()
     say(world, ex, "A사", "담당자", "이OO")
     say(world, ex, "A사", "계약 만료일", "2027-01-01")
     say(world, ex, "A사", "담당자", "소식", source="A사 소식")
     assert ex.seen is not None
     [offered] = ex.seen.entities
-    assert (offered.name, offered.aliases, sorted(offered.attributes)) == (
+    assert (offered.name, offered.aliases, [(v.key, v.label) for v in offered.vocabulary]) == (
         "A사",
         ("a사",),
-        ["계약 만료일", "담당자"],
+        [("담당자", "담당자"), ("계약-만료일", "계약 만료일")],
     )
 
 

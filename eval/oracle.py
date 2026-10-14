@@ -93,6 +93,20 @@ def _wording(m: Message) -> str:
     return f"{m.filled}\n({m.subject} {m.attribute})" if m.group else m.filled
 
 
+_QUESTION_SUFFIX = "은(는) 무엇인가"
+_CONCEPT = {variant: gold for gold, variants in ATTRIBUTE_VARIANTS.items() for variant in variants}
+
+
+def question_of(attribute: str) -> str:
+    """The one-line question an extractor writes for a property it names `attribute`."""
+    return f"{attribute}{_QUESTION_SUFFIX}"
+
+
+def _concept(question: str) -> str:
+    name = question.removesuffix(_QUESTION_SUFFIX)
+    return _CONCEPT.get(name, name)
+
+
 class OracleJudge:
     """Gold knowledge: values are the same when they spell one gold value (the database stores
     them lowercased)."""
@@ -108,11 +122,10 @@ class OracleJudge:
         a, b = self._group.get(first.casefold()), self._group.get(second.casefold())
         return a is not None and a == b
 
-    def same_topic(
-        self, first: str, second: str, first_title: str = "", second_title: str = ""
-    ) -> bool:
-        """The gold corpus never puts an off-topic draft under an occupied key."""
-        return True
+    def same_question(self, first: str, second: str) -> bool:
+        """Gold knowledge: two questions ask the same thing when they name one gold attribute,
+        whichever spelling of it they use."""
+        return _concept(first) == _concept(second)
 
 
 class OracleExtractor:
@@ -161,13 +174,15 @@ class OracleExtractor:
         if not gold.remember or gold.kind is None or gold.memory is None:
             return None
         text = _wording(gold) if self._noisy else self._first[gold.memory]
+        attribute = self._spell(gold.attribute, ATTRIBUTE_VARIANTS, gold.subject or "")
         draft = ProposalDraft(
             kind=gold.kind,
             title=text[:_TITLE_CHARS],
             body=text,
             value=self._value(gold.memory),
             subject_name=self._spell(gold.subject, SUBJECT_VARIANTS, ""),
-            attribute=self._spell(gold.attribute, ATTRIBUTE_VARIANTS, gold.subject or ""),
+            attribute=attribute,
+            attribute_question=question_of(attribute) if attribute else None,
             source_refs=context.source_refs,
             origin=context.origin,
             **self._claim(gold),

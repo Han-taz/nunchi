@@ -24,6 +24,8 @@ from nunchi.extract.null import NullExtractor
 
 MODEL = "claude-haiku-5-5"
 MAX_TOKENS = 4000
+LABEL_CHARS = 80
+QUESTION_CHARS = 200
 
 SYSTEM_PROMPT = """\
 You turn one captured team message into draft memories, one per durable item it states, or \
@@ -57,7 +59,7 @@ something already well documented at its source, where a link is enough.
 candidate's status may be provisional or challenger; an open challenger counts as a candidate too. \
 Restating a candidate's decision in other words ("v1.0에서 제거" and "v1.0 범위에서 제외") is \
 same_as, not updates.
-- updates when the message gives a new value for the subject and attribute of a candidate.
+- updates when the message gives a new value for the same question a candidate answers.
 - retracts when the message takes back what a candidate states ("그거 아니야", "취소", "번복", \
 "없던 걸로"). The entry describes that candidate; copy its subject_name, attribute and \
 value.
@@ -82,21 +84,25 @@ When relation is not not_worth:
 - title is one line, at most 120 characters, in the language of the message.
 - body is a faithful, self-contained summary. Do not add facts the message does not state. \
 Do not copy secrets, credentials, or personal identifiers; leave them out.
-- subject_name names the thing the memory is about, and attribute names the property of that \
-subject (for example subject_name "deploy pipeline", attribute "rollback owner"). Both are \
-required for fact, decision, and procedure and must be null for note. For a procedure the \
-attribute is "procedure". When you pick same_as or updates, copy the candidate's subject_name \
-and attribute exactly, character for character, so the keys match.
-- Reuse the attribute before inventing one. When a candidate of the same subject already states \
-this decision under any attribute, even one worded differently from the property you would name, \
-use that candidate's attribute and relation same_as or updates; never store one decision under \
-two attributes of a subject.
+- subject_name names the thing the memory is about. Both subject_name and attribute are required \
+for fact, decision, and procedure and must be null for note. For a procedure the attribute is \
+"procedure".
+- attribute is a KEY, and a key stands for a question about the subject ("who implements \
+frontend ?next= handling", "contrast ratio of the light theme's border color"). Each entity in \
+<entities> lists its vocabulary: entries with key, label and question. When the message answers \
+the question of one of those entries, copy that entry's key exactly and set attribute_label and \
+attribute_question to null. The question must be the very same one: a shared subject, shared \
+words or a shared unit is not enough ("border 색의 대비 비율" and "텍스트 삼차색의 대비 비율" \
+are two questions), and a candidate's attribute does not make the message answer it. One decision \
+belongs under one key; never store it under two. When no entry fits, or the subject has no \
+vocabulary, invent a key: a short slug of at most 32 characters (lowercase letters, digits, \
+Hangul and hyphens, such as "border-contrast"), not a sentence and not the title. Then set \
+attribute_label to a short name and attribute_question to one line saying what the attribute \
+answers, without the value in it.
 - Reuse before inventing. When the subject is one of the <entities> under any spelling (an \
 abbreviation, a translation, different spacing, with or without 사 or Corp), set subject_entity_id \
 to that entity's id and subject_name to its name. Otherwise set subject_entity_id to null and \
-subject_name to the name the message uses. When the property is one of that entity's attributes \
-under other wording (담당자 and 컨택 and PM are one property), copy that attribute exactly. Only \
-listed ids are valid.
+subject_name to the name the message uses. Only listed ids are valid.
 - value is the bare answer to "the subject's attribute is ___": a few words, no sentence, \
 no particles or politeness (attribute "정산 담당자" gives value "김철수"; "점검 주기" gives \
 "매월 1일"; "회의실 위치" gives "3층"). Restating the same fact in other words must give the \
@@ -119,6 +125,8 @@ ITEM_SCHEMA: dict[str, Any] = {
         "subject_name": _NULLABLE_STRING,
         "subject_entity_id": _NULLABLE_STRING,
         "attribute": _NULLABLE_STRING,
+        "attribute_label": _NULLABLE_STRING,
+        "attribute_question": _NULLABLE_STRING,
         "value": _NULLABLE_STRING,
         "valid_from": _NULLABLE_STRING,
         "consensus": {"type": "string", "enum": [c.value for c in Consensus]},
@@ -133,6 +141,8 @@ ITEM_SCHEMA: dict[str, Any] = {
         "subject_name",
         "subject_entity_id",
         "attribute",
+        "attribute_label",
+        "attribute_question",
         "value",
         "valid_from",
         "consensus",
@@ -157,6 +167,8 @@ class _Reply(Frozen):
     subject_name: str | None
     subject_entity_id: str | None = None  # a free string: an id the model garbled matches nothing
     attribute: str | None
+    attribute_label: str | None = None
+    attribute_question: str | None = None
     value: str | None = None  # a reply without it still parses; the key then falls back to the body
     valid_from: date | None
     consensus: Consensus = Consensus.STATED  # a reply without it is the weaker claim
@@ -230,8 +242,10 @@ def _draft(reply: _Reply, context: ExtractContext) -> ProposalDraft:
         picked = next((c for c in context.candidates if c.id == reply.relation_id), None)
         if picked is None:
             raise ExtractionError(FailureReason.MALFORMED, "relation_id is not a candidate")
-        if picked.subject_name is not None and picked.attribute is not None:
-            subject_name, attribute = picked.subject_name, picked.attribute
+        if picked.subject_name is not None:
+            subject_name = picked.subject_name
+        if reply.relation is RelationKind.RETRACTS and picked.attribute is not None:
+            attribute = picked.attribute  # a retraction names the candidate's own key
     entity = next((e for e in context.entities if str(e.id) == reply.subject_entity_id), None)
     if entity is not None and picked is None:
         subject_name = entity.name
@@ -243,6 +257,8 @@ def _draft(reply: _Reply, context: ExtractContext) -> ProposalDraft:
             subject_name=subject_name,
             subject_entity_id=entity.id if entity else None,
             attribute=attribute,
+            attribute_label=_cut(reply.attribute_label, LABEL_CHARS),
+            attribute_question=_cut(reply.attribute_question, QUESTION_CHARS),
             value=(reply.value or None) if reply.kind is not MemoryKind.NOTE else None,
             source_refs=context.source_refs,
             valid_from=reply.valid_from,
@@ -253,6 +269,10 @@ def _draft(reply: _Reply, context: ExtractContext) -> ProposalDraft:
         )
     except ValidationError as exc:
         raise ExtractionError(FailureReason.MALFORMED, "draft failed validation") from exc
+
+
+def _cut(text: str | None, limit: int) -> str | None:
+    return (text.strip()[:limit] or None) if text else None
 
 
 def _parse_reply(text: str) -> _Replies:

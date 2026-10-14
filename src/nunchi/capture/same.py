@@ -13,7 +13,6 @@ import re
 from collections.abc import Sequence
 from uuid import UUID
 
-from nunchi.capture.resolve import ResolveConfig
 from nunchi.db import Conn
 from nunchi.domain.models import MemoryStatus
 from nunchi.extract import ProposalDraft, ValueJudge
@@ -60,37 +59,6 @@ def canonical_value(
 _TITLE_ATTRIBUTE_CHARS = 60
 
 
-def keep_topic(  # noqa: PLR0913, PLR0917 - the key, the draft, its spelling, the judge
-    conn: Conn,
-    store_id: UUID,
-    subject_id: UUID,
-    draft: ProposalDraft,
-    proposed: str | None,
-    judge: ValueJudge | None,
-) -> ProposalDraft:
-    """The draft, moved to an attribute of its own unless the judge confirms it answers the same
-    question as the open row that holds its key. A different value under an occupied key is a
-    new answer to that row's question (a challenge, or a supersede when agreed); a draft on another
-    topic must never get there. A judge error or any doubt means another topic. Without a judge
-    there is no model that guessed the key (the extractor needs the same API key), so the caller's
-    own key stands. `proposed` is the model's own spelling, the first choice for the new
-    attribute."""
-    if judge is None or draft.value is None or draft.attribute is None:
-        return draft
-    rows = _open_rows(conn, store_id, subject_id, draft.attribute)
-    new = strip_honorific(draft.value)
-    for value, title in rows:
-        if same_decision(new, draft.title, value, title, judge):
-            return draft
-    if not rows or judge.same_topic(new, rows[0][0], draft.title, rows[0][1]):
-        return draft
-    return draft.model_copy(
-        update={
-            "attribute": free_attribute(conn, store_id, subject_id, [proposed or "", draft.title])
-        }
-    )
-
-
 def free_attribute(conn: Conn, store_id: UUID, subject_id: UUID, wanted: Sequence[str]) -> str:
     """The first wanted name no open row of the subject holds, else the last wanted name with a
     number. Names are cut to a title-sized length."""
@@ -113,45 +81,6 @@ def _open_rows(
         (store_id, subject_id, attribute, list(_OPEN)),
     ).fetchall()
     return [(str(v), str(t)) for v, t in rows]
-
-
-def reuse_attribute(  # noqa: PLR0913, PLR0917 - the key (store, subject), the draft and the knobs
-    conn: Conn,
-    store_id: UUID,
-    subject_id: UUID,
-    draft: ProposalDraft,
-    judge: ValueJudge | None,
-    cfg: ResolveConfig,
-) -> ProposalDraft:
-    """A draft whose attribute is new for its subject takes the attribute of an open row of the
-    same subject that states the same decision (title and value close by trigram, then the judge
-    agrees). One decision then lives under one key, not under two spellings of its property."""
-    if judge is None or draft.value is None or draft.attribute is None:
-        return draft
-    taken = conn.execute(
-        "SELECT 1 FROM memory WHERE store_id = %s AND subject_id = %s"
-        " AND attribute = app_sec.norm_text(%s) AND status = ANY(%s)",
-        (store_id, subject_id, draft.attribute, list(_OPEN)),
-    ).fetchone()
-    if taken is not None:
-        return draft
-    new = strip_honorific(draft.value)
-    text = f"{draft.title} {new}"
-    rows = conn.execute(
-        "SELECT attribute, value, title FROM memory WHERE store_id = %s AND subject_id = %s"
-        " AND status = ANY(%s) AND value IS NOT NULL ORDER BY created_at",
-        (store_id, subject_id, list(_OPEN)),
-    ).fetchall()
-    scored = sorted(
-        ((trigram_similarity(text, f"{t} {v}"), a, v, t) for a, v, t in rows),
-        key=lambda r: -r[0],
-    )
-    near = [(a, v, t) for sim, a, v, t in scored if sim >= cfg.reuse_trigram_min]
-    near = near[: cfg.reuse_candidates]
-    for attribute, value, title in near:
-        if same_decision(new, draft.title, str(value), str(title), judge):
-            return draft.model_copy(update={"attribute": str(attribute)})
-    return draft
 
 
 def _trigrams(text: str) -> set[str]:

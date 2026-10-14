@@ -24,6 +24,7 @@ from nunchi.extract import (
     Relation,
     RelationKind,
     UnknownSubjectError,
+    VocabEntry,
     build_extractor,
     to_propose_request,
 )
@@ -47,7 +48,7 @@ ENTITY = EntityContext(
     id=UUID("00000000-0000-0000-0000-0000000000e1"),
     name="A사",
     aliases=("a사", "에이사"),
-    attributes=("담당자",),
+    vocabulary=(VocabEntry(key="담당자", label="담당자", question="A사의 담당자는 누구인가"),),
 )
 CTX_ENTITY = CTX.model_copy(update={"entities": (ENTITY,)})
 
@@ -61,6 +62,8 @@ def reply(**over: str | bool | list[int] | None) -> dict[str, Any]:
         "body": "Decided on 2026-10-12: rollbacks use the deploy bot because it logs approvals.",
         "subject_name": "deploy pipeline",
         "attribute": "rollback method",
+        "attribute_label": None,
+        "attribute_question": None,
         "value": None,
         "valid_from": "2026-10-12",
     }
@@ -361,7 +364,7 @@ def capture(out: list[dict[str, Any]], text: str) -> ClaudeExtractor:
     return extractor(respond)
 
 
-def test_update_to_a_candidate_copies_its_key_and_candidates_stay_out_of_system() -> None:
+def test_update_to_a_candidate_copies_its_subject_and_keeps_the_models_key() -> None:
     seen: list[dict[str, Any]] = []
     model_says = reply(
         kind="fact",
@@ -374,7 +377,7 @@ def test_update_to_a_candidate_copies_its_key_and_candidates_stay_out_of_system(
     )
     (draft,) = capture(seen, wire(model_says)).extract("A사 담당자 박OO로 변경", CTX_WITH)
     assert draft.relation == Relation(kind=RelationKind.UPDATES, target_id=CAND.id)
-    assert (draft.subject_name, draft.attribute) == ("A사", "담당자")
+    assert (draft.subject_name, draft.attribute) == ("A사", "담당 PM")
     assert seen[0]["system"] == SYSTEM_PROMPT
     assert "A사" not in SYSTEM_PROMPT
     content = seen[0]["messages"][0]["content"]
@@ -383,7 +386,7 @@ def test_update_to_a_candidate_copies_its_key_and_candidates_stay_out_of_system(
     assert content.index("<candidates>") < content.index("<source>")
 
 
-def test_repeat_returns_same_as_with_the_candidate_key() -> None:
+def test_repeat_returns_same_as_with_the_candidate_subject() -> None:
     model_says = reply(
         kind="fact",
         relation="same_as",
@@ -393,7 +396,7 @@ def test_repeat_returns_same_as_with_the_candidate_key() -> None:
     )
     (draft,) = replying(message(wire(model_says))).extract("A사 담당자 이OO", CTX_WITH)
     assert draft.relation == Relation(kind=RelationKind.SAME_AS, target_id=CAND.id)
-    assert (draft.subject_name, draft.attribute) == ("A사", "담당자")
+    assert (draft.subject_name, draft.attribute) == ("A사", "owner")
 
 
 def test_relation_id_outside_the_candidates_is_malformed() -> None:
@@ -492,11 +495,13 @@ def test_keyless_candidate_leaves_the_model_key_alone() -> None:
     assert (draft.subject_name, draft.attribute) == ("deploy pipeline", "rollback method")
 
 
-def test_entities_are_rendered_as_a_data_block_with_aliases_and_attributes() -> None:
+def test_entities_are_rendered_as_a_data_block_with_aliases_and_vocabulary() -> None:
     rendered = render_user_content("에이사 담당자 변경", CTX_ENTITY)
     assert (
         '<entities>\n[\n {\n  "id": "00000000-0000-0000-0000-0000000000e1",\n  "name": "A사",\n'
-        '  "aliases": [\n   "a사",\n   "에이사"\n  ],\n  "attributes": [\n   "담당자"\n  ]\n }\n]\n'
+        '  "aliases": [\n   "a사",\n   "에이사"\n  ],\n  "vocabulary": [\n   {\n'
+        '    "key": "담당자",\n    "label": "담당자",\n'
+        '    "question": "A사의 담당자는 누구인가"\n   }\n  ]\n }\n]\n'
         "</entities>\n<source>\n에이사 담당자 변경\n</source>"
     ) in rendered
     assert "<entities>" not in render_user_content("x", CTX)
@@ -566,3 +571,22 @@ def test_the_prompt_teaches_numbered_posts_retraction_and_the_claim() -> None:
     assert "retracts when the message takes back what a candidate states" in SYSTEM_PROMPT
     assert 'consensus is "agreed" when at least two different people' in SYSTEM_PROMPT
     assert "an unproven one is lowered" in SYSTEM_PROMPT
+
+
+def test_a_proposed_attribute_carries_its_label_and_question_cut_to_size() -> None:
+    says = reply(
+        attribute="border-contrast",
+        attribute_label=" border 대비 ",
+        attribute_question="가" * 300,
+    )
+    (draft,) = replying(message(wire(says))).extract("x", CTX)
+    assert (draft.attribute, draft.attribute_label, draft.attribute_question) == (
+        "border-contrast",
+        "border 대비",
+        "가" * 200,
+    )
+
+
+def test_the_schema_demands_label_and_question_and_the_prompt_teaches_the_key() -> None:
+    assert {"attribute_label", "attribute_question"} <= set(ITEM_SCHEMA["required"])
+    assert "copy that entry's key exactly" in SYSTEM_PROMPT

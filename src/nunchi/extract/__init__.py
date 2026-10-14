@@ -18,6 +18,7 @@ from nunchi.extract.draft import (
     ProposalDraft,
     Relation,
     RelationKind,
+    VocabEntry,
 )
 from nunchi.extract.judge import ClaudeJudge, ValueJudge, build_judge
 from nunchi.extract.null import NullExtractor
@@ -41,6 +42,7 @@ __all__ = [
     "RelationKind",
     "UnknownSubjectError",
     "ValueJudge",
+    "VocabEntry",
     "WindowPost",
     "build_extractor",
     "build_judge",
