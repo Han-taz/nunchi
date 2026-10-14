@@ -136,9 +136,6 @@ def test_propose_binds_the_author_and_ignores_the_client(fresh_db: str, world: P
         None,
     )
     assert direct.version == 1
-    with psycopg.connect(fresh_db) as conn:
-        tier = conn.execute("SELECT tier::text FROM memory WHERE id = %s", (direct.id,)).fetchone()
-    assert tier == ("auto_labeled",)
 
 
 @pytest.mark.db
@@ -152,7 +149,7 @@ def test_propose_as_agent_records_the_delegate(fresh_db: str, world: Pool) -> No
         mem = repo.get(conn, repo.propose(conn, req).memory_id)
     assert mem is not None
     assert (mem.created_by, mem.on_behalf_of) == (AGENT, USER)
-    assert mem.status == MemoryStatus.PROPOSED
+    assert mem.status == MemoryStatus.PROVISIONAL
 
 
 @pytest.mark.db
@@ -187,7 +184,7 @@ def test_history_and_dependents(world: Pool) -> None:
         reader_hist = repo.history(conn, child.id)
     with request_tx(world, USER, None) as conn:
         unreviewed_hist = repo.history(conn, PROPOSED_BY_OTHER)
-    expected = [(1, MemoryOp.PROPOSE, USER), (1, MemoryOp.AUTO_ACTIVATE, USER)]
+    expected = [(1, MemoryOp.PROPOSE, USER)]
     assert [(v.version, v.op, v.actor_id) for v in versions] == expected
     assert [d.id for d in deps] == [child.id]
     assert none_for_child == []

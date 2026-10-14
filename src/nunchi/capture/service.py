@@ -51,7 +51,6 @@ class Rejected(Frozen):
 class Created(Frozen):
     outcome: Literal["created"] = "created"
     memory_id: UUID
-    tier: str
     status: MemoryStatus
     conflict_with: UUID | None = None
     flags: tuple[str, ...] = ()
@@ -188,13 +187,12 @@ def _capture_draft(  # noqa: PLR0913, PLR0917
     if outcome.kind == "reconfirmed":
         return Reconfirmed(memory_id=outcome.memory_id)
     row = conn.execute(
-        "SELECT tier, status, conflict_with FROM memory WHERE id = %s", (outcome.memory_id,)
+        "SELECT status, conflict_with FROM memory WHERE id = %s", (outcome.memory_id,)
     ).fetchone()
     assert row is not None  # noqa: S101 - the proposer can read the row it just inserted
     return Created(
         memory_id=outcome.memory_id,
-        tier=str(row[0]),
-        status=MemoryStatus(str(row[1])),
-        conflict_with=row[2],
+        status=MemoryStatus(str(row[0])),
+        conflict_with=row[1],
         flags=flags,
     )

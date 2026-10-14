@@ -48,7 +48,7 @@ def test_the_same_progress_note_stored_ten_minutes_apart_is_one_row_reconfirmed(
         ops = conn.execute(
             "SELECT op FROM memory_version WHERE memory_id = %s ORDER BY id", (first.memory_id,)
         ).fetchall()
-    assert [op for (op,) in ops] == ["propose", "auto_activate", "reconfirm"]
+    assert [op for (op,) in ops] == ["propose", "reconfirm"]
 
 
 @pytest.mark.db

@@ -92,7 +92,7 @@ def test_propose_history_dependents(client: TestClient) -> None:
     )
     assert (got["subject_id"], got["attribute"]) == (None, None)
     hist = client.get(f"/v1/memories/{created['id']}/history", headers=h).json()
-    assert [(v["version"], v["op"]) for v in hist] == [(1, "propose"), (1, "auto_activate")]
+    assert [(v["version"], v["op"]) for v in hist] == [(1, "propose")]
     child = propose(
         client,
         h,

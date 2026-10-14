@@ -223,7 +223,7 @@ def test_a_window_with_a_decision_creates_one_memory_and_a_rerun_creates_none(wo
     report = run_digest(digest)
 
     assert report == DigestReport(windows=1, created=1)
-    assert rows(url) == [("금요일 배포 금지", "proposed", False)]
+    assert rows(url) == [("금요일 배포 금지", "provisional", False)]
     text, context = extractor.seen[0]
     assert text.splitlines()[0] == "minji.kim: 금요일 배포 어떻게 할까요?"
     assert len(text.splitlines()) == 4
