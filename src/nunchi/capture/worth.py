@@ -1,10 +1,8 @@
 """Statements that are never memories, however the extractor labelled them.
 
-A todo ("수정 필요", "해야 한다", "할 예정"), a progress or status claim ("구현 완료",
-"푸시했다", "머지했다", "작업 현황") and a PR announcement go stale the moment the work moves, and
-one such claim was false when stored. The extractor prompt says so; this is the server's own
-check, run on the draft's title and value, so a model that forgets the rule still stores
-nothing."""
+Todos ("수정 필요", "할 예정"), status claims ("구현 완료", "머지했다", "작업 현황") and PR
+announcements go stale as the work moves, and one stored claim was false. The extractor prompt says
+so; this is the server's own check on the draft's title and value."""
 
 import re
 

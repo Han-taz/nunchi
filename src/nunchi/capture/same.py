@@ -4,11 +4,10 @@ The database trigger compares normalized values and reconfirms on equality. This
 equality mean what a reader means: honorifics do not count, and a value restated in other words
 counts when a yes/no judge model says the two give the same answer (embedding cosine could not tell
 the same value from a different one: false merges stayed high at every floor). The judge sees both
-values with their titles, because a short value ("제거", "제외") means little alone. The live row is
-compared first, then the key's open challenger. A merge
-is only ever expressed by handing the draft the live row's own value, so the trigger stays the
-single decider and a missing judge, a judge error or any doubt leaves the values different (an
-update, never a false merge)."""
+values with their titles (a short value means little alone), the live row first, then the key's
+open challenger. A merge is only ever expressed by handing the draft the live row's own value, so
+the trigger stays the single decider and a missing judge, a judge error or any doubt leaves the
+values different (an update, never a false merge)."""
 
 import re
 from uuid import UUID

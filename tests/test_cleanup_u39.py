@@ -157,12 +157,9 @@ def test_apply_rejects_collapses_and_merges_then_a_second_run_does_nothing(messy
     assert again == "applied: {'reject': 0, 'collapse': 0, 'merge': 0}\n"
 
 
-def test_apply_refuses_without_a_judge(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_needs_a_judge_and_an_acting_principal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert load().main(["--dsn", "postgresql://unused", "--apply", "--as-user", str(USER)]) == 2
-
-
-def test_apply_needs_an_acting_principal() -> None:
     with pytest.raises(SystemExit):
         load().main(["--dsn", "postgresql://unused", "--apply"], judge=PairJudge())
 

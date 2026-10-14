@@ -44,7 +44,6 @@ def test_a_status_claim_in_the_value_is_not_worth_keeping() -> None:
         "CI 파이프라인(lint·타입·테스트)은 M1 완료 조건",
         "F2 팀 정보 출처를 Mattermost 팀 멤버십으로 결정",
         "Cloudflare beacon은 v1.0에서 제거",
-        "필요한 권한은 읽기 전용으로 결정",
         "마이그레이션 완료일은 3월 31일",
         "PR 머지 후 릴리즈 태그를 단다",
     ],

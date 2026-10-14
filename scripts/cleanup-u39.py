@@ -4,21 +4,17 @@
 usage: cleanup-u39.py [--dsn URL] [--dry-run | --apply --as-user PRINCIPAL_UUID]
 
 Connects as the schema owner (default: NUNCHI_DATABASE_URL). --dry-run (the default) prints the plan
-and writes nothing. --apply runs the plan in one transaction. A second run finds nothing to do.
---apply acts as that principal (a contributor or curator of every store touched: the
-retract transitions belong to that role and the history names it). The same-decision questions go
-to the judge model (ANTHROPIC_API_KEY); without a key the dry run
-lists the candidate pairs unjudged and --apply refuses.
+and writes nothing. --apply runs it in one transaction as --as-user, a contributor or curator of
+every store touched (the retract transitions belong to that role). A second run does nothing.
+Same-decision questions go to the judge model (ANTHROPIC_API_KEY); without a key the dry run lists
+the candidates unjudged and --apply refuses.
 
-Data shape: a Plan is a list of Action. Each open row (provisional, active, challenger) ends in at
-most one Action, in this order:
-  reject    a todo or status claim: moved to rejected (expired when it was active).
-  collapse  an open challenger that restates its key's live row: rejected, its evidence becomes
-            reconfirm evidence of the live row.
-  merge     a later row that states the same decision as an earlier row under another key: rejected
-            (expired when active), its evidence becomes reconfirm evidence of the earlier row.
-A merged row's own open challenger, if any, becomes that key's provisional row (coordinator
-decision 2) and is not merged again here.
+Data shape: a Plan is a list of Action, at most one per open row (provisional, active, challenger):
+  reject    a todo or status claim: rejected (expired when it was active).
+  collapse  an open challenger that restates its key's live row: rejected, evidence moved to the
+            live row as reconfirm evidence.
+  merge     a later row that states an earlier row's decision under another key: same treatment.
+A merged row's own open challenger becomes that key's provisional row (coordinator decision 2).
 """
 
 from __future__ import annotations
@@ -97,7 +93,7 @@ def build_plan(rows: list[dict[str, Any]], judge: ValueJudge | None) -> list[Act
         if row["status"] != "challenger" or base is None:
             continue
         verdict = _same(row, base, judge)
-        if verdict is not False and (verdict is None or verdict):
+        if verdict is not False:
             plan.append(
                 Action("collapse", row, base, "restates the live row", judged=verdict is not None)
             )
