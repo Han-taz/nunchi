@@ -549,7 +549,7 @@ CREATE FUNCTION t.exec_list(r text DEFAULT 'app_rw') RETURNS text LANGUAGE sql A
 $$;
 SET ROLE app_rw;
 SELECT t.eq('P3 functions app_rw can execute equal the allowlist', 'SELECT t.exec_list()',
-  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.reconfirm_duplicate_note,app_sec.remember,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
+  'app_sec.add_entity_alias,app_sec.advance_digest,app_sec.attribute_matches,app_sec.begin_request,app_sec.claim_inbound_event,app_sec.create_entity,app_sec.ctx_agent,app_sec.ctx_tenant,app_sec.ctx_user,app_sec.decide,app_sec.entity_matches,app_sec.evidence_digest,app_sec.evidence_line,app_sec.memory_as_of,app_sec.my_store_roles,app_sec.my_stores,app_sec.norm_text,app_sec.reconfirm_duplicate_note,app_sec.remember,app_sec.replace_room_members,app_sec.resolve_entity,app_sec.resolve_identity,app_sec.resolve_principal,app_sec.search,app_sec.set_digest,app_sec.verify_chain,public.principal_closure');
 RESET ROLE;
 -- 워커 역할(U12b): 실행 가능한 함수는 정확히 두 개이고 표 권한은 하나도 없다
 SELECT t.eq('P3d nunchi_worker executes exactly the five worker functions and holds no table privilege', $q$SELECT t.exec_list('nunchi_worker') || ' | tables=' || (SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_table_privilege(to_regrole('nunchi_worker')::oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text$q$,
@@ -1557,7 +1557,7 @@ SELECT t.eq('N67a decision 2 on expiry too: the challenger became the provisiona
 SET ROLE app_rw;
 
 
--- 쓰기는 remember() 하나다 (U33f): 옛 INSERT 경로가 없고 challenger 는 쓴 사람에게만 보인다
+-- 쓰기는 remember() 하나다 (U33f): 옛 INSERT 경로가 없다. challenger 는 store 의 reader 에게 보인다 (U37)
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
 SELECT t.err('N64 app_rw cannot INSERT into memory: remember() is the only way in', $q$INSERT INTO memory (tenant_id, store_id, kind, title, source_refs, created_by) VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000f001', 'note', 'direct', '[]', '00000000-0000-0000-0000-0000000005a1')$q$, '42501');
 COMMIT;
@@ -1565,7 +1565,7 @@ BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a2', NULL);
 SELECT t.eq('N57d a challenger is visible to its author', $q$SELECT t.rem('n57d', 'a', 'agreed') || ' ' || t.rem('n57d', 'b') || ' ' || (t.ridv('n57d', 'challenger') IS NOT NULL)::text$q$, 'created/active challenged/challenger true');
 COMMIT;
 BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
-SELECT t.eq('N57e and invisible to another contributor', $q$SELECT (t.rid('n57d', 'challenger') IS NULL)::text$q$, 'true');
+SELECT t.eq('N57e and visible to another contributor of the store (U37)', $q$SELECT (t.rid('n57d', 'challenger') IS NOT NULL)::text$q$, 'true');
 COMMIT;
 
 -- 값이 없는 옛 행은 본문 해시로 같은 값을 판정하고, 다시 말할 때 값을 채운다 (옛 N43~N45)
@@ -1655,6 +1655,74 @@ EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'setup failed: % %', SQLSTATE, SQLERRM;
 END $do$;
 SELECT t.eq('N84b once the cursor passes promote_at it is promoted', $q$SELECT t.after(now() + interval '25 hours', 'n74on')$q$, 'n74on:active');
 SELECT t.eq('N84c and the evidence post_id is the cursor', $q$SELECT e.post_id = b.digest_cursor::text FROM memory_evidence AS e, room_binding AS b WHERE e.memory_id = t.rid('n74on', 'active') AND e.op = 'promote' AND b.channel_id = 'C5PUB'$q$, 'true');
+-- 읽기 표면 (U37): challenger 는 reader 에게 보이고 search 는 살아 있는 행에 pending_* 로 접는다. decide 는 contributor 의 confirm/retract.
+RESET ROLE;
+CREATE FUNCTION t.dec(p_id uuid, p_verdict text, p_version_delta integer DEFAULT 0) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r record;
+BEGIN
+  SELECT * INTO r FROM app_sec.decide(p_id, p_verdict, (SELECT m.version FROM memory AS m WHERE m.id = p_id) + p_version_delta, '[{"uri":"https://chat/p/9"}]');
+  RETURN r.r_outcome || '/' || coalesce(r.r_status::text, '-') || '/' || coalesce(r.r_reason, '-');
+END $$;
+SET ROLE app_rw;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N90 setup: a live value and a challenger', $q$SELECT t.rem('n80', 'alphaone', 'agreed') || ' ' || t.rem('n80', 'zetatwo')$q$, 'created/active challenged/challenger');
+SELECT t.eq('N90a search by the challenger text returns the live row with pending_change', $q$SELECT string_agg(status || '/' || title || '/' || pending_value || '/' || (pending_promote_at IS NOT NULL)::text, ',') FROM app_sec.search('zetatwo')$q$, 'active/A사 n80/zetatwo/true');
+SELECT t.eq('N90b search by the live text carries the same pending_change', $q$SELECT string_agg(status || '/' || pending_value, ',') FROM app_sec.search('alphaone')$q$, 'active/zetatwo');
+SELECT t.eq('N90c the challenger is not a result row of its own by default', $q$SELECT count(*)::text FROM app_sec.search('zetatwo')$q$, '1');
+SELECT t.eq('N90d asking for the challenger status returns it as its own row', $q$SELECT string_agg(status::text, ',') FROM app_sec.search('zetatwo', NULL, ARRAY['challenger']::memory_status[])$q$, 'challenger');
+SELECT t.eq('N90e a live row outside the requested statuses drops its challenger hit', $q$SELECT count(*)::text FROM app_sec.search('zetatwo', NULL, ARRAY['provisional']::memory_status[])$q$, '0');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', NULL);
+SELECT t.eq('N90f a reader of the store sees the pending_change (policy and search agree)', $q$SELECT string_agg(status || '/' || pending_value, ',') FROM app_sec.search('zetatwo')$q$, 'active/zetatwo');
+SELECT t.eq('N90g and reads the challenger row through the policy', $q$SELECT count(*)::text FROM memory WHERE attribute = 'n80' AND status = 'challenger'$q$, '1');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000b1', NULL);
+SELECT t.eq('N90h a user without access to the store sees neither the row nor the pending_change', $q$SELECT (SELECT count(*) FROM app_sec.search('zetatwo'))::text || '/' || (SELECT count(*) FROM memory WHERE attribute = 'n80')$q$, '0/0');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N91 search reports basis, promote_at and the flag count of a flagged provisional row', $q$SELECT t.rem('n81', 'gammathree', 'stated', '[]', '{"flags":["imperative","x"]}')$q$, 'created/provisional');
+SELECT t.eq('N91a basis, no promote_at for a flagged row (it never promotes by timer), flag count and key', $q$SELECT basis::text || '/' || (promote_at IS NOT NULL)::text || '/' || flags::text || '/' || attribute FROM app_sec.search('gammathree', NULL, ARRAY['provisional']::memory_status[])$q$, 'stated/false/2/n81');
+SELECT t.eq('N92 as_of never returns a challenger: the live row answers', $q$SELECT string_agg(status::text, ',') FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', 'n80', current_date)$q$, 'active');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N93 setup: a provisional row', $q$SELECT t.rem('n83', 'deltafour')$q$, 'created/provisional');
+SELECT t.eq('N93a decide confirm by the speaker is only a reconfirm', $q$SELECT t.dec(t.ridv('n83', 'provisional'), 'confirm')$q$, 'reconfirmed/provisional/-');
+SELECT t.eq('N93b a stale expected_version is refused and changes nothing', $q$SELECT t.dec(t.ridv('n83', 'provisional'), 'confirm', -1) || ' ' || t.states('n83')$q$, 'refused/provisional/stale deltafour:provisional');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a2', NULL);
+SELECT t.eq('N93c another contributor confirms: active', $q$SELECT t.dec(t.ridv('n83', 'provisional'), 'confirm')$q$, 'applied/active/-');
+SELECT t.eq('N93e basis agent and one confirm evidence row', $q$SELECT m.basis::text || '/' || (SELECT count(*) FROM memory_evidence AS e WHERE e.memory_id = m.id AND e.op = 'confirm') FROM memory AS m WHERE m.id = t.rid('n83', 'active')$q$, 'agent/1');
+SELECT t.eq('N93d the chain still verifies after decide', $q$SELECT app_sec.verify_chain(t.rid('n83', 'active'))::text$q$, 'true');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.eq('N94 an agent retracts an active row: expired', $q$SELECT t.dec(t.ridv('n83', 'active'), 'retract') || ' ' || t.states('n83')$q$, 'applied/expired/- deltafour:expired');
+SELECT t.eq('N94b one retract evidence row, authored by the user the agent acts for', $q$SELECT count(*) || '/' || min(e.author) FROM memory_evidence AS e WHERE e.memory_id = t.rid('n83', 'expired') AND e.op = 'retract'$q$, '1/00000000-0000-0000-0000-0000000005a1');
+SELECT t.eq('N94a an expired row is not live: decide is refused', $q$SELECT t.dec(t.rid('n83', 'expired'), 'retract')$q$, 'refused/expired/not_live');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', '00000000-0000-0000-0000-0000000000d1');
+SELECT t.eq('N95 setup for an agent retract of a provisional row', $q$SELECT t.rem('n85', 'epsilonfive')$q$, 'created/provisional');
+SELECT t.eq('N95a the agent retracts it: rejected', $q$SELECT t.dec(t.ridv('n85', 'provisional'), 'retract')$q$, 'applied/rejected/-');
+SELECT t.eq('N95b as_of never returns a rejected row', $q$SELECT count(*)::text FROM app_sec.memory_as_of('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-0000000e0a01', 'n85', current_date)$q$, '0');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000c1', NULL);
+SELECT t.eq('N95c a curator sees the one retract evidence row on the rejected row', $q$SELECT count(*)::text FROM memory_evidence AS e WHERE e.memory_id = t.rid('n85', 'rejected') AND e.op = 'retract'$q$, '1');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N96 setup: a live row and a challenger by the same author', $q$SELECT t.rem('n86', 'a', 'agreed') || ' ' || t.rem('n86', 'b')$q$, 'created/active challenged/challenger');
+SELECT t.eq('N96a the challenger author confirming it is only a reconfirm', $q$SELECT t.dec(t.ridv('n86', 'challenger'), 'confirm') || ' ' || t.states('n86')$q$, 'reconfirmed/challenger/- a:active,b:challenger');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a2', NULL);
+SELECT t.eq('N96b another contributor confirms the challenger: it replaces the live row', $q$SELECT t.dec(t.ridv('n86', 'challenger'), 'confirm') || ' ' || t.states('n86')$q$, 'applied/active/- a:superseded,b:active');
+SELECT t.eq('N96c the old row ends today, the new one points at it', $q$SELECT (SELECT (valid_to = current_date)::text FROM memory WHERE id = t.rid('n86', 'superseded')) || '/' || (SELECT (supersedes_id = t.rid('n86', 'superseded'))::text FROM memory WHERE id = t.rid('n86', 'active'))$q$, 'true/true');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000005a1', NULL);
+SELECT t.eq('N97 setup: a live row and a challenger', $q$SELECT t.rem('n87', 'a', 'agreed') || ' ' || t.rem('n87', 'b')$q$, 'created/active challenged/challenger');
+SELECT t.eq('N97a retracting the live row promotes the orphan challenger to the provisional live row', $q$SELECT t.dec(t.ridv('n87', 'active'), 'retract') || ' ' || t.states('n87')$q$, 'applied/expired/- a:expired,b:provisional');
+COMMIT;
+BEGIN; SELECT t.ctx('00000000-0000-0000-0000-0000000000f1', NULL);
+SELECT t.eq('N97c a reader without contributor rights is refused as not_live', $q$SELECT t.dec(t.rid('n87', 'provisional'), 'retract')$q$, 'refused/-/not_live');
+SELECT t.err('N97d decide needs a source ref', $q$SELECT app_sec.decide(t.rid('n87', 'provisional'), 'retract', 1, '[]')$q$, '22023');
+COMMIT;
 RESET ROLE;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DROP SCHEMA t CASCADE;

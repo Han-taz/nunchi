@@ -28,8 +28,17 @@ PROFILE = settings(
 
 TENANT_B = uuid.UUID("00000000-0000-0000-0000-0000000000c2")
 ROLES = ("reader", "contributor", "curator")
-STATUSES = ("proposed", "provisional", "active", "superseded", "rejected", "expired", "deleted")
-READABLE = ("active", "provisional", "superseded", "expired")
+STATUSES = (
+    "proposed",
+    "provisional",
+    "challenger",
+    "active",
+    "superseded",
+    "rejected",
+    "expired",
+    "deleted",
+)
+READABLE = ("active", "provisional", "challenger", "superseded", "expired")
 
 
 @dataclass(frozen=True)
