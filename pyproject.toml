@@ -34,7 +34,7 @@ dev = [
   "pytest>=8.3",
   "pytest-cov>=6.0",
   "ruff>=0.8",
-  "semgrep>=1.100",
+  "semgrep>=1.181.0",
 ]
 
 [build-system]
