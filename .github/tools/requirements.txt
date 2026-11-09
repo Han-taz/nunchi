@@ -2,7 +2,7 @@
 #    uv pip compile --generate-hashes --python-version 3.12 --python-platform linux -o .github/tools/requirements.txt .github/tools/requirements.in
 actionlint-py==1.7.12.25 \
     --hash=sha256:83f83be4cd317c79b15cbb7022787513a6994f00bfb2dd8da02fa4e62b4f640d
-    # via -r .github/tools/requirements.in
+    # via -r requirements.in
 chardet==7.6.0 \
     --hash=sha256:089e3bb81a0a07e94f15461ded9f9ee66d349615b1a9fd557d4de1003e2fc12e \
     --hash=sha256:0ad9bc6dab4f338673353fa3f0dc96122f559aaf746087408106e2fcbf132fe8 \
@@ -67,7 +67,7 @@ diff-cover==10.6.0 \
     # via sqlfluff
 editorconfig-checker==3.11.1 \
     --hash=sha256:043b5ae504bc2e6d4497ac4e3058f143339eb3cffd56abb7a215c44ebfd73a1b
-    # via -r .github/tools/requirements.in
+    # via -r requirements.in
 jinja2==3.1.6 \
     --hash=sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d \
     --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
@@ -318,7 +318,7 @@ pyyaml==6.0.3 \
     --hash=sha256:fa160448684b4e94d80416c0fa4aac48967a969efe22931448d853ada8baf926 \
     --hash=sha256:fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0
     # via
-    #   -r .github/tools/requirements.in
+    #   -r requirements.in
     #   sqlfluff
 regex==2026.9.29 \
     --hash=sha256:01000ddf0e3ffef97f2413ceb514f6313040106b6d18a03ee00a4fe35c1eb1db \
@@ -458,11 +458,11 @@ shellcheck-py==0.11.0.1 \
     --hash=sha256:6b88d0a244c82ed07e06a53e444da841f69330ca59ae15d4a66c391655dae7a0 \
     --hash=sha256:784156289ecb17e91c692cd783ab5152333309588cabb10032a047331c63e759 \
     --hash=sha256:b6a3fee28efda2e16e38d6e6d59faf7224300256456639727370d404730849e8
-    # via -r .github/tools/requirements.in
-sqlfluff==4.4.0 \
-    --hash=sha256:4d2607466624c8e6275d2bcafd3202c940a4bc6622955909b9a68411b03cd443 \
-    --hash=sha256:65b1f139534ae1f18ca6e9ec1b24b09598d0b95d1336f927bf39d399ecb39109
-    # via -r .github/tools/requirements.in
+    # via -r requirements.in
+sqlfluff==4.5.0 \
+    --hash=sha256:0b0d5b2cca03e7d138b8d899249fed5fa54083e407bbd161449c0b30f901b7b8 \
+    --hash=sha256:471a9abcad8061e36b69f711a6d89393241e30f9d1e0869f79965c0ae2c889c7
+    # via -r requirements.in
 tblib==3.2.2 \
     --hash=sha256:26bdccf339bcce6a88b2b5432c988b266ebbe63a4e593f6b578b1d2e723d2b76 \
     --hash=sha256:e9a652692d91bf4f743d4a15bc174c0b76afc750fe8c7b6d195cc1c1d6d2ccec
@@ -483,4 +483,4 @@ zizmor==1.30.1 \
     --hash=sha256:cbb7e5cb2fec471066d5c326bcaa69ed3eefdcf6a76d7ad38335b924acf86c07 \
     --hash=sha256:eee12266b793cb87ad4a7e3af2e72404f8a63e3de5eb099b80bf7b1cfd232a8e \
     --hash=sha256:f9eb092f089e35fa9fb3b70aeec0a19eca7dacf2ab161f1d50b18351895f085c
-    # via -r .github/tools/requirements.in
+    # via -r requirements.in
